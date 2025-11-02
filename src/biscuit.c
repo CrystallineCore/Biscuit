@@ -38,7 +38,7 @@
  PG_MODULE_MAGIC;
  #endif
 
-#define BISCUIT_VERSION "1.0.0-Biscuit"
+#define BISCUIT_VERSION "1.0.3-Biscuit"
 
 PG_FUNCTION_INFO_V1(biscuit_version);
 Datum biscuit_version(PG_FUNCTION_ARGS)
@@ -52,19 +52,19 @@ Datum biscuit_version(PG_FUNCTION_ARGS)
  
  typedef roaring_bitmap_t RoaringBitmap;
  
- static inline RoaringBitmap* roaring_create(void) { return roaring_bitmap_create(); }
- static inline void roaring_add(RoaringBitmap *rb, uint32_t value) { roaring_bitmap_add(rb, value); }
- static inline void roaring_remove(RoaringBitmap *rb, uint32_t value) { roaring_bitmap_remove(rb, value); }
- static inline uint64_t roaring_count(const RoaringBitmap *rb) { return roaring_bitmap_get_cardinality(rb); }
- static inline bool roaring_is_empty(const RoaringBitmap *rb) { return roaring_bitmap_get_cardinality(rb) == 0; }
- static inline void roaring_free(RoaringBitmap *rb) { if (rb) roaring_bitmap_free(rb); }
- static inline RoaringBitmap* roaring_copy(const RoaringBitmap *rb) { return roaring_bitmap_copy(rb); }
- static inline void roaring_and_inplace(RoaringBitmap *a, const RoaringBitmap *b) { roaring_bitmap_and_inplace(a, b); }
- static inline void roaring_or_inplace(RoaringBitmap *a, const RoaringBitmap *b) { roaring_bitmap_or_inplace(a, b); }
- static inline void roaring_andnot_inplace(RoaringBitmap *a, const RoaringBitmap *b) { roaring_bitmap_andnot_inplace(a, b); }
- static inline size_t roaring_size_bytes(const RoaringBitmap *rb) { return roaring_bitmap_size_in_bytes(rb); }
+ static inline RoaringBitmap* biscuit_roaring_create(void) { return roaring_bitmap_create(); }
+ static inline void biscuit_roaring_add(RoaringBitmap *rb, uint32_t value) { roaring_bitmap_add(rb, value); }
+ static inline void biscuit_roaring_remove(RoaringBitmap *rb, uint32_t value) { roaring_bitmap_remove(rb, value); }
+ static inline uint64_t biscuit_roaring_count(const RoaringBitmap *rb) { return roaring_bitmap_get_cardinality(rb); }
+ static inline bool biscuit_roaring_is_empty(const RoaringBitmap *rb) { return roaring_bitmap_get_cardinality(rb) == 0; }
+ static inline void biscuit_roaring_free(RoaringBitmap *rb) { if (rb) roaring_bitmap_free(rb); }
+ static inline RoaringBitmap* biscuit_roaring_copy(const RoaringBitmap *rb) { return roaring_bitmap_copy(rb); }
+ static inline void biscuit_roaring_and_inplace(RoaringBitmap *a, const RoaringBitmap *b) { roaring_bitmap_and_inplace(a, b); }
+ static inline void biscuit_roaring_or_inplace(RoaringBitmap *a, const RoaringBitmap *b) { roaring_bitmap_or_inplace(a, b); }
+ static inline void biscuit_roaring_andnot_inplace(RoaringBitmap *a, const RoaringBitmap *b) { roaring_bitmap_andnot_inplace(a, b); }
+ static inline size_t biscuit_roaring_size_bytes(const RoaringBitmap *rb) { return roaring_bitmap_size_in_bytes(rb); }
 
- static inline uint32_t* roaring_to_array(const RoaringBitmap *rb, uint64_t *count)
+ static inline uint32_t* biscuit_roaring_to_array(const RoaringBitmap *rb, uint64_t *count)
  {
      uint32_t *array;
      *count = roaring_bitmap_get_cardinality(rb);
@@ -84,7 +84,7 @@ Datum biscuit_version(PG_FUNCTION_ARGS)
      bool is_palloc;
  } RoaringBitmap;
  
- static inline RoaringBitmap* roaring_create(void)
+ static inline RoaringBitmap* biscuit_roaring_create(void)
  {
      RoaringBitmap *rb = (RoaringBitmap *)palloc(sizeof(RoaringBitmap));
      rb->num_blocks = 0;
@@ -94,7 +94,7 @@ Datum biscuit_version(PG_FUNCTION_ARGS)
      return rb;
  }
  
- static inline void roaring_add(RoaringBitmap *rb, uint32_t value)
+ static inline void biscuit_roaring_add(RoaringBitmap *rb, uint32_t value)
  {
      int block = value >> 6;
      int bit = value & 63;
@@ -118,7 +118,7 @@ Datum biscuit_version(PG_FUNCTION_ARGS)
      rb->blocks[block] |= (1ULL << bit);
  }
  
- static inline void roaring_remove(RoaringBitmap *rb, uint32_t value)
+ static inline void biscuit_roaring_remove(RoaringBitmap *rb, uint32_t value)
  {
      int block = value >> 6;
      int bit = value & 63;
@@ -127,7 +127,7 @@ Datum biscuit_version(PG_FUNCTION_ARGS)
          rb->blocks[block] &= ~(1ULL << bit);
  }
  
- static inline uint64_t roaring_count(const RoaringBitmap *rb)
+ static inline uint64_t biscuit_roaring_count(const RoaringBitmap *rb)
  {
      uint64_t count = 0;
      int i;
@@ -136,7 +136,7 @@ Datum biscuit_version(PG_FUNCTION_ARGS)
      return count;
  }
  
- static inline bool roaring_is_empty(const RoaringBitmap *rb)
+ static inline bool biscuit_roaring_is_empty(const RoaringBitmap *rb)
  {
      int i;
      for (i = 0; i < rb->num_blocks; i++)
@@ -145,13 +145,13 @@ Datum biscuit_version(PG_FUNCTION_ARGS)
      return true;
  }
  
- static inline uint32_t* roaring_to_array(const RoaringBitmap *rb, uint64_t *count)
+ static inline uint32_t* biscuit_roaring_to_array(const RoaringBitmap *rb, uint64_t *count)
  {
      uint32_t *array;
      int idx = 0, i;
      uint64_t bits, base;
      
-     *count = roaring_count(rb);
+     *count = biscuit_roaring_count(rb);
      if (*count == 0)
          return NULL;
      
@@ -173,12 +173,12 @@ Datum biscuit_version(PG_FUNCTION_ARGS)
      return array;
  }
  
- static inline size_t roaring_size_bytes(const RoaringBitmap *rb)
+ static inline size_t biscuit_roaring_size_bytes(const RoaringBitmap *rb)
  {
      return sizeof(RoaringBitmap) + rb->capacity * sizeof(uint64_t);
  }
  
- static inline void roaring_free(RoaringBitmap *rb)
+ static inline void biscuit_roaring_free(RoaringBitmap *rb)
  {
      if (rb)
      {
@@ -188,9 +188,9 @@ Datum biscuit_version(PG_FUNCTION_ARGS)
      }
  }
  
- static inline RoaringBitmap* roaring_copy(const RoaringBitmap *rb)
+ static inline RoaringBitmap* biscuit_roaring_copy(const RoaringBitmap *rb)
  {
-     RoaringBitmap *copy = roaring_create();
+     RoaringBitmap *copy = biscuit_roaring_create();
      
      if (rb->num_blocks > 0)
      {
@@ -203,7 +203,7 @@ Datum biscuit_version(PG_FUNCTION_ARGS)
      return copy;
  }
  
- static inline void roaring_and_inplace(RoaringBitmap *a, const RoaringBitmap *b)
+ static inline void biscuit_roaring_and_inplace(RoaringBitmap *a, const RoaringBitmap *b)
  {
      int min_blocks = (a->num_blocks < b->num_blocks) ? a->num_blocks : b->num_blocks;
      int i;
@@ -217,7 +217,7 @@ Datum biscuit_version(PG_FUNCTION_ARGS)
      a->num_blocks = min_blocks;
  }
  
- static inline void roaring_or_inplace(RoaringBitmap *a, const RoaringBitmap *b)
+ static inline void biscuit_roaring_or_inplace(RoaringBitmap *a, const RoaringBitmap *b)
  {
      int i;
      
@@ -248,7 +248,7 @@ Datum biscuit_version(PG_FUNCTION_ARGS)
      }
  }
  
- static inline void roaring_andnot_inplace(RoaringBitmap *a, const RoaringBitmap *b)
+ static inline void biscuit_roaring_andnot_inplace(RoaringBitmap *a, const RoaringBitmap *b)
  {
      int min_blocks = (a->num_blocks < b->num_blocks) ? a->num_blocks : b->num_blocks;
      int i;
@@ -335,15 +335,15 @@ Datum biscuit_version(PG_FUNCTION_ARGS)
  static MemoryContext index_context = NULL;
  
  /* ==================== FORWARD DECLARATIONS ==================== */
- static void cleanup_tombstones(void);
- static RoaringBitmap* get_pos_bitmap(unsigned char ch, int pos);
- static RoaringBitmap* get_neg_bitmap(unsigned char ch, int neg_offset);
- static void set_pos_bitmap(unsigned char ch, int pos, RoaringBitmap *bm);
- static void set_neg_bitmap(unsigned char ch, int neg_offset, RoaringBitmap *bm);
+ static void biscuit_cleanup_tombstones(void);
+ static RoaringBitmap* biscuit_get_pos_bitmap(unsigned char ch, int pos);
+ static RoaringBitmap* biscuit_get_neg_bitmap(unsigned char ch, int neg_offset);
+ static void biscuit_set_pos_bitmap(unsigned char ch, int pos, RoaringBitmap *bm);
+ static void biscuit_set_neg_bitmap(unsigned char ch, int neg_offset, RoaringBitmap *bm);
  
  /* ==================== HASH TABLE & LAZY DELETION ==================== */
  
-static void init_pk_hash_table(void)
+static void biscuit_init_pk_hash_table(void)
 {
     HASHCTL ctl;
     
@@ -364,7 +364,7 @@ static void init_pk_hash_table(void)
  
 
  /* Convert any Datum to string representation for use as hash key */
- static char* datum_to_pk_string(Datum pk_datum, Oid pk_type, bool *isnull)
+ static char* biscuit_datum_to_pk_string(Datum pk_datum, Oid pk_type, bool *isnull)
  {
      char *result;
      Oid typoutput;
@@ -409,7 +409,7 @@ static void init_pk_hash_table(void)
      return result;
  }
 
- static int32_t find_index_by_pk_debug(const char *pk_str, bool log_details)
+ static int32_t biscuit_biscuit_find_index_by_pk_debug(const char *pk_str, bool log_details)
  {
      PKMapEntry *entry;
      bool found;
@@ -418,12 +418,12 @@ static void init_pk_hash_table(void)
      if (!global_index || !global_index->pk_to_index || !pk_str)
      {
          if (log_details)
-             elog(NOTICE, "find_index_by_pk: NULL check failed");
+             elog(NOTICE, "biscuit_find_index_by_pk: NULL check failed");
          return -1;
      }
      
      if (log_details)
-         elog(NOTICE, "find_index_by_pk: Looking up '%s'", pk_str);
+         elog(NOTICE, "biscuit_find_index_by_pk: Looking up '%s'", pk_str);
      
      /* Create fixed-size key */
      MemSet(key, 0, NAMEDATALEN);
@@ -439,23 +439,23 @@ static void init_pk_hash_table(void)
      if (!found)
      {
          if (log_details)
-             elog(NOTICE, "find_index_by_pk: Key '%s' NOT FOUND in hash table", pk_str);
+             elog(NOTICE, "biscuit_find_index_by_pk: Key '%s' NOT FOUND in hash table", pk_str);
          return -1;
      }
      
      if (log_details)
-         elog(NOTICE, "find_index_by_pk: Found index %u for key '%s'", entry->idx, pk_str);
+         elog(NOTICE, "biscuit_find_index_by_pk: Found index %u for key '%s'", entry->idx, pk_str);
      
      /* Check tombstones */
      if (global_index->lazy_del.tombstones && 
-         roaring_count(global_index->lazy_del.tombstones) > 0)
+         biscuit_roaring_count(global_index->lazy_del.tombstones) > 0)
      {
          uint32_t idx = entry->idx;
          #ifdef HAVE_ROARING
          if (roaring_bitmap_contains(global_index->lazy_del.tombstones, idx))
          {
              if (log_details)
-                 elog(NOTICE, "find_index_by_pk: Index %u is tombstoned", idx);
+                 elog(NOTICE, "biscuit_find_index_by_pk: Index %u is tombstoned", idx);
              return -1;
          }
          #else
@@ -465,7 +465,7 @@ static void init_pk_hash_table(void)
              (global_index->lazy_del.tombstones->blocks[block] & (1ULL << bit)))
          {
              if (log_details)
-                 elog(NOTICE, "find_index_by_pk: Index %u is tombstoned", idx);
+                 elog(NOTICE, "biscuit_find_index_by_pk: Index %u is tombstoned", idx);
              return -1;
          }
          #endif
@@ -473,12 +473,12 @@ static void init_pk_hash_table(void)
      
      return entry->idx;
  }
-static int32_t find_index_by_pk(const char *pk_str)
+static int32_t biscuit_find_index_by_pk(const char *pk_str)
 {
-    return find_index_by_pk_debug(pk_str, false);
+    return biscuit_biscuit_find_index_by_pk_debug(pk_str, false);
 }
 
-static void add_pk_mapping(const char *pk_str, uint32_t idx)
+static void biscuit_add_pk_mapping(const char *pk_str, uint32_t idx)
 {
     PKMapEntry *entry;
     bool found;
@@ -500,17 +500,17 @@ static void add_pk_mapping(const char *pk_str, uint32_t idx)
     
     if (found)
     {
-        //elog(WARNING, "add_pk_mapping: Key '%s' already exists, updating index %u -> %u", pk_str, entry->idx, idx);
+        //elog(WARNING, "biscuit_add_pk_mapping: Key '%s' already exists, updating index %u -> %u", pk_str, entry->idx, idx);
     }
     else
     {
-        //elog(DEBUG1, "add_pk_mapping: Added key '%s' -> index %u", pk_str, idx);
+        //elog(DEBUG1, "biscuit_add_pk_mapping: Added key '%s' -> index %u", pk_str, idx);
     }
     
     entry->idx = idx;
 }
 
-static void remove_pk_mapping(const char *pk_str)
+static void biscuit_remove_pk_mapping(const char *pk_str)
 {
     char key[NAMEDATALEN];
     
@@ -529,9 +529,9 @@ static void remove_pk_mapping(const char *pk_str)
         NULL
     );
 }
- static void init_lazy_deletion(void)
+ static void biscuit_init_lazy_deletion(void)
  {
-     global_index->lazy_del.tombstones = roaring_create();
+     global_index->lazy_del.tombstones = biscuit_roaring_create();
      global_index->lazy_del.tombstone_count = 0;
      global_index->lazy_del.tombstone_threshold = TOMBSTONE_CLEANUP_THRESHOLD;
      global_index->lazy_del.tombstone_capacity = 64;
@@ -543,7 +543,7 @@ static void remove_pk_mapping(const char *pk_str)
      global_index->lazy_del.items_cleaned = 0;
  }
  
- static void cleanup_tombstones(void)
+ static void biscuit_cleanup_tombstones(void)
 {
     int ch, j, i, cleaned = 0;
     
@@ -567,16 +567,16 @@ static void remove_pk_mapping(const char *pk_str)
     {
         CharIndex *pos_cidx = &global_index->pos_idx[ch];
         for (j = 0; j < pos_cidx->count; j++)
-            roaring_andnot_inplace(pos_cidx->entries[j].bitmap, 
+            biscuit_roaring_andnot_inplace(pos_cidx->entries[j].bitmap, 
                                    global_index->lazy_del.tombstones);
         
         CharIndex *neg_cidx = &global_index->neg_idx[ch];
         for (j = 0; j < neg_cidx->count; j++)
-            roaring_andnot_inplace(neg_cidx->entries[j].bitmap,
+            biscuit_roaring_andnot_inplace(neg_cidx->entries[j].bitmap,
                                    global_index->lazy_del.tombstones);
         
         if (global_index->char_cache[ch])
-            roaring_andnot_inplace(global_index->char_cache[ch],
+            biscuit_roaring_andnot_inplace(global_index->char_cache[ch],
                                    global_index->lazy_del.tombstones);
     }
     
@@ -584,21 +584,21 @@ static void remove_pk_mapping(const char *pk_str)
     for (j = 0; j < global_index->length_idx.max_length; j++)
     {
         if (global_index->length_idx.length_bitmaps[j])
-            roaring_andnot_inplace(global_index->length_idx.length_bitmaps[j],
+            biscuit_roaring_andnot_inplace(global_index->length_idx.length_bitmaps[j],
                                    global_index->lazy_del.tombstones);
     }
     
     global_index->lazy_del.items_cleaned += cleaned;
     global_index->lazy_del.total_cleanups++;
     
-    roaring_free(global_index->lazy_del.tombstones);
-    global_index->lazy_del.tombstones = roaring_create();
+    biscuit_roaring_free(global_index->lazy_del.tombstones);
+    global_index->lazy_del.tombstones = biscuit_roaring_create();
     global_index->lazy_del.tombstone_count = 0;
 }
  
  /* ==================== FREE LIST ==================== */
  
- static void init_free_list(FreeList *fl)
+ static void biscuit_init_free_list(FreeList *fl)
  {
      fl->capacity = 64;
      fl->count = 0;
@@ -606,7 +606,7 @@ static void remove_pk_mapping(const char *pk_str)
                                                         fl->capacity * sizeof(uint32_t));
  }
  
- static void push_free_index(FreeList *fl, uint32_t idx)
+ static void biscuit_push_free_index(FreeList *fl, uint32_t idx)
  {
      if (fl->count >= fl->capacity)
      {
@@ -620,7 +620,7 @@ static void remove_pk_mapping(const char *pk_str)
      fl->free_indices[fl->count++] = idx;
  }
  
- static bool pop_free_index(FreeList *fl, uint32_t *idx)
+ static bool biscuit_pop_free_index(FreeList *fl, uint32_t *idx)
  {
      if (fl->count == 0)
          return false;
@@ -630,7 +630,7 @@ static void remove_pk_mapping(const char *pk_str)
  
  /* ==================== BITMAP ACCESS FUNCTIONS ==================== */
  
- static inline RoaringBitmap* get_pos_bitmap(unsigned char ch, int pos)
+ static inline RoaringBitmap* biscuit_get_pos_bitmap(unsigned char ch, int pos)
  {
      CharIndex *cidx = &global_index->pos_idx[ch];
      int left = 0, right = cidx->count - 1;
@@ -649,7 +649,7 @@ static void remove_pk_mapping(const char *pk_str)
      return NULL;
  }
  
- static inline RoaringBitmap* get_neg_bitmap(unsigned char ch, int neg_offset)
+ static inline RoaringBitmap* biscuit_get_neg_bitmap(unsigned char ch, int neg_offset)
  {
      CharIndex *cidx = &global_index->neg_idx[ch];
      int left = 0, right = cidx->count - 1;
@@ -668,7 +668,7 @@ static void remove_pk_mapping(const char *pk_str)
      return NULL;
  }
  
- static void set_pos_bitmap(unsigned char ch, int pos, RoaringBitmap *bm)
+ static void biscuit_set_pos_bitmap(unsigned char ch, int pos, RoaringBitmap *bm)
  {
      CharIndex *cidx = &global_index->pos_idx[ch];
      int i, left = 0, right = cidx->count - 1;
@@ -709,7 +709,7 @@ static void remove_pk_mapping(const char *pk_str)
      cidx->count++;
  }
  
- static void set_neg_bitmap(unsigned char ch, int neg_offset, RoaringBitmap *bm)
+ static void biscuit_set_neg_bitmap(unsigned char ch, int neg_offset, RoaringBitmap *bm)
  {
      CharIndex *cidx = &global_index->neg_idx[ch];
      int i, left = 0, right = cidx->count - 1;
@@ -752,78 +752,78 @@ static void remove_pk_mapping(const char *pk_str)
  
  /* ==================== PATTERN MATCHING UTILITY FUNCTIONS ==================== */
  
- static RoaringBitmap* get_length_ge(int min_len)
+ static RoaringBitmap* biscuit_get_length_ge(int min_len)
  {
-     RoaringBitmap *result = roaring_create();
+     RoaringBitmap *result = biscuit_roaring_create();
      int len;
      
      for (len = min_len; len < global_index->length_idx.max_length; len++)
      {
          if (global_index->length_idx.length_bitmaps[len])
          {
-             RoaringBitmap *filtered = roaring_copy(global_index->length_idx.length_bitmaps[len]);
+             RoaringBitmap *filtered = biscuit_roaring_copy(global_index->length_idx.length_bitmaps[len]);
              
              /* Filter tombstones */
              if (global_index->lazy_del.tombstone_count > 0)
-                 roaring_andnot_inplace(filtered, global_index->lazy_del.tombstones);
+                 biscuit_roaring_andnot_inplace(filtered, global_index->lazy_del.tombstones);
              
-             roaring_or_inplace(result, filtered);
-             roaring_free(filtered);
+             biscuit_roaring_or_inplace(result, filtered);
+             biscuit_roaring_free(filtered);
          }
      }
      
      return result;
  }
  
- static RoaringBitmap* get_any_char_at_pos(int pos)
+ static RoaringBitmap* biscuit_get_any_char_at_pos(int pos)
  {
-     RoaringBitmap *result = roaring_create();
+     RoaringBitmap *result = biscuit_roaring_create();
      int ch;
      
      for (ch = 0; ch < CHAR_RANGE; ch++)
      {
-         RoaringBitmap *char_bm = get_pos_bitmap((unsigned char)ch, pos);
+         RoaringBitmap *char_bm = biscuit_get_pos_bitmap((unsigned char)ch, pos);
          if (char_bm)
          {
-             RoaringBitmap *filtered = roaring_copy(char_bm);
+             RoaringBitmap *filtered = biscuit_roaring_copy(char_bm);
              
              /* Filter tombstones */
              if (global_index->lazy_del.tombstone_count > 0)
-                 roaring_andnot_inplace(filtered, global_index->lazy_del.tombstones);
+                 biscuit_roaring_andnot_inplace(filtered, global_index->lazy_del.tombstones);
              
-             roaring_or_inplace(result, filtered);
-             roaring_free(filtered);
+             biscuit_roaring_or_inplace(result, filtered);
+             biscuit_roaring_free(filtered);
          }
      }
      
      return result;
  }
  
- static RoaringBitmap* get_any_char_at_neg(int neg_pos)
+ static RoaringBitmap* biscuit_get_any_char_at_neg(int neg_pos)
  {
-     RoaringBitmap *result = roaring_create();
+     RoaringBitmap *result = biscuit_roaring_create();
      int ch;
      
      for (ch = 0; ch < CHAR_RANGE; ch++)
      {
-         RoaringBitmap *char_bm = get_neg_bitmap((unsigned char)ch, neg_pos);
+         RoaringBitmap *char_bm = biscuit_get_neg_bitmap((unsigned char)ch, neg_pos);
          if (char_bm)
          {
-             RoaringBitmap *filtered = roaring_copy(char_bm);
+             RoaringBitmap *filtered = biscuit_roaring_copy(char_bm);
              
              /* Filter tombstones */
              if (global_index->lazy_del.tombstone_count > 0)
-                 roaring_andnot_inplace(filtered, global_index->lazy_del.tombstones);
+                 biscuit_roaring_andnot_inplace(filtered, global_index->lazy_del.tombstones);
              
-             roaring_or_inplace(result, filtered);
-             roaring_free(filtered);
+             biscuit_roaring_or_inplace(result, filtered);
+             biscuit_roaring_free(filtered);
          }
      }
      
      return result;
  }
  
- static RoaringBitmap* match_part_at_pos(const char *part, int part_len, int start_pos)
+ static RoaringBitmap* biscuit_match_part_at_pos(const char *part, int part_len, int start_pos)
  {
      RoaringBitmap *result = NULL;
      int i;
@@ -834,39 +834,39 @@ static void remove_pk_mapping(const char *pk_str)
          
          if (part[i] == '_')
          {
-             char_bm = get_any_char_at_pos(start_pos + i);
+             char_bm = biscuit_get_any_char_at_pos(start_pos + i);
          }
          else
          {
-             char_bm = get_pos_bitmap((unsigned char)part[i], start_pos + i);
+             char_bm = biscuit_get_pos_bitmap((unsigned char)part[i], start_pos + i);
              if (!char_bm)
              {
                  if (result)
-                     roaring_free(result);
-                 return roaring_create();
+                     biscuit_roaring_free(result);
+                 return biscuit_roaring_create();
              }
-             char_bm = roaring_copy(char_bm);
+             char_bm = biscuit_roaring_copy(char_bm);
              
              /* Filter tombstones */
              if (global_index->lazy_del.tombstone_count > 0)
-                 roaring_andnot_inplace(char_bm, global_index->lazy_del.tombstones);
+                 biscuit_roaring_andnot_inplace(char_bm, global_index->lazy_del.tombstones);
          }
          
          if (!result)
              result = char_bm;
          else
          {
-             roaring_and_inplace(result, char_bm);
-             roaring_free(char_bm);
-             if (roaring_is_empty(result))
+             biscuit_roaring_and_inplace(result, char_bm);
+             biscuit_roaring_free(char_bm);
+             if (biscuit_roaring_is_empty(result))
                  return result;
          }
      }
      
-     return result ? result : roaring_create();
+     return result ? result : biscuit_roaring_create();
  }
  
- static RoaringBitmap* match_part_at_end(const char *part, int part_len)
+ static RoaringBitmap* biscuit_match_part_at_end(const char *part, int part_len)
  {
      RoaringBitmap *result = NULL;
      int i;
@@ -878,55 +878,55 @@ static void remove_pk_mapping(const char *pk_str)
          
          if (part[i] == '_')
          {
-             char_bm = get_any_char_at_neg(neg_pos);
+             char_bm = biscuit_get_any_char_at_neg(neg_pos);
          }
          else
          {
-             char_bm = get_neg_bitmap((unsigned char)part[i], neg_pos);
+             char_bm = biscuit_get_neg_bitmap((unsigned char)part[i], neg_pos);
              if (!char_bm)
              {
                  if (result)
-                     roaring_free(result);
-                 return roaring_create();
+                     biscuit_roaring_free(result);
+                 return biscuit_roaring_create();
              }
-             char_bm = roaring_copy(char_bm);
+             char_bm = biscuit_roaring_copy(char_bm);
              
              /* Filter tombstones */
              if (global_index->lazy_del.tombstone_count > 0)
-                 roaring_andnot_inplace(char_bm, global_index->lazy_del.tombstones);
+                 biscuit_roaring_andnot_inplace(char_bm, global_index->lazy_del.tombstones);
          }
          
          if (!result)
              result = char_bm;
          else
          {
-             roaring_and_inplace(result, char_bm);
-             roaring_free(char_bm);
-             if (roaring_is_empty(result))
+             biscuit_roaring_and_inplace(result, char_bm);
+             biscuit_roaring_free(char_bm);
+             if (biscuit_roaring_is_empty(result))
                  return result;
          }
      }
      
-     return result ? result : roaring_create();
+     return result ? result : biscuit_roaring_create();
  }
  
- static RoaringBitmap* match_part_anywhere(const char *part, int part_len)
+ static RoaringBitmap* biscuit_match_part_anywhere(const char *part, int part_len)
  {
-     RoaringBitmap *result = roaring_create();
+     RoaringBitmap *result = biscuit_roaring_create();
      int pos;
      
      for (pos = 0; pos <= global_index->max_len - part_len; pos++)
      {
-         RoaringBitmap *match = match_part_at_pos(part, part_len, pos);
-         if (!roaring_is_empty(match))
-             roaring_or_inplace(result, match);
-         roaring_free(match);
+         RoaringBitmap *match = biscuit_match_part_at_pos(part, part_len, pos);
+         if (!biscuit_roaring_is_empty(match))
+             biscuit_roaring_or_inplace(result, match);
+         biscuit_roaring_free(match);
      }
      
      return result;
  }
  
- static void recursive_windowed_match(
+ static void biscuit_recursive_windowed_match(
      RoaringBitmap *result,
      const char **parts,
      int *part_lens,
@@ -942,7 +942,7 @@ static void remove_pk_mapping(const char *pk_str)
      
      if (part_idx >= part_count)
      {
-         roaring_or_inplace(result, current_candidates);
+         biscuit_roaring_or_inplace(result, current_candidates);
          return;
      }
      
@@ -954,30 +954,30 @@ static void remove_pk_mapping(const char *pk_str)
      
      if (part_idx == part_count - 1 && !ends_percent)
      {
-         RoaringBitmap *last_match = match_part_at_end(parts[part_idx], part_lens[part_idx]);
-         roaring_and_inplace(last_match, current_candidates);
-         roaring_or_inplace(result, last_match);
-         roaring_free(last_match);
+         RoaringBitmap *last_match = biscuit_match_part_at_end(parts[part_idx], part_lens[part_idx]);
+         biscuit_roaring_and_inplace(last_match, current_candidates);
+         biscuit_roaring_or_inplace(result, last_match);
+         biscuit_roaring_free(last_match);
          return;
      }
      
      for (pos = min_pos; pos <= max_pos - part_lens[part_idx]; pos++)
      {
-         RoaringBitmap *part_at_pos = match_part_at_pos(parts[part_idx], part_lens[part_idx], pos);
+         RoaringBitmap *part_at_pos = biscuit_match_part_at_pos(parts[part_idx], part_lens[part_idx], pos);
          
-         roaring_and_inplace(part_at_pos, current_candidates);
+         biscuit_roaring_and_inplace(part_at_pos, current_candidates);
          
-         if (!roaring_is_empty(part_at_pos))
+         if (!biscuit_roaring_is_empty(part_at_pos))
          {
-             recursive_windowed_match(result, parts, part_lens, part_count, ends_percent,
+             biscuit_recursive_windowed_match(result, parts, part_lens, part_count, ends_percent,
                                      part_idx + 1, pos + part_lens[part_idx], part_at_pos, max_len);
          }
          
-         roaring_free(part_at_pos);
+         biscuit_roaring_free(part_at_pos);
      }
  }
  
- static RoaringBitmap* match_multipart_windowed_positions(
+ static RoaringBitmap* biscuit_match_multipart_windowed_positions(
      const char **parts, 
      int *part_lens, 
      int part_count,
@@ -985,7 +985,7 @@ static void remove_pk_mapping(const char *pk_str)
      bool ends_percent
  )
  {
-     RoaringBitmap *result = roaring_create();
+     RoaringBitmap *result = biscuit_roaring_create();
      int min_len = 0;
      int i;
      
@@ -998,83 +998,83 @@ static void remove_pk_mapping(const char *pk_str)
          
          if (!starts_percent && !ends_percent)
          {
-             match = match_part_at_pos(parts[0], part_lens[0], 0);
+             match = biscuit_match_part_at_pos(parts[0], part_lens[0], 0);
              length_filter = (part_lens[0] < global_index->length_idx.max_length) ?
-                 roaring_copy(global_index->length_idx.length_bitmaps[part_lens[0]]) : roaring_create();
+                 biscuit_roaring_copy(global_index->length_idx.length_bitmaps[part_lens[0]]) : biscuit_roaring_create();
              
              /* Filter tombstones from length bitmap */
              if (global_index->lazy_del.tombstone_count > 0)
-                 roaring_andnot_inplace(length_filter, global_index->lazy_del.tombstones);
+                 biscuit_roaring_andnot_inplace(length_filter, global_index->lazy_del.tombstones);
              
-             roaring_and_inplace(match, length_filter);
-             roaring_free(length_filter);
+             biscuit_roaring_and_inplace(match, length_filter);
+             biscuit_roaring_free(length_filter);
              return match;
          }
          else if (!starts_percent)
          {
-             match = match_part_at_pos(parts[0], part_lens[0], 0);
-             length_filter = get_length_ge(part_lens[0]);
-             roaring_and_inplace(match, length_filter);
-             roaring_free(length_filter);
+             match = biscuit_match_part_at_pos(parts[0], part_lens[0], 0);
+             length_filter = biscuit_get_length_ge(part_lens[0]);
+             biscuit_roaring_and_inplace(match, length_filter);
+             biscuit_roaring_free(length_filter);
              return match;
          }
          else if (!ends_percent)
          {
-             match = match_part_at_end(parts[0], part_lens[0]);
-             length_filter = get_length_ge(part_lens[0]);
-             roaring_and_inplace(match, length_filter);
-             roaring_free(length_filter);
+             match = biscuit_match_part_at_end(parts[0], part_lens[0]);
+             length_filter = biscuit_get_length_ge(part_lens[0]);
+             biscuit_roaring_and_inplace(match, length_filter);
+             biscuit_roaring_free(length_filter);
              return match;
          }
          else
          {
-             return match_part_anywhere(parts[0], part_lens[0]);
+             return biscuit_match_part_anywhere(parts[0], part_lens[0]);
          }
      }
      
      if (part_count == 2 && !starts_percent && !ends_percent)
      {
-         RoaringBitmap *prefix = match_part_at_pos(parts[0], part_lens[0], 0);
-         RoaringBitmap *suffix = match_part_at_end(parts[1], part_lens[1]);
-         RoaringBitmap *length_filter = get_length_ge(min_len);
+         RoaringBitmap *prefix = biscuit_match_part_at_pos(parts[0], part_lens[0], 0);
+         RoaringBitmap *suffix = biscuit_match_part_at_end(parts[1], part_lens[1]);
+         RoaringBitmap *length_filter = biscuit_get_length_ge(min_len);
          
-         roaring_and_inplace(prefix, suffix);
-         roaring_and_inplace(prefix, length_filter);
-         roaring_free(suffix);
-         roaring_free(length_filter);
+         biscuit_roaring_and_inplace(prefix, suffix);
+         biscuit_roaring_and_inplace(prefix, length_filter);
+         biscuit_roaring_free(suffix);
+         biscuit_roaring_free(length_filter);
          return prefix;
      }
      
-     RoaringBitmap *initial_candidates = get_length_ge(min_len);
+     RoaringBitmap *initial_candidates = biscuit_get_length_ge(min_len);
      
-     if (roaring_is_empty(initial_candidates))
+     if (biscuit_roaring_is_empty(initial_candidates))
      {
-         roaring_free(initial_candidates);
+         biscuit_roaring_free(initial_candidates);
          return result;
      }
      
      if (!starts_percent)
      {
-         RoaringBitmap *first_match = match_part_at_pos(parts[0], part_lens[0], 0);
-         roaring_and_inplace(initial_candidates, first_match);
-         roaring_free(first_match);
+         RoaringBitmap *first_match = biscuit_match_part_at_pos(parts[0], part_lens[0], 0);
+         biscuit_roaring_and_inplace(initial_candidates, first_match);
+         biscuit_roaring_free(first_match);
          
-         if (roaring_is_empty(initial_candidates))
+         if (biscuit_roaring_is_empty(initial_candidates))
          {
-             roaring_free(initial_candidates);
+             biscuit_roaring_free(initial_candidates);
              return result;
          }
          
-         recursive_windowed_match(result, parts, part_lens, part_count, ends_percent,
+         biscuit_recursive_windowed_match(result, parts, part_lens, part_count, ends_percent,
                                  1, part_lens[0], initial_candidates, global_index->max_len);
      }
      else
      {
-         recursive_windowed_match(result, parts, part_lens, part_count, ends_percent,
+         biscuit_recursive_windowed_match(result, parts, part_lens, part_count, ends_percent,
                                  0, 0, initial_candidates, global_index->max_len);
      }
      
-     roaring_free(initial_candidates);
+     biscuit_roaring_free(initial_candidates);
      return result;
  }
  
@@ -1088,7 +1088,7 @@ static void remove_pk_mapping(const char *pk_str)
      bool ends_percent;
  } ParsedPattern;
  
- static ParsedPattern* parse_pattern(const char *pattern)
+ static ParsedPattern* biscuit_parse_pattern(const char *pattern)
  {
      ParsedPattern *parsed = (ParsedPattern *)palloc(sizeof(ParsedPattern));
      int plen = strlen(pattern);
@@ -1165,7 +1165,7 @@ static void remove_pk_mapping(const char *pk_str)
      return parsed;
  }
  
- static void free_parsed_pattern(ParsedPattern *parsed)
+ static void biscuit_free_parsed_pattern(ParsedPattern *parsed)
  {
      int i;
      for (i = 0; i < parsed->part_count; i++)
@@ -1177,7 +1177,7 @@ static void remove_pk_mapping(const char *pk_str)
  
  /* ==================== FAST PATH OPTIMIZATIONS ==================== */
  
- static bool is_wildcard_only(const char *pattern, int plen, int *underscore_count)
+ static bool biscuit_is_wildcard_only(const char *pattern, int plen, int *underscore_count)
  {
      int i, count = 0;
      for (i = 0; i < plen; i++)
@@ -1191,7 +1191,7 @@ static void remove_pk_mapping(const char *pk_str)
      return true;
  }
  
- static RoaringBitmap* match_wildcard_only(const char *pattern, int plen, int underscore_count)
+ static RoaringBitmap* biscuit_match_wildcard_only(const char *pattern, int plen, int underscore_count)
  {
      bool has_percent = false;
      int i;
@@ -1210,21 +1210,21 @@ static void remove_pk_mapping(const char *pk_str)
          if (underscore_count < global_index->length_idx.max_length &&
              global_index->length_idx.length_bitmaps[underscore_count])
          {
-             RoaringBitmap *result = roaring_copy(global_index->length_idx.length_bitmaps[underscore_count]);
+             RoaringBitmap *result = biscuit_roaring_copy(global_index->length_idx.length_bitmaps[underscore_count]);
              
              /* Filter tombstones */
              if (global_index->lazy_del.tombstone_count > 0)
-                 roaring_andnot_inplace(result, global_index->lazy_del.tombstones);
+                 biscuit_roaring_andnot_inplace(result, global_index->lazy_del.tombstones);
              
              return result;
          }
-         return roaring_create();
+         return biscuit_roaring_create();
      }
      
-     return get_length_ge(underscore_count);
+     return biscuit_get_length_ge(underscore_count);
  }
  
- static RoaringBitmap* match_simple_positioned(const char *pattern, int plen)
+ static RoaringBitmap* biscuit_match_simple_positioned(const char *pattern, int plen)
  {
      int i, first_char_pos = -1;
      char first_char = '\0';
@@ -1268,37 +1268,37 @@ static void remove_pk_mapping(const char *pk_str)
      
      if (prefix_pattern)
      {
-         RoaringBitmap *char_bm = get_pos_bitmap((unsigned char)first_char, 0);
+         RoaringBitmap *char_bm = biscuit_get_pos_bitmap((unsigned char)first_char, 0);
          if (!char_bm)
-             return roaring_create();
+             return biscuit_roaring_create();
          
-         RoaringBitmap *result = roaring_copy(char_bm);
+         RoaringBitmap *result = biscuit_roaring_copy(char_bm);
          
          /* Filter tombstones */
          if (global_index->lazy_del.tombstone_count > 0)
-             roaring_andnot_inplace(result, global_index->lazy_del.tombstones);
+             biscuit_roaring_andnot_inplace(result, global_index->lazy_del.tombstones);
          
-         RoaringBitmap *length_filter = get_length_ge(1);
-         roaring_and_inplace(result, length_filter);
-         roaring_free(length_filter);
+         RoaringBitmap *length_filter = biscuit_get_length_ge(1);
+         biscuit_roaring_and_inplace(result, length_filter);
+         biscuit_roaring_free(length_filter);
          return result;
      }
      
      if (suffix_pattern)
      {
-         RoaringBitmap *char_bm = get_neg_bitmap((unsigned char)first_char, -1);
+         RoaringBitmap *char_bm = biscuit_get_neg_bitmap((unsigned char)first_char, -1);
          if (!char_bm)
-             return roaring_create();
+             return biscuit_roaring_create();
          
-         RoaringBitmap *result = roaring_copy(char_bm);
+         RoaringBitmap *result = biscuit_roaring_copy(char_bm);
          
          /* Filter tombstones */
          if (global_index->lazy_del.tombstone_count > 0)
-             roaring_andnot_inplace(result, global_index->lazy_del.tombstones);
+             biscuit_roaring_andnot_inplace(result, global_index->lazy_del.tombstones);
          
-         RoaringBitmap *length_filter = get_length_ge(1);
-         roaring_and_inplace(result, length_filter);
-         roaring_free(length_filter);
+         RoaringBitmap *length_filter = biscuit_get_length_ge(1);
+         biscuit_roaring_and_inplace(result, length_filter);
+         biscuit_roaring_free(length_filter);
          return result;
      }
      
@@ -1306,45 +1306,45 @@ static void remove_pk_mapping(const char *pk_str)
      {
          if (global_index->char_cache[(unsigned char)first_char])
          {
-             RoaringBitmap *result = roaring_copy(global_index->char_cache[(unsigned char)first_char]);
+             RoaringBitmap *result = biscuit_roaring_copy(global_index->char_cache[(unsigned char)first_char]);
              
              /* Filter tombstones */
              if (global_index->lazy_del.tombstone_count > 0)
-                 roaring_andnot_inplace(result, global_index->lazy_del.tombstones);
+                 biscuit_roaring_andnot_inplace(result, global_index->lazy_del.tombstones);
              
              return result;
          }
-         return roaring_create();
+         return biscuit_roaring_create();
      }
      
      if (exact_pattern)
      {
-         RoaringBitmap *char_bm = get_pos_bitmap((unsigned char)first_char, 0);
+         RoaringBitmap *char_bm = biscuit_get_pos_bitmap((unsigned char)first_char, 0);
          if (!char_bm)
-             return roaring_create();
+             return biscuit_roaring_create();
          
-         RoaringBitmap *result = roaring_copy(char_bm);
+         RoaringBitmap *result = biscuit_roaring_copy(char_bm);
          
          /* Filter tombstones */
          if (global_index->lazy_del.tombstone_count > 0)
-             roaring_andnot_inplace(result, global_index->lazy_del.tombstones);
+             biscuit_roaring_andnot_inplace(result, global_index->lazy_del.tombstones);
          
          if (1 < global_index->length_idx.max_length && 
              global_index->length_idx.length_bitmaps[1])
          {
-             RoaringBitmap *length_bm = roaring_copy(global_index->length_idx.length_bitmaps[1]);
+             RoaringBitmap *length_bm = biscuit_roaring_copy(global_index->length_idx.length_bitmaps[1]);
              
              /* Filter tombstones from length bitmap */
              if (global_index->lazy_del.tombstone_count > 0)
-                 roaring_andnot_inplace(length_bm, global_index->lazy_del.tombstones);
+                 biscuit_roaring_andnot_inplace(length_bm, global_index->lazy_del.tombstones);
              
-             roaring_and_inplace(result, length_bm);
-             roaring_free(length_bm);
+             biscuit_roaring_and_inplace(result, length_bm);
+             biscuit_roaring_free(length_bm);
          }
          else
          {
-             roaring_free(result);
-             return roaring_create();
+             biscuit_roaring_free(result);
+             return biscuit_roaring_create();
          }
          
          return result;
@@ -1355,7 +1355,7 @@ static void remove_pk_mapping(const char *pk_str)
  
  /* ==================== BISCUIT: CRUD OPERATIONS ==================== */
  
-static void add_to_index(uint32_t idx, const char *str)
+static void biscuit_add_to_index(uint32_t idx, const char *str)
 {
     int len = strlen(str);
     int pos, i;
@@ -1386,8 +1386,8 @@ static void add_to_index(uint32_t idx, const char *str)
         }
         
         if (!global_index->length_idx.length_bitmaps[0])
-            global_index->length_idx.length_bitmaps[0] = roaring_create();
-        roaring_add(global_index->length_idx.length_bitmaps[0], idx);
+            global_index->length_idx.length_bitmaps[0] = biscuit_roaring_create();
+        biscuit_roaring_add(global_index->length_idx.length_bitmaps[0], idx);
         
         return;
     }
@@ -1401,28 +1401,28 @@ static void add_to_index(uint32_t idx, const char *str)
         unsigned char uch = (unsigned char)str[pos];
         
         /* Positive position index */
-        existing_bm = get_pos_bitmap(uch, pos);
+        existing_bm = biscuit_get_pos_bitmap(uch, pos);
         if (!existing_bm)
         {
-            existing_bm = roaring_create();
-            set_pos_bitmap(uch, pos, existing_bm);
+            existing_bm = biscuit_roaring_create();
+            biscuit_set_pos_bitmap(uch, pos, existing_bm);
         }
-        roaring_add(existing_bm, idx);
+        biscuit_roaring_add(existing_bm, idx);
         
         /* Negative position index (from end) */
         int neg_offset = -(len - pos);
-        existing_bm = get_neg_bitmap(uch, neg_offset);
+        existing_bm = biscuit_get_neg_bitmap(uch, neg_offset);
         if (!existing_bm)
         {
-            existing_bm = roaring_create();
-            set_neg_bitmap(uch, neg_offset, existing_bm);
+            existing_bm = biscuit_roaring_create();
+            biscuit_set_neg_bitmap(uch, neg_offset, existing_bm);
         }
-        roaring_add(existing_bm, idx);
+        biscuit_roaring_add(existing_bm, idx);
         
         /* Character cache */
         if (!global_index->char_cache[uch])
-            global_index->char_cache[uch] = roaring_create();
-        roaring_add(global_index->char_cache[uch], idx);
+            global_index->char_cache[uch] = biscuit_roaring_create();
+        biscuit_roaring_add(global_index->char_cache[uch], idx);
     }
     
     /* Add to length index */
@@ -1447,14 +1447,14 @@ static void add_to_index(uint32_t idx, const char *str)
     }
     
     if (!global_index->length_idx.length_bitmaps[len])
-        global_index->length_idx.length_bitmaps[len] = roaring_create();
-    roaring_add(global_index->length_idx.length_bitmaps[len], idx);
+        global_index->length_idx.length_bitmaps[len] = biscuit_roaring_create();
+    biscuit_roaring_add(global_index->length_idx.length_bitmaps[len], idx);
     
     if (len > global_index->max_len)
         global_index->max_len = len;
 }
  /* Incremental update for similar strings */
-static bool update_incremental(uint32_t idx, const char *old_value, const char *new_value)
+static bool biscuit_update_incremental(uint32_t idx, const char *old_value, const char *new_value)
 {
     int old_len = strlen(old_value);
     int new_len = strlen(new_value);
@@ -1501,11 +1501,11 @@ static bool update_incremental(uint32_t idx, const char *old_value, const char *
         int neg_offset = -(old_len - pos);
         
         /* Remove old character at position */
-        bm = get_pos_bitmap(old_ch, pos);
-        if (bm) roaring_remove(bm, idx);
+        bm = biscuit_get_pos_bitmap(old_ch, pos);
+        if (bm) biscuit_roaring_remove(bm, idx);
         
-        bm = get_neg_bitmap(old_ch, neg_offset);
-        if (bm) roaring_remove(bm, idx);
+        bm = biscuit_get_neg_bitmap(old_ch, neg_offset);
+        if (bm) biscuit_roaring_remove(bm, idx);
         
         /* Update char cache - only remove if char doesn't appear elsewhere */
         if (global_index->char_cache[old_ch])
@@ -1521,41 +1521,41 @@ static bool update_incremental(uint32_t idx, const char *old_value, const char *
                 }
             }
             if (!found_elsewhere)
-                roaring_remove(global_index->char_cache[old_ch], idx);
+                biscuit_roaring_remove(global_index->char_cache[old_ch], idx);
         }
         
         /* Add new character at position */
-        bm = get_pos_bitmap(new_ch, pos);
+        bm = biscuit_get_pos_bitmap(new_ch, pos);
         if (!bm)
         {
-            bm = roaring_create();
-            set_pos_bitmap(new_ch, pos, bm);
+            bm = biscuit_roaring_create();
+            biscuit_set_pos_bitmap(new_ch, pos, bm);
         }
-        roaring_add(bm, idx);
+        biscuit_roaring_add(bm, idx);
         
-        bm = get_neg_bitmap(new_ch, neg_offset);
+        bm = biscuit_get_neg_bitmap(new_ch, neg_offset);
         if (!bm)
         {
-            bm = roaring_create();
-            set_neg_bitmap(new_ch, neg_offset, bm);
+            bm = biscuit_roaring_create();
+            biscuit_set_neg_bitmap(new_ch, neg_offset, bm);
         }
-        roaring_add(bm, idx);
+        biscuit_roaring_add(bm, idx);
         
         if (!global_index->char_cache[new_ch])
-            global_index->char_cache[new_ch] = roaring_create();
-        roaring_add(global_index->char_cache[new_ch], idx);
+            global_index->char_cache[new_ch] = biscuit_roaring_create();
+        biscuit_roaring_add(global_index->char_cache[new_ch], idx);
     }
     
     global_index->incremental_update_count++;
     return true;
 }
  
-static void resurrect_slot(uint32_t idx)
+static void biscuit_resurrect_slot(uint32_t idx)
 {
     int i;
     
     /* Remove from tombstone bitmap */
-    roaring_remove(global_index->lazy_del.tombstones, idx);
+    biscuit_roaring_remove(global_index->lazy_del.tombstones, idx);
     
     /* Remove from deleted_indices array */
     for (i = 0; i < global_index->lazy_del.tombstone_count; i++)
@@ -1575,7 +1575,7 @@ static void resurrect_slot(uint32_t idx)
     }
 }
 
-static void remove_from_all_indices(uint32_t idx)
+static void biscuit_remove_from_all_indices(uint32_t idx)
 {
     int ch, j;
     RoaringBitmap *bm;
@@ -1588,7 +1588,7 @@ static void remove_from_all_indices(uint32_t idx)
         {
             bm = pos_cidx->entries[j].bitmap;
             if (bm)
-                roaring_remove(bm, idx);
+                biscuit_roaring_remove(bm, idx);
         }
         
         CharIndex *neg_cidx = &global_index->neg_idx[ch];
@@ -1596,26 +1596,26 @@ static void remove_from_all_indices(uint32_t idx)
         {
             bm = neg_cidx->entries[j].bitmap;
             if (bm)
-                roaring_remove(bm, idx);
+                biscuit_roaring_remove(bm, idx);
         }
         
         /* Remove from character cache */
         if (global_index->char_cache[ch])
-            roaring_remove(global_index->char_cache[ch], idx);
+            biscuit_roaring_remove(global_index->char_cache[ch], idx);
     }
     
     /* Remove from ALL length bitmaps */
     for (j = 0; j < global_index->length_idx.max_length; j++)
     {
         if (global_index->length_idx.length_bitmaps[j])
-            roaring_remove(global_index->length_idx.length_bitmaps[j], idx);
+            biscuit_roaring_remove(global_index->length_idx.length_bitmaps[j], idx);
     }
 }
 
 
-static void index_update(const char *pk_str, const char *new_value);
+static void biscuit_index_update(const char *pk_str, const char *new_value);
 
-static void index_insert(const char *pk_str, const char *value)
+static void biscuit_index_insert(const char *pk_str, const char *value)
 {
     uint32_t idx;
     char *value_copy;
@@ -1629,27 +1629,27 @@ static void index_insert(const char *pk_str, const char *value)
     if (!pk_str)
         ereport(ERROR, (errmsg("NULL primary key")));
     
-    //elog(DEBUG1, "index_insert: Called for PK='%s', value='%s'", pk_str, value);
+    //elog(DEBUG1, "biscuit_index_insert: Called for PK='%s', value='%s'", pk_str, value);
     
     /* CHECK: Does this PK already exist? */
-    existing_idx = find_index_by_pk(pk_str);
+    existing_idx = biscuit_find_index_by_pk(pk_str);
     if (existing_idx >= 0)
     {
-        //elog(WARNING, "index_insert: PK '%s' already exists at index %d, converting to UPDATE", pk_str, existing_idx);
-        index_update(pk_str, value);
+        //elog(WARNING, "biscuit_index_insert: PK '%s' already exists at index %d, converting to UPDATE", pk_str, existing_idx);
+        biscuit_index_update(pk_str, value);
         return;
     }
     
     oldcontext = MemoryContextSwitchTo(index_context);
     
     /* Try to reuse a deleted index */
-    if (pop_free_index(&global_index->free_list, &idx))
+    if (biscuit_pop_free_index(&global_index->free_list, &idx))
     {
-        //elog(DEBUG1, "index_insert: Reusing slot %u", idx);
+        //elog(DEBUG1, "biscuit_index_insert: Reusing slot %u", idx);
         
         /* CRITICAL FIX: Remove from tombstone tracking */
-        resurrect_slot(idx);
-        remove_from_all_indices(idx);
+        biscuit_resurrect_slot(idx);
+        biscuit_remove_from_all_indices(idx);
         /* Reuse existing slot */
         if (global_index->data[idx])
             pfree(global_index->data[idx]);
@@ -1671,7 +1671,7 @@ static void index_insert(const char *pk_str, const char *value)
             char **new_data;
             char **new_pks;
             
-            //elog(DEBUG1, "index_insert: Expanding capacity from %d to %d", global_index->capacity, new_cap);
+            //elog(DEBUG1, "biscuit_index_insert: Expanding capacity from %d to %d", global_index->capacity, new_cap);
             
             new_data = (char **)MemoryContextAlloc(index_context,
                                                     new_cap * sizeof(char *));
@@ -1689,7 +1689,7 @@ static void index_insert(const char *pk_str, const char *value)
         }
         
         idx = global_index->num_records;
-        //elog(DEBUG1, "index_insert: Allocating new slot %u", idx);
+        //elog(DEBUG1, "biscuit_index_insert: Allocating new slot %u", idx);
         
         value_copy = pstrdup(value);
         pk_copy = pstrdup(pk_str);
@@ -1700,19 +1700,19 @@ static void index_insert(const char *pk_str, const char *value)
     }
     
     /* CRITICAL FIX: Add to hash table using the STORED pointer */
-    add_pk_mapping(global_index->primary_keys[idx], idx);
+    biscuit_add_pk_mapping(global_index->primary_keys[idx], idx);
     
     /* Add to indices */
-    add_to_index(idx, value_copy);
+    biscuit_add_to_index(idx, value_copy);
     
     global_index->insert_count++;
     
-    //elog(NOTICE, "index_insert: Successfully inserted PK='%s' at index %u", pk_str, idx);
+    //elog(NOTICE, "biscuit_index_insert: Successfully inserted PK='%s' at index %u", pk_str, idx);
     
     MemoryContextSwitchTo(oldcontext);
 }
 
-static void index_update(const char *pk_str, const char *new_value)
+static void biscuit_index_update(const char *pk_str, const char *new_value)
 {
     int32_t idx;
     char *old_value;
@@ -1723,19 +1723,19 @@ static void index_update(const char *pk_str, const char *new_value)
     if (!global_index)
         return;
     
-    //elog(DEBUG1, "index_update: Called for PK='%s'", pk_str);
+    //elog(DEBUG1, "biscuit_index_update: Called for PK='%s'", pk_str);
     
     /* O(1) hash table lookup */
-    idx = find_index_by_pk_debug(pk_str, false);  /* Enable debug logging */
+    idx = biscuit_biscuit_find_index_by_pk_debug(pk_str, false);  /* Enable debug logging */
     if (idx < 0)
     {
         /* If not found, treat as insert */
-        //elog(NOTICE, "index_update: PK '%s' not found, treating as INSERT", pk_str);
-        index_insert(pk_str, new_value);
+        //elog(NOTICE, "biscuit_index_update: PK '%s' not found, treating as INSERT", pk_str);
+        biscuit_index_insert(pk_str, new_value);
         return;
     }
     
-    //elog(NOTICE, "index_update: Found existing record at index %d", idx);
+    //elog(NOTICE, "biscuit_index_update: Found existing record at index %d", idx);
     
     oldcontext = MemoryContextSwitchTo(index_context);
     
@@ -1747,24 +1747,24 @@ static void index_update(const char *pk_str, const char *new_value)
     
     /* Try incremental update ONLY for same-length strings */
     if (old_len == new_len && old_len >= 3 && 
-        update_incremental((uint32_t)idx, old_value, new_value_copy))
+        biscuit_update_incremental((uint32_t)idx, old_value, new_value_copy))
     {
         /* Success - just update the data pointer */
         pfree(old_value);
         global_index->data[idx] = new_value_copy;
         global_index->update_count++;
-        //elog(NOTICE, "index_update: Incremental update successful");
+        //elog(NOTICE, "biscuit_index_update: Incremental update successful");
         MemoryContextSwitchTo(oldcontext);
         return;
     }
     
-    //elog(NOTICE, "index_update: Performing full reindex (old_len=%d, new_len=%d)", old_len, new_len);
+    //elog(NOTICE, "biscuit_index_update: Performing full reindex (old_len=%d, new_len=%d)", old_len, new_len);
     
     /* Full reindex approach */
-    remove_from_all_indices((uint32_t)idx);
+    biscuit_remove_from_all_indices((uint32_t)idx);
     pfree(old_value);
     global_index->data[idx] = new_value_copy;
-    add_to_index((uint32_t)idx, new_value_copy);
+    biscuit_add_to_index((uint32_t)idx, new_value_copy);
     
     global_index->update_count++;
     
@@ -1774,7 +1774,7 @@ static void index_update(const char *pk_str, const char *new_value)
  /* INSERT */
  
 /* DELETE (O(1) with lazy tombstones) */
- static void index_delete(const char *pk_str)
+ static void biscuit_index_delete(const char *pk_str)
 {
     int32_t idx;
     MemoryContext oldcontext;
@@ -1783,7 +1783,7 @@ static void index_update(const char *pk_str, const char *new_value)
         return;
     
     /* O(1) hash table lookup */
-    idx = find_index_by_pk(pk_str);
+    idx = biscuit_find_index_by_pk(pk_str);
     if (idx < 0)
         return;
     
@@ -1793,7 +1793,7 @@ static void index_update(const char *pk_str, const char *new_value)
     global_index->delete_count++;
     
     /* Add to tombstone bitmap - O(1) operation! */
-    roaring_add(global_index->lazy_del.tombstones, (uint32_t)idx);
+    biscuit_roaring_add(global_index->lazy_del.tombstones, (uint32_t)idx);
     
     /* Store the index for cleanup */
     if (global_index->lazy_del.tombstone_count >= global_index->lazy_del.tombstone_capacity)
@@ -1813,7 +1813,7 @@ static void index_update(const char *pk_str, const char *new_value)
     global_index->lazy_del.tombstone_count++;
     
     /* Remove from hash table */
-    remove_pk_mapping(pk_str);
+    biscuit_remove_pk_mapping(pk_str);
     
     /* Free PK string */
     if (global_index->primary_keys[idx])
@@ -1823,13 +1823,13 @@ static void index_update(const char *pk_str, const char *new_value)
     }
     
     /* Add to free list for slot reuse */
-    push_free_index(&global_index->free_list, (uint32_t)idx);
+    biscuit_push_free_index(&global_index->free_list, (uint32_t)idx);
     
     /* Trigger batch cleanup if threshold reached */
     if (global_index->lazy_del.tombstone_count >= 
         global_index->lazy_del.tombstone_threshold)
     {
-        cleanup_tombstones();
+        biscuit_cleanup_tombstones();
     }
     
     MemoryContextSwitchTo(oldcontext);
@@ -1893,14 +1893,14 @@ static uint32_t* biscuit_query_internal(const char *pattern, uint64_t *result_co
         if (global_index->length_idx.max_length > 0 &&
             global_index->length_idx.length_bitmaps[0])
         {
-            result = roaring_copy(global_index->length_idx.length_bitmaps[0]);
+            result = biscuit_roaring_copy(global_index->length_idx.length_bitmaps[0]);
             
             /* Filter tombstones */
             if (global_index->lazy_del.tombstone_count > 0)
-                roaring_andnot_inplace(result, global_index->lazy_del.tombstones);
+                biscuit_roaring_andnot_inplace(result, global_index->lazy_del.tombstones);
             
-            indices = roaring_to_array(result, result_count);
-            roaring_free(result);
+            indices = biscuit_roaring_to_array(result, result_count);
+            biscuit_roaring_free(result);
             return indices;
         }
         
@@ -1935,29 +1935,29 @@ static uint32_t* biscuit_query_internal(const char *pattern, uint64_t *result_co
      }
      
      /* Fast path: wildcard-only patterns */
-     if (is_wildcard_only(pattern, plen, &underscore_count))
+     if (biscuit_is_wildcard_only(pattern, plen, &underscore_count))
      {
-         result = match_wildcard_only(pattern, plen, underscore_count);
-         indices = roaring_to_array(result, result_count);
-         roaring_free(result);
+         result = biscuit_match_wildcard_only(pattern, plen, underscore_count);
+         indices = biscuit_roaring_to_array(result, result_count);
+         biscuit_roaring_free(result);
          return indices;
      }
      
      /* Fast path: simple single-character positioned patterns */
-     result = match_simple_positioned(pattern, plen);
+     result = biscuit_match_simple_positioned(pattern, plen);
      if (result)
      {
-         indices = roaring_to_array(result, result_count);
-         roaring_free(result);
+         indices = biscuit_roaring_to_array(result, result_count);
+         biscuit_roaring_free(result);
          return indices;
      }
      
      /* Complex patterns - parse and match */
-     parsed = parse_pattern(pattern);
+     parsed = biscuit_parse_pattern(pattern);
      
      if (parsed->part_count == 0)
      {
-         free_parsed_pattern(parsed);
+         biscuit_free_parsed_pattern(parsed);
          int count = 0;
          indices = (uint32_t *)palloc(global_index->num_records * sizeof(uint32_t));
          for (i = 0; i < global_index->num_records; i++)
@@ -1992,25 +1992,25 @@ static uint32_t* biscuit_query_internal(const char *pattern, uint64_t *result_co
          if (min_len < global_index->length_idx.max_length && 
              global_index->length_idx.length_bitmaps[min_len])
          {
-             result = roaring_copy(global_index->length_idx.length_bitmaps[min_len]);
+             result = biscuit_roaring_copy(global_index->length_idx.length_bitmaps[min_len]);
              
              /* Filter tombstones */
              if (global_index->lazy_del.tombstone_count > 0)
-                 roaring_andnot_inplace(result, global_index->lazy_del.tombstones);
+                 biscuit_roaring_andnot_inplace(result, global_index->lazy_del.tombstones);
          }
          else
-             result = roaring_create();
+             result = biscuit_roaring_create();
      }
      else
      {
-         result = get_length_ge(min_len);
+         result = biscuit_get_length_ge(min_len);
      }
      
-     if (roaring_is_empty(result))
+     if (biscuit_roaring_is_empty(result))
      {
-         free_parsed_pattern(parsed);
-         indices = roaring_to_array(result, result_count);
-         roaring_free(result);
+         biscuit_free_parsed_pattern(parsed);
+         indices = biscuit_roaring_to_array(result, result_count);
+         biscuit_roaring_free(result);
          return indices;
      }
      
@@ -2021,40 +2021,40 @@ static uint32_t* biscuit_query_internal(const char *pattern, uint64_t *result_co
          
          if (!parsed->starts_percent && !parsed->ends_percent)
          {
-             match = match_part_at_pos(parsed->parts[0], parsed->part_lens[0], 0);
+             match = biscuit_match_part_at_pos(parsed->parts[0], parsed->part_lens[0], 0);
          }
          else if (!parsed->starts_percent && parsed->ends_percent)
          {
-             match = match_part_at_pos(parsed->parts[0], parsed->part_lens[0], 0);
+             match = biscuit_match_part_at_pos(parsed->parts[0], parsed->part_lens[0], 0);
          }
          else if (parsed->starts_percent && !parsed->ends_percent)
          {
-             match = match_part_at_end(parsed->parts[0], parsed->part_lens[0]);
+             match = biscuit_match_part_at_end(parsed->parts[0], parsed->part_lens[0]);
          }
          else
          {
-             match = match_part_anywhere(parsed->parts[0], parsed->part_lens[0]);
+             match = biscuit_match_part_anywhere(parsed->parts[0], parsed->part_lens[0]);
          }
          
-         roaring_and_inplace(result, match);
-         roaring_free(match);
+         biscuit_roaring_and_inplace(result, match);
+         biscuit_roaring_free(match);
      }
      else if (parsed->part_count == 2 && !parsed->starts_percent && !parsed->ends_percent)
      {
-         RoaringBitmap *prefix_match = match_part_at_pos(parsed->parts[0], parsed->part_lens[0], 0);
-         RoaringBitmap *suffix_match = match_part_at_end(parsed->parts[1], parsed->part_lens[1]);
+         RoaringBitmap *prefix_match = biscuit_match_part_at_pos(parsed->parts[0], parsed->part_lens[0], 0);
+         RoaringBitmap *suffix_match = biscuit_match_part_at_end(parsed->parts[1], parsed->part_lens[1]);
          
-         roaring_and_inplace(result, prefix_match);
-         roaring_and_inplace(result, suffix_match);
+         biscuit_roaring_and_inplace(result, prefix_match);
+         biscuit_roaring_and_inplace(result, suffix_match);
          
-         roaring_free(prefix_match);
-         roaring_free(suffix_match);
+         biscuit_roaring_free(prefix_match);
+         biscuit_roaring_free(suffix_match);
      }
      else if (parsed->part_count >= 2)
      {
-         roaring_free(result);
+         biscuit_roaring_free(result);
          
-         result = match_multipart_windowed_positions(
+         result = biscuit_match_multipart_windowed_positions(
              (const char **)parsed->parts,
              parsed->part_lens,
              parsed->part_count,
@@ -2063,10 +2063,10 @@ static uint32_t* biscuit_query_internal(const char *pattern, uint64_t *result_co
          );
      }
      
-     free_parsed_pattern(parsed);
+     biscuit_free_parsed_pattern(parsed);
      
-     indices = roaring_to_array(result, result_count);
-     roaring_free(result);
+     indices = biscuit_roaring_to_array(result, result_count);
+     biscuit_roaring_free(result);
      return indices;
  }
  
@@ -2118,10 +2118,10 @@ Datum biscuit_trigger(PG_FUNCTION_ARGS)
             ereport(ERROR, (errmsg("NULL primary key in INSERT")));
         
         /* Convert PK to string */
-        pk_str = datum_to_pk_string(pk_datum, pk_type, &pk_isnull);
+        pk_str = biscuit_datum_to_pk_string(pk_datum, pk_type, &pk_isnull);
         col_value = col_isnull ? "" : TextDatumGetCString(col_datum);
         
-        index_insert(pk_str, col_value);
+        biscuit_index_insert(pk_str, col_value);
         
         pfree(pk_str);  /* Free temporary conversion */
         
@@ -2140,14 +2140,14 @@ Datum biscuit_trigger(PG_FUNCTION_ARGS)
             ereport(ERROR, (errmsg("NULL primary key in UPDATE")));
         
         /* Convert PK to string */
-        pk_str = datum_to_pk_string(pk_datum, pk_type, &pk_isnull);
+        pk_str = biscuit_datum_to_pk_string(pk_datum, pk_type, &pk_isnull);
         
         /* ADD THIS DEBUG LINE */
         //elog(NOTICE, "TRIGGER UPDATE: PK='%s', new_value='%s'", pk_str, col_isnull ? "(null)" : TextDatumGetCString(col_datum));
         
         col_value = col_isnull ? "" : TextDatumGetCString(col_datum);
         
-        index_update(pk_str, col_value);
+        biscuit_index_update(pk_str, col_value);
         
         pfree(pk_str);
         
@@ -2164,9 +2164,9 @@ Datum biscuit_trigger(PG_FUNCTION_ARGS)
             ereport(ERROR, (errmsg("NULL primary key in DELETE")));
         
         /* Convert PK to string */
-        pk_str = datum_to_pk_string(pk_datum, pk_type, &pk_isnull);
+        pk_str = biscuit_datum_to_pk_string(pk_datum, pk_type, &pk_isnull);
         
-        index_delete(pk_str);
+        biscuit_index_delete(pk_str);
         
         pfree(pk_str);  /* Free temporary conversion */
         
@@ -2364,13 +2364,13 @@ Datum build_biscuit_index(PG_FUNCTION_ARGS)
     global_index->query_count = 0;
     
     /* Initialize free list */
-    init_free_list(&global_index->free_list);
+    biscuit_init_free_list(&global_index->free_list);
     
     /* Initialize hash table for O(1) PK lookup */
-    init_pk_hash_table();
+    biscuit_init_pk_hash_table();
     
     /* Initialize lazy deletion */
-    init_lazy_deletion();
+    biscuit_init_lazy_deletion();
     
     for (ch_idx = 0; ch_idx < CHAR_RANGE; ch_idx++)
     {
@@ -2404,13 +2404,13 @@ Datum build_biscuit_index(PG_FUNCTION_ARGS)
         }
         
         /* Convert PK to string (works for ANY type) */
-        pk_str = datum_to_pk_string(datum, pk_type, &isnull);
+        pk_str = biscuit_datum_to_pk_string(datum, pk_type, &isnull);
         
         /* CRITICAL FIX: Store PK persistently FIRST */
         global_index->primary_keys[idx] = MemoryContextStrdup(index_context, pk_str);
         
         /* Then add to hash table using the STORED pointer */
-        add_pk_mapping(global_index->primary_keys[idx], (uint32_t)idx);
+        biscuit_add_pk_mapping(global_index->primary_keys[idx], (uint32_t)idx);
         
         pfree(pk_str);  /* Free temporary conversion */
         
@@ -2438,23 +2438,23 @@ Datum build_biscuit_index(PG_FUNCTION_ARGS)
         {
             uch = (unsigned char)str[pos];
             
-            existing_bm = get_pos_bitmap(uch, pos);
+            existing_bm = biscuit_get_pos_bitmap(uch, pos);
             if (!existing_bm)
             {
-                existing_bm = roaring_create();
-                set_pos_bitmap(uch, pos, existing_bm);
+                existing_bm = biscuit_roaring_create();
+                biscuit_set_pos_bitmap(uch, pos, existing_bm);
             }
-            roaring_add(existing_bm, (uint32_t)idx);
+            biscuit_roaring_add(existing_bm, (uint32_t)idx);
             
             neg_offset = -(len - pos);
             
-            existing_bm = get_neg_bitmap(uch, neg_offset);
+            existing_bm = biscuit_get_neg_bitmap(uch, neg_offset);
             if (!existing_bm)
             {
-                existing_bm = roaring_create();
-                set_neg_bitmap(uch, neg_offset, existing_bm);
+                existing_bm = biscuit_roaring_create();
+                biscuit_set_neg_bitmap(uch, neg_offset, existing_bm);
             }
-            roaring_add(existing_bm, (uint32_t)idx);
+            biscuit_roaring_add(existing_bm, (uint32_t)idx);
         }
         
         pfree(str);
@@ -2467,11 +2467,11 @@ Datum build_biscuit_index(PG_FUNCTION_ARGS)
         if (cidx->count == 0)
             continue;
         
-        RoaringBitmap *new_bm = roaring_copy(cidx->entries[0].bitmap);
+        RoaringBitmap *new_bm = biscuit_roaring_copy(cidx->entries[0].bitmap);
         
         for (i = 1; i < cidx->count; i++)
         {
-            roaring_or_inplace(new_bm, cidx->entries[i].bitmap);
+            biscuit_roaring_or_inplace(new_bm, cidx->entries[i].bitmap);
         }
         
         global_index->char_cache[ch_idx] = new_bm;
@@ -2493,16 +2493,16 @@ Datum build_biscuit_index(PG_FUNCTION_ARGS)
             continue;
         
         if (!global_index->length_idx.length_bitmaps[len])
-            global_index->length_idx.length_bitmaps[len] = roaring_create();
+            global_index->length_idx.length_bitmaps[len] = biscuit_roaring_create();
         
-        roaring_add(global_index->length_idx.length_bitmaps[len], (uint32_t)idx);
+        biscuit_roaring_add(global_index->length_idx.length_bitmaps[len], (uint32_t)idx);
     }
     
     global_index->memory_used = sizeof(RoaringIndex);
     for (ch_idx = 0; ch_idx < CHAR_RANGE; ch_idx++)
     {
         if (global_index->char_cache[ch_idx])
-            global_index->memory_used += roaring_size_bytes(global_index->char_cache[ch_idx]);
+            global_index->memory_used += biscuit_roaring_size_bytes(global_index->char_cache[ch_idx]);
         
         global_index->memory_used += global_index->pos_idx[ch_idx].count * sizeof(PosEntry);
         global_index->memory_used += global_index->neg_idx[ch_idx].count * sizeof(PosEntry);
@@ -2510,7 +2510,7 @@ Datum build_biscuit_index(PG_FUNCTION_ARGS)
     for (i = 0; i < global_index->length_idx.max_length; i++)
     {
         if (global_index->length_idx.length_bitmaps[i])
-            global_index->memory_used += roaring_size_bytes(global_index->length_idx.length_bitmaps[i]);
+            global_index->memory_used += biscuit_roaring_size_bytes(global_index->length_idx.length_bitmaps[i]);
     }
     
     MemoryContextSwitchTo(oldcontext);
@@ -2632,7 +2632,7 @@ Datum biscuit_status(PG_FUNCTION_ARGS)
          PG_RETURN_TEXT_P(cstring_to_text("No tombstones to clean"));
      }
      
-     cleanup_tombstones();
+     biscuit_cleanup_tombstones();
      
      after_count = global_index->lazy_del.tombstone_count;
      
