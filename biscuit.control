@@ -2,7 +2,7 @@
 # Control file for PostgreSQL biscuit extension
 
 # Extension metadata
-default_version = '1.0'
+default_version = '1.1'
 comment = 'LIKE pattern matching with bitmap indexing'
 
 # Module name (must match the shared library name without .so)

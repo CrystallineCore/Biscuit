@@ -1,10 +1,10 @@
 # Makefile for biscuit PostgreSQL extension
 
 EXTENSION = biscuit
-EXTVERSION = 1.0.0
+EXTVERSION = 1.0.3
 MODULE_big = biscuit
 OBJS = src/biscuit.o
-DATA = sql/biscuit--1.0.sql
+DATA = sql/biscuit--1.1.sql
 
 PGFILEDESC = "LIKE pattern matching with bitmap indexing"
 
@@ -17,10 +17,10 @@ include $(PGXS)
 override CFLAGS += -Wall -Wmissing-prototypes -Wpointer-arith -Werror=vla -Wendif-labels
 
 # Default target: ensure versioned SQL is generated before build
-all: sql/biscuit--1.0.sql
+all: sql/biscuit--1.1.sql
 
 # Build versioned SQL script from base SQL file if needed
-sql/biscuit--1.0.sql: sql/biscuit.sql
+sql/biscuit--1.1.sql: sql/biscuit.sql
 	cp $< $@
 
 # Clean up build artifacts
@@ -34,7 +34,7 @@ install: all
 	$(INSTALL) -m 755 biscuit.so $(DESTDIR)$(pkglibdir)/
 	$(INSTALL) -d $(DESTDIR)$(datadir)/extension
 	$(INSTALL) -m 644 biscuit.control $(DESTDIR)$(datadir)/extension/
-	$(INSTALL) -m 644 sql/biscuit--1.0.sql $(DESTDIR)$(datadir)/extension/
+	$(INSTALL) -m 644 sql/biscuit--1.1.sql $(DESTDIR)$(datadir)/extension/
 
 dist:
 	@echo "Creating distribution archive..."
