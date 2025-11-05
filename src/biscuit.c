@@ -27,6 +27,20 @@
  #include "utils/lsyscache.h"       /* For get_typlenbyvalalign, etc. */
  #include <string.h>
  #include "utils/uuid.h"
+ #include "access/heapam.h"
+ #include "access/table.h"
+ #include "access/xact.h"
+ #include "catalog/namespace.h"
+ #include "utils/rel.h"
+ #include "utils/snapmgr.h"
+ #include "parser/parse_relation.h"
+ #include "storage/bufmgr.h"
+ #include "parser/parse_node.h"
+ #include "nodes/nodes.h"
+ #include "nodes/primnodes.h"
+ #include "storage/block.h"
+#include "storage/off.h"
+#include "storage/itemptr.h"
 
  #ifdef HAVE_ROARING
  #include "roaring.h"
@@ -38,7 +52,7 @@
  PG_MODULE_MAGIC;
  #endif
 
-#define BISCUIT_VERSION "1.0.3-Biscuit"
+#define BISCUIT_VERSION "1.0.4-Biscuit"
 
 PG_FUNCTION_INFO_V1(biscuit_version);
 Datum biscuit_version(PG_FUNCTION_ARGS)
@@ -303,34 +317,34 @@ Datum biscuit_version(PG_FUNCTION_ARGS)
     int64 items_cleaned;
 } LazyDeletion;
 
- typedef struct RoaringIndex {
-     CharIndex pos_idx[CHAR_RANGE];
-     CharIndex neg_idx[CHAR_RANGE];
-     RoaringBitmap *char_cache[CHAR_RANGE];
-     LengthIndex length_idx;
-     
-     char **data;
-     char **primary_keys;
-     int num_records;
-     int capacity;
-     int max_len;
-     size_t memory_used;
-     
-     char *table_name;
-     char *column_name;
-     char *pk_column_name;
-     
-     FreeList free_list;
-     HTAB *pk_to_index;
-     LazyDeletion lazy_del;
-     
-     int64 insert_count;
-     int64 update_count;
-     int64 delete_count;
-     int64 incremental_update_count;
-     int64 query_count;
- } RoaringIndex;
- 
+typedef struct RoaringIndex {
+    CharIndex pos_idx[CHAR_RANGE];
+    CharIndex neg_idx[CHAR_RANGE];
+    RoaringBitmap *char_cache[CHAR_RANGE];
+    LengthIndex length_idx;
+    
+    char **data;
+    char **primary_keys;
+    int num_records;
+    int capacity;
+    int max_len;
+    size_t memory_used;
+    
+    char *table_name;
+    char *column_name;
+    char *pk_column_name;
+    
+    FreeList free_list;
+    HTAB *pk_to_index;
+    LazyDeletion lazy_del;
+    
+    int64 insert_count;
+    int64 update_count;
+    int64 delete_count;
+    int64 incremental_update_count;
+    int64 query_count;
+} RoaringIndex;
+
  static RoaringIndex *global_index = NULL;
  static MemoryContext index_context = NULL;
  
@@ -927,157 +941,200 @@ static void biscuit_remove_pk_mapping(const char *pk_str)
  }
  
  static void biscuit_recursive_windowed_match(
-     RoaringBitmap *result,
-     const char **parts,
-     int *part_lens,
-     int part_count,
-     bool ends_percent,
-     int part_idx,
-     int min_pos,
-     RoaringBitmap *current_candidates,
-     int max_len
- )
- {
-     int i, pos;
-     
-     if (part_idx >= part_count)
-     {
-         biscuit_roaring_or_inplace(result, current_candidates);
-         return;
-     }
-     
-     int remaining_len = 0;
-     for (i = part_idx + 1; i < part_count; i++)
-         remaining_len += part_lens[i];
-     
-     int max_pos = max_len - remaining_len;
-     
-     if (part_idx == part_count - 1 && !ends_percent)
-     {
-         RoaringBitmap *last_match = biscuit_match_part_at_end(parts[part_idx], part_lens[part_idx]);
-         biscuit_roaring_and_inplace(last_match, current_candidates);
-         biscuit_roaring_or_inplace(result, last_match);
-         biscuit_roaring_free(last_match);
-         return;
-     }
-     
-     for (pos = min_pos; pos <= max_pos - part_lens[part_idx]; pos++)
-     {
-         RoaringBitmap *part_at_pos = biscuit_match_part_at_pos(parts[part_idx], part_lens[part_idx], pos);
-         
-         biscuit_roaring_and_inplace(part_at_pos, current_candidates);
-         
-         if (!biscuit_roaring_is_empty(part_at_pos))
-         {
-             biscuit_recursive_windowed_match(result, parts, part_lens, part_count, ends_percent,
-                                     part_idx + 1, pos + part_lens[part_idx], part_at_pos, max_len);
-         }
-         
-         biscuit_roaring_free(part_at_pos);
-     }
- }
- 
- static RoaringBitmap* biscuit_match_multipart_windowed_positions(
-     const char **parts, 
-     int *part_lens, 
-     int part_count,
-     bool starts_percent,
-     bool ends_percent
- )
- {
-     RoaringBitmap *result = biscuit_roaring_create();
-     int min_len = 0;
-     int i;
-     
-     for (i = 0; i < part_count; i++)
-         min_len += part_lens[i];
-     
-     if (part_count == 1)
-     {
-         RoaringBitmap *match, *length_filter;
-         
-         if (!starts_percent && !ends_percent)
-         {
-             match = biscuit_match_part_at_pos(parts[0], part_lens[0], 0);
-             length_filter = (part_lens[0] < global_index->length_idx.max_length) ?
-                 biscuit_roaring_copy(global_index->length_idx.length_bitmaps[part_lens[0]]) : biscuit_roaring_create();
-             
-             /* Filter tombstones from length bitmap */
-             if (global_index->lazy_del.tombstone_count > 0)
-                 biscuit_roaring_andnot_inplace(length_filter, global_index->lazy_del.tombstones);
-             
-             biscuit_roaring_and_inplace(match, length_filter);
-             biscuit_roaring_free(length_filter);
-             return match;
-         }
-         else if (!starts_percent)
-         {
-             match = biscuit_match_part_at_pos(parts[0], part_lens[0], 0);
-             length_filter = biscuit_get_length_ge(part_lens[0]);
-             biscuit_roaring_and_inplace(match, length_filter);
-             biscuit_roaring_free(length_filter);
-             return match;
-         }
-         else if (!ends_percent)
-         {
-             match = biscuit_match_part_at_end(parts[0], part_lens[0]);
-             length_filter = biscuit_get_length_ge(part_lens[0]);
-             biscuit_roaring_and_inplace(match, length_filter);
-             biscuit_roaring_free(length_filter);
-             return match;
-         }
-         else
-         {
-             return biscuit_match_part_anywhere(parts[0], part_lens[0]);
-         }
-     }
-     
-     if (part_count == 2 && !starts_percent && !ends_percent)
-     {
-         RoaringBitmap *prefix = biscuit_match_part_at_pos(parts[0], part_lens[0], 0);
-         RoaringBitmap *suffix = biscuit_match_part_at_end(parts[1], part_lens[1]);
-         RoaringBitmap *length_filter = biscuit_get_length_ge(min_len);
-         
-         biscuit_roaring_and_inplace(prefix, suffix);
-         biscuit_roaring_and_inplace(prefix, length_filter);
-         biscuit_roaring_free(suffix);
-         biscuit_roaring_free(length_filter);
-         return prefix;
-     }
-     
-     RoaringBitmap *initial_candidates = biscuit_get_length_ge(min_len);
-     
-     if (biscuit_roaring_is_empty(initial_candidates))
-     {
-         biscuit_roaring_free(initial_candidates);
-         return result;
-     }
-     
-     if (!starts_percent)
-     {
-         RoaringBitmap *first_match = biscuit_match_part_at_pos(parts[0], part_lens[0], 0);
-         biscuit_roaring_and_inplace(initial_candidates, first_match);
-         biscuit_roaring_free(first_match);
-         
-         if (biscuit_roaring_is_empty(initial_candidates))
-         {
-             biscuit_roaring_free(initial_candidates);
-             return result;
-         }
-         
-         biscuit_recursive_windowed_match(result, parts, part_lens, part_count, ends_percent,
-                                 1, part_lens[0], initial_candidates, global_index->max_len);
-     }
-     else
-     {
-         biscuit_recursive_windowed_match(result, parts, part_lens, part_count, ends_percent,
-                                 0, 0, initial_candidates, global_index->max_len);
-     }
-     
-     biscuit_roaring_free(initial_candidates);
-     return result;
- }
- 
+    RoaringBitmap *result,
+    const char **parts,
+    int *part_lens,
+    int part_count,
+    bool ends_percent,
+    int part_idx,
+    int min_pos,
+    RoaringBitmap *current_candidates,
+    int max_len
+)
+{
+    int i, pos;
+    
+    if (part_idx >= part_count)
+    {
+        biscuit_roaring_or_inplace(result, current_candidates);
+        return;
+    }
+    
+    /* Calculate remaining required length for all future parts */
+    int remaining_len = 0;
+    for (i = part_idx + 1; i < part_count; i++)
+        remaining_len += part_lens[i];
+    
+    /* Special handling for last part without trailing % */
+    if (part_idx == part_count - 1 && !ends_percent)
+    {
+        /* CRITICAL FIX: Filter candidates to ensure the last part can fit
+         * WITHOUT overlapping with where current parts have been matched */
+        RoaringBitmap *last_match = biscuit_match_part_at_end(parts[part_idx], part_lens[part_idx]);
+        biscuit_roaring_and_inplace(last_match, current_candidates);
+        
+        /* ADDITIONAL CHECK: Ensure string is long enough
+         * min_pos indicates where we are, and we need part_lens[part_idx] more characters */
+        uint64_t count = 0;
+        uint32_t *indices = biscuit_roaring_to_array(last_match, &count);
+        RoaringBitmap *filtered = biscuit_roaring_create();
+        
+        for (i = 0; i < count; i++)
+        {
+            uint32_t idx = indices[i];
+            int str_len = strlen(global_index->data[idx]);
+            
+            /* Check if there's room: min_pos + part_lens[part_idx] <= str_len */
+            if (min_pos + part_lens[part_idx] <= str_len)
+            {
+                biscuit_roaring_add(filtered, idx);
+            }
+        }
+        
+        if (indices)
+            pfree(indices);
+        
+        biscuit_roaring_or_inplace(result, filtered);
+        biscuit_roaring_free(filtered);
+        biscuit_roaring_free(last_match);
+        return;
+    }
+    
+    /* Calculate max position for current part */
+    int max_pos = max_len - part_lens[part_idx] - remaining_len;
+    
+    /* Ensure we don't exceed valid range */
+    if (min_pos > max_pos)
+        return;
+    
+    /* Try matching this part at each valid position */
+    for (pos = min_pos; pos <= max_pos; pos++)
+    {
+        RoaringBitmap *part_at_pos = biscuit_match_part_at_pos(parts[part_idx], part_lens[part_idx], pos);
+        
+        biscuit_roaring_and_inplace(part_at_pos, current_candidates);
+        
+        if (!biscuit_roaring_is_empty(part_at_pos))
+        {
+            /* Next part must start AFTER this part ends */
+            biscuit_recursive_windowed_match(result, parts, part_lens, part_count, ends_percent,
+                                    part_idx + 1, pos + part_lens[part_idx], part_at_pos, max_len);
+        }
+        
+        biscuit_roaring_free(part_at_pos);
+    }
+}
+
+static RoaringBitmap* biscuit_match_multipart_windowed_positions(
+    const char **parts, 
+    int *part_lens, 
+    int part_count,
+    bool starts_percent,
+    bool ends_percent
+)
+{
+    RoaringBitmap *result = biscuit_roaring_create();
+    int min_len = 0;
+    int i;
+    
+    /* Calculate total minimum length */
+    for (i = 0; i < part_count; i++)
+        min_len += part_lens[i];
+    
+    /* Single part optimization */
+    if (part_count == 1)
+    {
+        RoaringBitmap *match, *length_filter;
+        
+        if (!starts_percent && !ends_percent)
+        {
+            /* Exact match */
+            match = biscuit_match_part_at_pos(parts[0], part_lens[0], 0);
+            length_filter = (part_lens[0] < global_index->length_idx.max_length) ?
+                biscuit_roaring_copy(global_index->length_idx.length_bitmaps[part_lens[0]]) : biscuit_roaring_create();
+            
+            if (global_index->lazy_del.tombstone_count > 0)
+                biscuit_roaring_andnot_inplace(length_filter, global_index->lazy_del.tombstones);
+            
+            biscuit_roaring_and_inplace(match, length_filter);
+            biscuit_roaring_free(length_filter);
+            return match;
+        }
+        else if (!starts_percent)
+        {
+            /* Prefix match */
+            match = biscuit_match_part_at_pos(parts[0], part_lens[0], 0);
+            length_filter = biscuit_get_length_ge(part_lens[0]);
+            biscuit_roaring_and_inplace(match, length_filter);
+            biscuit_roaring_free(length_filter);
+            return match;
+        }
+        else if (!ends_percent)
+        {
+            /* Suffix match */
+            match = biscuit_match_part_at_end(parts[0], part_lens[0]);
+            length_filter = biscuit_get_length_ge(part_lens[0]);
+            biscuit_roaring_and_inplace(match, length_filter);
+            biscuit_roaring_free(length_filter);
+            return match;
+        }
+        else
+        {
+            /* Contains match */
+            return biscuit_match_part_anywhere(parts[0], part_lens[0]);
+        }
+    }
+    
+    /* Two-part optimization for prefix%suffix */
+    if (part_count == 2 && !starts_percent && !ends_percent)
+    {
+        RoaringBitmap *prefix = biscuit_match_part_at_pos(parts[0], part_lens[0], 0);
+        RoaringBitmap *suffix = biscuit_match_part_at_end(parts[1], part_lens[1]);
+        RoaringBitmap *length_filter = biscuit_get_length_ge(min_len);
+        
+        biscuit_roaring_and_inplace(prefix, suffix);
+        biscuit_roaring_and_inplace(prefix, length_filter);
+        biscuit_roaring_free(suffix);
+        biscuit_roaring_free(length_filter);
+        return prefix;
+    }
+    
+    /* General multipart case */
+    RoaringBitmap *initial_candidates = biscuit_get_length_ge(min_len);
+    
+    if (biscuit_roaring_is_empty(initial_candidates))
+    {
+        biscuit_roaring_free(initial_candidates);
+        return result;
+    }
+    
+    if (!starts_percent)
+    {
+        /* First part must be at position 0 */
+        RoaringBitmap *first_match = biscuit_match_part_at_pos(parts[0], part_lens[0], 0);
+        biscuit_roaring_and_inplace(initial_candidates, first_match);
+        biscuit_roaring_free(first_match);
+        
+        if (biscuit_roaring_is_empty(initial_candidates))
+        {
+            biscuit_roaring_free(initial_candidates);
+            return result;
+        }
+        
+        /* FIXED: Use global max_len, the recursion will handle per-string validation */
+        biscuit_recursive_windowed_match(result, parts, part_lens, part_count, ends_percent,
+                                1, part_lens[0], initial_candidates, global_index->max_len);
+    }
+    else
+    {
+        /* FIXED: Use global max_len, the recursion will handle per-string validation */
+        biscuit_recursive_windowed_match(result, parts, part_lens, part_count, ends_percent,
+                                0, 0, initial_candidates, global_index->max_len);
+    }
+    
+    biscuit_roaring_free(initial_candidates);
+    return result;
+} 
  /* ==================== PATTERN PARSING ==================== */
  
  typedef struct {
@@ -1677,6 +1734,8 @@ static void biscuit_index_insert(const char *pk_str, const char *value)
                                                     new_cap * sizeof(char *));
             new_pks = (char **)MemoryContextAlloc(index_context,
                                                    new_cap * sizeof(char *));
+
+            
             
             memcpy(new_data, global_index->data,
                    global_index->capacity * sizeof(char *));
@@ -2083,6 +2142,7 @@ Datum biscuit_trigger(PG_FUNCTION_ARGS)
     char *col_value;
     int pk_attnum, col_attnum;
     Oid pk_type;
+    int32_t idx;
     
     if (!CALLED_AS_TRIGGER(fcinfo))
         ereport(ERROR, (errmsg("biscuit_trigger: not called by trigger manager")));
@@ -2122,7 +2182,7 @@ Datum biscuit_trigger(PG_FUNCTION_ARGS)
         col_value = col_isnull ? "" : TextDatumGetCString(col_datum);
         
         biscuit_index_insert(pk_str, col_value);
-        
+        idx = biscuit_find_index_by_pk(pk_str);
         pfree(pk_str);  /* Free temporary conversion */
         
         return PointerGetDatum(trigdata->tg_trigtuple);
@@ -2148,6 +2208,7 @@ Datum biscuit_trigger(PG_FUNCTION_ARGS)
         col_value = col_isnull ? "" : TextDatumGetCString(col_datum);
         
         biscuit_index_update(pk_str, col_value);
+        idx = biscuit_find_index_by_pk(pk_str);
         
         pfree(pk_str);
         
@@ -2197,73 +2258,74 @@ Datum biscuit_trigger(PG_FUNCTION_ARGS)
      
      PG_RETURN_INT32((int32_t)result_count);
  }
- 
- PG_FUNCTION_INFO_V1(biscuit_query_rows);
- Datum biscuit_query_rows(PG_FUNCTION_ARGS)
- {
-     FuncCallContext *funcctx;
-     uint32_t *matches;
-     uint32_t array_idx;
-     Datum values[2];
-     bool nulls[2];
-     HeapTuple tuple;
-     Datum result;
-     
-     if (SRF_IS_FIRSTCALL())
-     {
-         MemoryContext oldcontext;
-         text *pattern_text = PG_GETARG_TEXT_PP(0);
-         char *pattern = text_to_cstring(pattern_text);
-         uint64_t result_count = 0;
-         TupleDesc tupdesc;
-         
-         funcctx = SRF_FIRSTCALL_INIT();
-         oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
-         
-         if (!global_index)
-         {
-             MemoryContextSwitchTo(oldcontext);
-             SRF_RETURN_DONE(funcctx);
-         }
-         
-         matches = biscuit_query_internal(pattern, &result_count);
-         funcctx->max_calls = result_count;
-         funcctx->user_fctx = (void *)matches;
-         
-         if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-             ereport(ERROR, (errmsg("function returning record in invalid context")));
-         
-         funcctx->tuple_desc = BlessTupleDesc(tupdesc);
-         MemoryContextSwitchTo(oldcontext);
-     }
-     
-     funcctx = SRF_PERCALL_SETUP();
-     
-     if (funcctx->call_cntr < funcctx->max_calls)
-     {
-         matches = (uint32_t *)funcctx->user_fctx;
-         array_idx = matches[funcctx->call_cntr];
-         
-         nulls[0] = false;
-         nulls[1] = false;
-         
-         values[0] = CStringGetTextDatum(global_index->primary_keys[array_idx]);
-         values[1] = CStringGetTextDatum(global_index->data[array_idx]);
-         
-         tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
-         result = HeapTupleGetDatum(tuple);
-         
-         SRF_RETURN_NEXT(funcctx, result);
-     }
-     
-     if (funcctx->user_fctx)
-     {
-         pfree(funcctx->user_fctx);
-         funcctx->user_fctx = NULL;
-     }
-     
-     SRF_RETURN_DONE(funcctx);
- }
+
+
+PG_FUNCTION_INFO_V1(biscuit_query_rows);
+Datum biscuit_query_rows(PG_FUNCTION_ARGS)
+{
+    FuncCallContext *funcctx;
+    
+    if (SRF_IS_FIRSTCALL())
+    {
+        MemoryContext oldcontext;
+        text *pattern_text = PG_GETARG_TEXT_PP(0);
+        char *pattern = text_to_cstring(pattern_text);
+        uint64_t result_count = 0;
+        uint32_t *matches;
+        TupleDesc tupdesc;
+        AttInMetadata *attinmeta;
+        
+        funcctx = SRF_FIRSTCALL_INIT();
+        oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+        
+        if (!global_index)
+        {
+            MemoryContextSwitchTo(oldcontext);
+            SRF_RETURN_DONE(funcctx);
+        }
+        
+        matches = biscuit_query_internal(pattern, &result_count);
+        funcctx->max_calls = result_count;
+        funcctx->user_fctx = (void *)matches;
+        
+        if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+            ereport(ERROR, (errmsg("function returning record in invalid context")));
+        
+        attinmeta = TupleDescGetAttInMetadata(tupdesc);
+        funcctx->attinmeta = attinmeta;
+        funcctx->tuple_desc = tupdesc;
+        
+        MemoryContextSwitchTo(oldcontext);
+    }
+    
+    funcctx = SRF_PERCALL_SETUP();
+    
+    if (funcctx->call_cntr < funcctx->max_calls)
+    {
+        uint32_t *matches = (uint32_t *)funcctx->user_fctx;
+        uint32_t array_idx = matches[funcctx->call_cntr];
+        char *values[2];
+        HeapTuple tuple;
+        Datum result;
+        
+        /* OPTIMIZATION: Use direct pointers, avoid CStringGetTextDatum */
+        values[0] = global_index->primary_keys[array_idx];
+        values[1] = global_index->data[array_idx];
+        
+        tuple = BuildTupleFromCStrings(funcctx->attinmeta, values);
+        result = HeapTupleGetDatum(tuple);
+        
+        SRF_RETURN_NEXT(funcctx, result);
+    }
+    
+    if (funcctx->user_fctx)
+    {
+        pfree(funcctx->user_fctx);
+        funcctx->user_fctx = NULL;
+    }
+    
+    SRF_RETURN_DONE(funcctx);
+}
  
  /* ==================== INDEX BUILD FUNCTION ==================== */
  
@@ -2352,6 +2414,7 @@ Datum build_biscuit_index(PG_FUNCTION_ARGS)
     global_index->data = (char **)MemoryContextAlloc(index_context, num_records * sizeof(char *));
     global_index->primary_keys = (char **)MemoryContextAlloc(index_context, num_records * sizeof(char *));
     
+
     global_index->table_name = MemoryContextStrdup(index_context, table_str);
     global_index->column_name = MemoryContextStrdup(index_context, column_str);
     global_index->pk_column_name = MemoryContextStrdup(index_context, pk_column_str);
@@ -2645,3 +2708,4 @@ Datum biscuit_status(PG_FUNCTION_ARGS)
      
      PG_RETURN_TEXT_P(cstring_to_text(buf.data));
  }
+ 
