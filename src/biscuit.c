@@ -52,7 +52,7 @@
  PG_MODULE_MAGIC;
  #endif
 
-#define BISCUIT_VERSION "1.0.4-Biscuit"
+#define BISCUIT_VERSION "1.0.5-Biscuit"
 
 PG_FUNCTION_INFO_V1(biscuit_version);
 Datum biscuit_version(PG_FUNCTION_ARGS)
@@ -2132,110 +2132,131 @@ static uint32_t* biscuit_query_internal(const char *pattern, uint64_t *result_co
  /* ==================== POSTGRESQL TRIGGER FUNCTION ==================== */
  
  PG_FUNCTION_INFO_V1(biscuit_trigger);
-Datum biscuit_trigger(PG_FUNCTION_ARGS)
-{
-    TriggerData *trigdata = (TriggerData *) fcinfo->context;
-    HeapTuple tuple;
-    Datum pk_datum, col_datum;
-    bool pk_isnull, col_isnull;
-    char *pk_str;
-    char *col_value;
-    int pk_attnum, col_attnum;
-    Oid pk_type;
-    int32_t idx;
-    
-    if (!CALLED_AS_TRIGGER(fcinfo))
-        ereport(ERROR, (errmsg("biscuit_trigger: not called by trigger manager")));
-    
-    if (!global_index)
-    {
-        if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
-            return PointerGetDatum(trigdata->tg_trigtuple);
-        return PointerGetDatum(trigdata->tg_newtuple);
-    }
-    
-    /* Get column numbers */
-    pk_attnum = SPI_fnumber(trigdata->tg_relation->rd_att, global_index->pk_column_name);
-    col_attnum = SPI_fnumber(trigdata->tg_relation->rd_att, global_index->column_name);
-    
-    if (pk_attnum == SPI_ERROR_NOATTRIBUTE)
-        ereport(ERROR, (errmsg("Column %s not found", global_index->pk_column_name)));
-    if (col_attnum == SPI_ERROR_NOATTRIBUTE)
-        ereport(ERROR, (errmsg("Column %s not found", global_index->column_name)));
-    
-    /* Get PK type */
-    pk_type = SPI_gettypeid(trigdata->tg_relation->rd_att, pk_attnum);
-    
-    /* HANDLE INSERT */
-    if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
-    {
-        tuple = trigdata->tg_trigtuple;
-        
-        pk_datum = SPI_getbinval(tuple, trigdata->tg_relation->rd_att, pk_attnum, &pk_isnull);
-        col_datum = SPI_getbinval(tuple, trigdata->tg_relation->rd_att, col_attnum, &col_isnull);
-        
-        if (pk_isnull)
-            ereport(ERROR, (errmsg("NULL primary key in INSERT")));
-        
-        /* Convert PK to string */
-        pk_str = biscuit_datum_to_pk_string(pk_datum, pk_type, &pk_isnull);
-        col_value = col_isnull ? "" : TextDatumGetCString(col_datum);
-        
-        biscuit_index_insert(pk_str, col_value);
-        idx = biscuit_find_index_by_pk(pk_str);
-        pfree(pk_str);  /* Free temporary conversion */
-        
-        return PointerGetDatum(trigdata->tg_trigtuple);
-    }
-    /* HANDLE UPDATE */
-    /* HANDLE UPDATE */
-    else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
-    {
-        tuple = trigdata->tg_newtuple;
-        
-        pk_datum = SPI_getbinval(tuple, trigdata->tg_relation->rd_att, pk_attnum, &pk_isnull);
-        col_datum = SPI_getbinval(tuple, trigdata->tg_relation->rd_att, col_attnum, &col_isnull);
-        
-        if (pk_isnull)
-            ereport(ERROR, (errmsg("NULL primary key in UPDATE")));
-        
-        /* Convert PK to string */
-        pk_str = biscuit_datum_to_pk_string(pk_datum, pk_type, &pk_isnull);
-        
-        /* ADD THIS DEBUG LINE */
-        //elog(NOTICE, "TRIGGER UPDATE: PK='%s', new_value='%s'", pk_str, col_isnull ? "(null)" : TextDatumGetCString(col_datum));
-        
-        col_value = col_isnull ? "" : TextDatumGetCString(col_datum);
-        
-        biscuit_index_update(pk_str, col_value);
-        idx = biscuit_find_index_by_pk(pk_str);
-        
-        pfree(pk_str);
-        
-        return PointerGetDatum(trigdata->tg_newtuple);
-    }
-    /* HANDLE DELETE */
-    else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
-    {
-        tuple = trigdata->tg_trigtuple;
-        
-        pk_datum = SPI_getbinval(tuple, trigdata->tg_relation->rd_att, pk_attnum, &pk_isnull);
-        
-        if (pk_isnull)
-            ereport(ERROR, (errmsg("NULL primary key in DELETE")));
-        
-        /* Convert PK to string */
-        pk_str = biscuit_datum_to_pk_string(pk_datum, pk_type, &pk_isnull);
-        
-        biscuit_index_delete(pk_str);
-        
-        pfree(pk_str);  /* Free temporary conversion */
-        
-        return PointerGetDatum(trigdata->tg_trigtuple);
-    }
-    
-    return PointerGetDatum(NULL);
-}
+ Datum biscuit_trigger(PG_FUNCTION_ARGS)
+ {
+     TriggerData *trigdata = (TriggerData *) fcinfo->context;
+     HeapTuple tuple;
+     Datum pk_datum, col_datum;
+     bool pk_isnull, col_isnull;
+     char *pk_str;
+     char *col_value;
+     char *col_value_copy;  /* ADDED: Persistent copy */
+     int pk_attnum, col_attnum;
+     Oid pk_type;
+     MemoryContext oldcontext;  /* ADDED: Context management */
+     
+     if (!CALLED_AS_TRIGGER(fcinfo))
+         ereport(ERROR, (errmsg("biscuit_trigger: not called by trigger manager")));
+     
+     if (!global_index)
+     {
+         if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+             return PointerGetDatum(trigdata->tg_trigtuple);
+         return PointerGetDatum(trigdata->tg_newtuple);
+     }
+     
+     /* Get column numbers */
+     pk_attnum = SPI_fnumber(trigdata->tg_relation->rd_att, global_index->pk_column_name);
+     col_attnum = SPI_fnumber(trigdata->tg_relation->rd_att, global_index->column_name);
+     
+     if (pk_attnum == SPI_ERROR_NOATTRIBUTE)
+         ereport(ERROR, (errmsg("Column %s not found", global_index->pk_column_name)));
+     if (col_attnum == SPI_ERROR_NOATTRIBUTE)
+         ereport(ERROR, (errmsg("Column %s not found", global_index->column_name)));
+     
+     /* Get PK type */
+     pk_type = SPI_gettypeid(trigdata->tg_relation->rd_att, pk_attnum);
+     
+     /* HANDLE INSERT */
+     if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+     {
+         tuple = trigdata->tg_trigtuple;
+         
+         pk_datum = SPI_getbinval(tuple, trigdata->tg_relation->rd_att, pk_attnum, &pk_isnull);
+         col_datum = SPI_getbinval(tuple, trigdata->tg_relation->rd_att, col_attnum, &col_isnull);
+         
+         if (pk_isnull)
+             ereport(ERROR, (errmsg("NULL primary key in INSERT")));
+         
+         /* Convert PK to string */
+         pk_str = biscuit_datum_to_pk_string(pk_datum, pk_type, &pk_isnull);
+         
+         /* CRITICAL FIX: Get column value and make persistent copy */
+         if (col_isnull)
+         {
+             col_value_copy = pstrdup("");
+         }
+         else
+         {
+             col_value = TextDatumGetCString(col_datum);
+             col_value_copy = pstrdup(col_value);  /* Create persistent copy */
+             pfree(col_value);  /* Free temporary */
+         }
+         
+         /* Now insert with the persistent copy */
+         biscuit_index_insert(pk_str, col_value_copy);
+         
+         pfree(pk_str);
+         pfree(col_value_copy);  /* Free our copy - biscuit_index_insert makes its own */
+         
+         return PointerGetDatum(trigdata->tg_trigtuple);
+     }
+     /* HANDLE UPDATE */
+     else if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+     {
+         tuple = trigdata->tg_newtuple;
+         
+         pk_datum = SPI_getbinval(tuple, trigdata->tg_relation->rd_att, pk_attnum, &pk_isnull);
+         col_datum = SPI_getbinval(tuple, trigdata->tg_relation->rd_att, col_attnum, &col_isnull);
+         
+         if (pk_isnull)
+             ereport(ERROR, (errmsg("NULL primary key in UPDATE")));
+         
+         /* Convert PK to string */
+         pk_str = biscuit_datum_to_pk_string(pk_datum, pk_type, &pk_isnull);
+         
+         /* CRITICAL FIX: Get column value and make persistent copy */
+         if (col_isnull)
+         {
+             col_value_copy = pstrdup("");
+         }
+         else
+         {
+             col_value = TextDatumGetCString(col_datum);
+             col_value_copy = pstrdup(col_value);  /* Create persistent copy */
+             pfree(col_value);  /* Free temporary */
+         }
+         
+         /* Now update with the persistent copy */
+         biscuit_index_update(pk_str, col_value_copy);
+         
+         pfree(pk_str);
+         pfree(col_value_copy);  /* Free our copy - biscuit_index_update makes its own */
+         
+         return PointerGetDatum(trigdata->tg_newtuple);
+     }
+     /* HANDLE DELETE */
+     else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
+     {
+         tuple = trigdata->tg_trigtuple;
+         
+         pk_datum = SPI_getbinval(tuple, trigdata->tg_relation->rd_att, pk_attnum, &pk_isnull);
+         
+         if (pk_isnull)
+             ereport(ERROR, (errmsg("NULL primary key in DELETE")));
+         
+         /* Convert PK to string */
+         pk_str = biscuit_datum_to_pk_string(pk_datum, pk_type, &pk_isnull);
+         
+         biscuit_index_delete(pk_str);
+         
+         pfree(pk_str);
+         
+         return PointerGetDatum(trigdata->tg_trigtuple);
+     }
+     
+     return PointerGetDatum(NULL);
+ }
  /* ==================== POSTGRESQL QUERY FUNCTIONS ==================== */
  
  PG_FUNCTION_INFO_V1(biscuit_query);
