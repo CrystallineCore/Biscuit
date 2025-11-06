@@ -2,6 +2,8 @@
 
 A PostgreSQL extension for accelerating wildcard pattern matching queries using bitmap indexing.
 
+### Updates in 1.0.6
+ - Introduced a new bitmap that stores records having length greater than 'n', to reduce computational cost.
 
 ## Technical Overview
 
@@ -490,19 +492,20 @@ SELECT biscuit_cleanup();
 
 **Solution**: If you have other triggers, ensure proper ordering or disable BISCUIT triggers during maintenance windows.
 
+
 ## License
 
 BISCUIT is released under the PostgreSQL License.
 
 ## Version
 
-Current version: 1.0.4-Biscuit
+**Current version:** 1.0.6-Biscuit
 
 Use `SELECT biscuit_version();` to check your installed version.
 
 ## Summary
 
-**BISCUIT makes wildcard queries faster by trading memory and build time for query performance.** 
+BISCUIT makes wildcard queries faster by trading memory and build time for query performance.
 
 It's not magic—it's a bitmap index that:
 - Pre-computes character positions
@@ -510,11 +513,19 @@ It's not magic—it's a bitmap index that:
 - Still requires O(n) time to return n results
 - Requires memory proportional to your data size
 
-**Use it when**: You have moderate-sized datasets with lots of wildcard queries and don't mind the memory overhead.
+## Contributors
 
-**Don't use it when**: You need full-text search, have extreme write loads, or are memory-constrained.
+BISCUIT is developed and maintained by [Sivaprasad Murali](https://linkedin.com/in/sivaprasad-murali) .
 
----
+
+## Support and Contact
+
+
+**Issues:** https://github.com/crystallinecore/biscuit/issues
+
+**Discussions:** https://github.com/crystallinecore/biscuit/discussions
+
+##
 
 **When pg_trgm feels half-baked, grab a BISCUIT 🍪**
 

@@ -2,14 +2,14 @@
   "name": "biscuit",
   "abstract": "A fast bitmap-based pattern matcher for PostgreSQL",
   "description": "Biscuit provides efficient bitmap-based searching with deterministic results.",
-  "version": "1.0.3",
+  "version": "1.0.6",
   "maintainer": [ "Sivaprasad Murali <sivaprasad.off@gmail.com>" ],
   "license": "mit",
   "provides": {
     "biscuit": {
       "file": "sql/biscuit--1.1.sql",
       "docfile": "README.md",
-      "version": "1.0.3"
+      "version": "1.0.6"
     }
   },
   "tags": [
