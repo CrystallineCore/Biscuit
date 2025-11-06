@@ -52,7 +52,7 @@
  PG_MODULE_MAGIC;
  #endif
 
-#define BISCUIT_VERSION "1.0.5-Biscuit"
+#define BISCUIT_VERSION "1.0.6-Biscuit"
 
 PG_FUNCTION_INFO_V1(biscuit_version);
 Datum biscuit_version(PG_FUNCTION_ARGS)
@@ -293,6 +293,7 @@ Datum biscuit_version(PG_FUNCTION_ARGS)
  
  typedef struct {
      RoaringBitmap **length_bitmaps;
+     RoaringBitmap **length_ge_bitmaps;
      int max_length;
  } LengthIndex;
  
@@ -594,11 +595,19 @@ static void biscuit_remove_pk_mapping(const char *pk_str)
                                    global_index->lazy_del.tombstones);
     }
     
-    /* Cleanup length index */
+    /* Cleanup exact length index */
     for (j = 0; j < global_index->length_idx.max_length; j++)
     {
         if (global_index->length_idx.length_bitmaps[j])
             biscuit_roaring_andnot_inplace(global_index->length_idx.length_bitmaps[j],
+                                   global_index->lazy_del.tombstones);
+    }
+    
+    /* NEW: Cleanup cumulative length_ge index */
+    for (j = 0; j < global_index->length_idx.max_length; j++)
+    {
+        if (global_index->length_idx.length_ge_bitmaps[j])
+            biscuit_roaring_andnot_inplace(global_index->length_idx.length_ge_bitmaps[j],
                                    global_index->lazy_del.tombstones);
     }
     
@@ -768,26 +777,74 @@ static void biscuit_remove_pk_mapping(const char *pk_str)
  
  static RoaringBitmap* biscuit_get_length_ge(int min_len)
  {
-     RoaringBitmap *result = biscuit_roaring_create();
-     int len;
-     
-     for (len = min_len; len < global_index->length_idx.max_length; len++)
-     {
-         if (global_index->length_idx.length_bitmaps[len])
-         {
-             RoaringBitmap *filtered = biscuit_roaring_copy(global_index->length_idx.length_bitmaps[len]);
-             
-             /* Filter tombstones */
-             if (global_index->lazy_del.tombstone_count > 0)
-                 biscuit_roaring_andnot_inplace(filtered, global_index->lazy_del.tombstones);
-             
-             biscuit_roaring_or_inplace(result, filtered);
-             biscuit_roaring_free(filtered);
-         }
-     }
-     
-     return result;
+    if (min_len >= global_index->length_idx.max_length)
+        return biscuit_roaring_create();
+
+    /* Direct copy - no unions needed! */
+    RoaringBitmap *result = biscuit_roaring_copy(
+        global_index->length_idx.length_ge_bitmaps[min_len]
+    );
+
+    /* Filter tombstones once */
+    if (global_index->lazy_del.tombstone_count > 0)
+        biscuit_roaring_andnot_inplace(result, global_index->lazy_del.tombstones);
+
+    return result;
  }
+
+ static RoaringBitmap* biscuit_get_exact_length_from_ge(int exact_len)
+{
+    if (exact_len >= global_index->length_idx.max_length)
+        return biscuit_roaring_create();
+    
+    /* exact_length[n] = length_ge[n] AND NOT length_ge[n+1] */
+    RoaringBitmap *result = biscuit_roaring_copy(
+        global_index->length_idx.length_ge_bitmaps[exact_len]
+    );
+    
+    if (exact_len + 1 < global_index->length_idx.max_length)
+    {
+        biscuit_roaring_andnot_inplace(result, 
+            global_index->length_idx.length_ge_bitmaps[exact_len + 1]);
+    }
+    
+    /* Filter tombstones */
+    if (global_index->lazy_del.tombstone_count > 0)
+        biscuit_roaring_andnot_inplace(result, global_index->lazy_del.tombstones);
+    
+    return result;
+}
+
+/* Build cumulative length_ge bitmaps from exact length bitmaps */
+static void biscuit_build_cumulative_length_bitmaps(void)
+{
+    int len, idx;
+    
+    /* Allocate length_ge array (same size as length_bitmaps + 1 for sentinel) */
+    global_index->length_idx.length_ge_bitmaps = (RoaringBitmap **)MemoryContextAlloc(
+        index_context,
+        (global_index->length_idx.max_length + 1) * sizeof(RoaringBitmap *)
+    );
+    
+    /* Initialize all bitmaps */
+    for (len = 0; len <= global_index->length_idx.max_length; len++)
+        global_index->length_idx.length_ge_bitmaps[len] = biscuit_roaring_create();
+    
+    /* Build cumulative bitmaps: length_ge[i] contains all records with len >= i */
+    for (idx = 0; idx < global_index->num_records; idx++)
+    {
+        if (global_index->data[idx] == NULL)
+            continue;
+        
+        int str_len = strlen(global_index->data[idx]);
+        
+        /* Add this record to length_ge[0], length_ge[1], ..., length_ge[str_len] */
+        for (len = 0; len <= str_len && len < global_index->length_idx.max_length; len++)
+            biscuit_roaring_add(global_index->length_idx.length_ge_bitmaps[len], (uint32_t)idx);
+    }
+    
+    /* length_ge[max_length] remains empty (sentinel for boundary checks) */
+}
  
  static RoaringBitmap* biscuit_get_any_char_at_pos(int pos)
  {
@@ -1412,104 +1469,141 @@ static RoaringBitmap* biscuit_match_multipart_windowed_positions(
  
  /* ==================== BISCUIT: CRUD OPERATIONS ==================== */
  
-static void biscuit_add_to_index(uint32_t idx, const char *str)
-{
-    int len = strlen(str);
-    int pos, i;
-    RoaringBitmap *existing_bm;
-    
-    /* Handle empty string case */
-    if (len == 0)
-    {
-        /* Ensure length bitmap for 0 exists */
-        if (0 >= global_index->length_idx.max_length)
-        {
-            int old_max = global_index->length_idx.max_length;
-            int new_max = 1;
-            RoaringBitmap **new_bitmaps = (RoaringBitmap **)MemoryContextAlloc(
-                index_context,
-                new_max * sizeof(RoaringBitmap *)
-            );
-            
-            if (old_max > 0)
-                memcpy(new_bitmaps, global_index->length_idx.length_bitmaps,
-                       old_max * sizeof(RoaringBitmap *));
-            
-            for (i = old_max; i < new_max; i++)
-                new_bitmaps[i] = NULL;
-            
-            global_index->length_idx.length_bitmaps = new_bitmaps;
-            global_index->length_idx.max_length = new_max;
-        }
-        
-        if (!global_index->length_idx.length_bitmaps[0])
-            global_index->length_idx.length_bitmaps[0] = biscuit_roaring_create();
-        biscuit_roaring_add(global_index->length_idx.length_bitmaps[0], idx);
-        
-        return;
-    }
-    
-    if (len > MAX_POSITIONS)
-        len = MAX_POSITIONS;
-    
-    /* Index all character positions */
-    for (pos = 0; pos < len; pos++)
-    {
-        unsigned char uch = (unsigned char)str[pos];
-        
-        /* Positive position index */
-        existing_bm = biscuit_get_pos_bitmap(uch, pos);
-        if (!existing_bm)
-        {
-            existing_bm = biscuit_roaring_create();
-            biscuit_set_pos_bitmap(uch, pos, existing_bm);
-        }
-        biscuit_roaring_add(existing_bm, idx);
-        
-        /* Negative position index (from end) */
-        int neg_offset = -(len - pos);
-        existing_bm = biscuit_get_neg_bitmap(uch, neg_offset);
-        if (!existing_bm)
-        {
-            existing_bm = biscuit_roaring_create();
-            biscuit_set_neg_bitmap(uch, neg_offset, existing_bm);
-        }
-        biscuit_roaring_add(existing_bm, idx);
-        
-        /* Character cache */
-        if (!global_index->char_cache[uch])
-            global_index->char_cache[uch] = biscuit_roaring_create();
-        biscuit_roaring_add(global_index->char_cache[uch], idx);
-    }
-    
-    /* Add to length index */
-    if (len >= global_index->length_idx.max_length)
-    {
-        int old_max = global_index->length_idx.max_length;
-        int new_max = len + 1;
-        RoaringBitmap **new_bitmaps = (RoaringBitmap **)MemoryContextAlloc(
-            index_context,
-            new_max * sizeof(RoaringBitmap *)
-        );
-        
-        if (old_max > 0)
-            memcpy(new_bitmaps, global_index->length_idx.length_bitmaps,
-                   old_max * sizeof(RoaringBitmap *));
-        
-        for (i = old_max; i < new_max; i++)
-            new_bitmaps[i] = NULL;
-        
-        global_index->length_idx.length_bitmaps = new_bitmaps;
-        global_index->length_idx.max_length = new_max;
-    }
-    
-    if (!global_index->length_idx.length_bitmaps[len])
-        global_index->length_idx.length_bitmaps[len] = biscuit_roaring_create();
-    biscuit_roaring_add(global_index->length_idx.length_bitmaps[len], idx);
-    
-    if (len > global_index->max_len)
-        global_index->max_len = len;
-}
+ static void biscuit_add_to_index(uint32_t idx, const char *str)
+ {
+     int len = strlen(str);
+     int pos, i;
+     RoaringBitmap *existing_bm;
+     
+     /* Handle empty string case */
+     if (len == 0)
+     {
+         /* Ensure length bitmaps for 0 exist */
+         if (0 >= global_index->length_idx.max_length)
+         {
+             int old_max = global_index->length_idx.max_length;
+             int new_max = 1;
+             
+             /* Expand exact length bitmaps */
+             RoaringBitmap **new_bitmaps = (RoaringBitmap **)MemoryContextAlloc(
+                 index_context,
+                 new_max * sizeof(RoaringBitmap *)
+             );
+             
+             /* NEW: Expand cumulative bitmaps */
+             RoaringBitmap **new_ge_bitmaps = (RoaringBitmap **)MemoryContextAlloc(
+                 index_context,
+                 (new_max + 1) * sizeof(RoaringBitmap *)
+             );
+             
+             if (old_max > 0)
+             {
+                 memcpy(new_bitmaps, global_index->length_idx.length_bitmaps,
+                        old_max * sizeof(RoaringBitmap *));
+                 memcpy(new_ge_bitmaps, global_index->length_idx.length_ge_bitmaps,
+                        old_max * sizeof(RoaringBitmap *));
+             }
+             
+             for (i = old_max; i < new_max; i++)
+                 new_bitmaps[i] = NULL;
+             
+             for (i = old_max; i <= new_max; i++)
+                 new_ge_bitmaps[i] = biscuit_roaring_create();
+             
+             global_index->length_idx.length_bitmaps = new_bitmaps;
+             global_index->length_idx.length_ge_bitmaps = new_ge_bitmaps;
+             global_index->length_idx.max_length = new_max;
+         }
+         
+         if (!global_index->length_idx.length_bitmaps[0])
+             global_index->length_idx.length_bitmaps[0] = biscuit_roaring_create();
+         biscuit_roaring_add(global_index->length_idx.length_bitmaps[0], idx);
+         
+         /* NEW: Add to cumulative bitmap */
+         biscuit_roaring_add(global_index->length_idx.length_ge_bitmaps[0], idx);
+         
+         return;
+     }
+     
+     if (len > MAX_POSITIONS)
+         len = MAX_POSITIONS;
+     
+     /* [Character indexing code - UNCHANGED] */
+     for (pos = 0; pos < len; pos++)
+     {
+         unsigned char uch = (unsigned char)str[pos];
+         
+         existing_bm = biscuit_get_pos_bitmap(uch, pos);
+         if (!existing_bm)
+         {
+             existing_bm = biscuit_roaring_create();
+             biscuit_set_pos_bitmap(uch, pos, existing_bm);
+         }
+         biscuit_roaring_add(existing_bm, idx);
+         
+         int neg_offset = -(len - pos);
+         existing_bm = biscuit_get_neg_bitmap(uch, neg_offset);
+         if (!existing_bm)
+         {
+             existing_bm = biscuit_roaring_create();
+             biscuit_set_neg_bitmap(uch, neg_offset, existing_bm);
+         }
+         biscuit_roaring_add(existing_bm, idx);
+         
+         if (!global_index->char_cache[uch])
+             global_index->char_cache[uch] = biscuit_roaring_create();
+         biscuit_roaring_add(global_index->char_cache[uch], idx);
+     }
+     
+     /* Expand if needed */
+     if (len >= global_index->length_idx.max_length)
+     {
+         int old_max = global_index->length_idx.max_length;
+         int new_max = len + 1;
+         
+         RoaringBitmap **new_bitmaps = (RoaringBitmap **)MemoryContextAlloc(
+             index_context,
+             new_max * sizeof(RoaringBitmap *)
+         );
+         
+         /* NEW: Expand cumulative bitmaps with sentinel */
+         RoaringBitmap **new_ge_bitmaps = (RoaringBitmap **)MemoryContextAlloc(
+             index_context,
+             (new_max + 1) * sizeof(RoaringBitmap *)
+         );
+         
+         if (old_max > 0)
+         {
+             memcpy(new_bitmaps, global_index->length_idx.length_bitmaps,
+                    old_max * sizeof(RoaringBitmap *));
+             memcpy(new_ge_bitmaps, global_index->length_idx.length_ge_bitmaps,
+                    old_max * sizeof(RoaringBitmap *));
+         }
+         
+         for (i = old_max; i < new_max; i++)
+             new_bitmaps[i] = NULL;
+         
+         for (i = old_max; i <= new_max; i++)
+             new_ge_bitmaps[i] = biscuit_roaring_create();
+         
+         global_index->length_idx.length_bitmaps = new_bitmaps;
+         global_index->length_idx.length_ge_bitmaps = new_ge_bitmaps;
+         global_index->length_idx.max_length = new_max;
+     }
+     
+     /* Add to exact length bitmap */
+     if (!global_index->length_idx.length_bitmaps[len])
+         global_index->length_idx.length_bitmaps[len] = biscuit_roaring_create();
+     biscuit_roaring_add(global_index->length_idx.length_bitmaps[len], idx);
+     
+     /* NEW: Add to cumulative bitmaps length_ge[0..len] */
+     for (i = 0; i <= len && i < global_index->length_idx.max_length; i++)
+         biscuit_roaring_add(global_index->length_idx.length_ge_bitmaps[i], idx);
+     
+     if (len > global_index->max_len)
+         global_index->max_len = len;
+ }
+ 
  /* Incremental update for similar strings */
 static bool biscuit_update_incremental(uint32_t idx, const char *old_value, const char *new_value)
 {
@@ -1631,6 +1725,17 @@ static void biscuit_resurrect_slot(uint32_t idx)
         }
     }
 }
+static void biscuit_remove_from_length_ge(uint32_t idx, int old_len)
+{
+    int i;
+    
+    /* Remove from length_ge[0..old_len] only (not all bitmaps) */
+    for (i = 0; i <= old_len && i < global_index->length_idx.max_length; i++)
+    {
+        if (global_index->length_idx.length_ge_bitmaps[i])
+            biscuit_roaring_remove(global_index->length_idx.length_ge_bitmaps[i], idx);
+    }
+}
 
 static void biscuit_remove_from_all_indices(uint32_t idx)
 {
@@ -1656,19 +1761,21 @@ static void biscuit_remove_from_all_indices(uint32_t idx)
                 biscuit_roaring_remove(bm, idx);
         }
         
-        /* Remove from character cache */
         if (global_index->char_cache[ch])
             biscuit_roaring_remove(global_index->char_cache[ch], idx);
     }
     
-    /* Remove from ALL length bitmaps */
+    /* Remove from ALL exact length bitmaps */
     for (j = 0; j < global_index->length_idx.max_length; j++)
     {
         if (global_index->length_idx.length_bitmaps[j])
             biscuit_roaring_remove(global_index->length_idx.length_bitmaps[j], idx);
     }
+    
+    /* CRITICAL FIX: Do NOT remove from length_ge here!
+     * length_ge bitmaps are handled by biscuit_remove_from_length_ge()
+     * Removing here causes double-removal and breaks the index */
 }
-
 
 static void biscuit_index_update(const char *pk_str, const char *new_value);
 
@@ -1686,13 +1793,9 @@ static void biscuit_index_insert(const char *pk_str, const char *value)
     if (!pk_str)
         ereport(ERROR, (errmsg("NULL primary key")));
     
-    //elog(DEBUG1, "biscuit_index_insert: Called for PK='%s', value='%s'", pk_str, value);
-    
-    /* CHECK: Does this PK already exist? */
     existing_idx = biscuit_find_index_by_pk(pk_str);
     if (existing_idx >= 0)
     {
-        //elog(WARNING, "biscuit_index_insert: PK '%s' already exists at index %d, converting to UPDATE", pk_str, existing_idx);
         biscuit_index_update(pk_str, value);
         return;
     }
@@ -1702,17 +1805,23 @@ static void biscuit_index_insert(const char *pk_str, const char *value)
     /* Try to reuse a deleted index */
     if (biscuit_pop_free_index(&global_index->free_list, &idx))
     {
-        //elog(DEBUG1, "biscuit_index_insert: Reusing slot %u", idx);
-        
-        /* CRITICAL FIX: Remove from tombstone tracking */
+        /* CRITICAL FIX #1: Clear tombstone FIRST before ANY operations */
         biscuit_resurrect_slot(idx);
+        
+        /* CRITICAL FIX #2: Get old length AFTER resurrection but BEFORE cleanup */
+        int old_len = global_index->data[idx] ? strlen(global_index->data[idx]) : 0;
+        
+        /* Now safe to remove from old indices */
+        biscuit_remove_from_length_ge(idx, old_len);
         biscuit_remove_from_all_indices(idx);
-        /* Reuse existing slot */
+        
+        /* Free old data */
         if (global_index->data[idx])
             pfree(global_index->data[idx]);
         if (global_index->primary_keys[idx])
             pfree(global_index->primary_keys[idx]);
         
+        /* Allocate new data */
         value_copy = pstrdup(value);
         pk_copy = pstrdup(pk_str);
         
@@ -1721,21 +1830,14 @@ static void biscuit_index_insert(const char *pk_str, const char *value)
     }
     else
     {
-        /* Allocate new slot */
+        /* Allocate new slot (no cleanup needed) */
         if (global_index->num_records >= global_index->capacity)
         {
             int new_cap = global_index->capacity * 2;
-            char **new_data;
-            char **new_pks;
-            
-            //elog(DEBUG1, "biscuit_index_insert: Expanding capacity from %d to %d", global_index->capacity, new_cap);
-            
-            new_data = (char **)MemoryContextAlloc(index_context,
-                                                    new_cap * sizeof(char *));
-            new_pks = (char **)MemoryContextAlloc(index_context,
-                                                   new_cap * sizeof(char *));
-
-            
+            char **new_data = (char **)MemoryContextAlloc(index_context,
+                                                          new_cap * sizeof(char *));
+            char **new_pks = (char **)MemoryContextAlloc(index_context,
+                                                         new_cap * sizeof(char *));
             
             memcpy(new_data, global_index->data,
                    global_index->capacity * sizeof(char *));
@@ -1748,7 +1850,6 @@ static void biscuit_index_insert(const char *pk_str, const char *value)
         }
         
         idx = global_index->num_records;
-        //elog(DEBUG1, "biscuit_index_insert: Allocating new slot %u", idx);
         
         value_copy = pstrdup(value);
         pk_copy = pstrdup(pk_str);
@@ -1758,15 +1859,11 @@ static void biscuit_index_insert(const char *pk_str, const char *value)
         global_index->num_records++;
     }
     
-    /* CRITICAL FIX: Add to hash table using the STORED pointer */
+    /* Add PK mapping and index the new value */
     biscuit_add_pk_mapping(global_index->primary_keys[idx], idx);
-    
-    /* Add to indices */
     biscuit_add_to_index(idx, value_copy);
     
     global_index->insert_count++;
-    
-    //elog(NOTICE, "biscuit_index_insert: Successfully inserted PK='%s' at index %u", pk_str, idx);
     
     MemoryContextSwitchTo(oldcontext);
 }
@@ -1782,19 +1879,12 @@ static void biscuit_index_update(const char *pk_str, const char *new_value)
     if (!global_index)
         return;
     
-    //elog(DEBUG1, "biscuit_index_update: Called for PK='%s'", pk_str);
-    
-    /* O(1) hash table lookup */
-    idx = biscuit_biscuit_find_index_by_pk_debug(pk_str, false);  /* Enable debug logging */
+    idx = biscuit_find_index_by_pk(pk_str);
     if (idx < 0)
     {
-        /* If not found, treat as insert */
-        //elog(NOTICE, "biscuit_index_update: PK '%s' not found, treating as INSERT", pk_str);
         biscuit_index_insert(pk_str, new_value);
         return;
     }
-    
-    //elog(NOTICE, "biscuit_index_update: Found existing record at index %d", idx);
     
     oldcontext = MemoryContextSwitchTo(index_context);
     
@@ -1804,32 +1894,37 @@ static void biscuit_index_update(const char *pk_str, const char *new_value)
     old_len = strlen(old_value);
     new_len = strlen(new_value_copy);
     
-    /* Try incremental update ONLY for same-length strings */
+    /* Try incremental update for same-length strings */
     if (old_len == new_len && old_len >= 3 && 
         biscuit_update_incremental((uint32_t)idx, old_value, new_value_copy))
     {
-        /* Success - just update the data pointer */
         pfree(old_value);
         global_index->data[idx] = new_value_copy;
         global_index->update_count++;
-        //elog(NOTICE, "biscuit_index_update: Incremental update successful");
+        /* NOTE: length_ge unchanged for same-length strings ✓ */
         MemoryContextSwitchTo(oldcontext);
         return;
     }
     
-    //elog(NOTICE, "biscuit_index_update: Performing full reindex (old_len=%d, new_len=%d)", old_len, new_len);
+    /* CRITICAL: Full reindex with proper length_ge cleanup */
     
-    /* Full reindex approach */
+    /* Step 1: Remove from old length_ge range [0..old_len] */
+    biscuit_remove_from_length_ge((uint32_t)idx, old_len);
+    
+    /* Step 2: Remove from char/position indices */
     biscuit_remove_from_all_indices((uint32_t)idx);
+    
+    /* Step 3: Update data pointer */
     pfree(old_value);
     global_index->data[idx] = new_value_copy;
+    
+    /* Step 4: Re-add with new length (this adds to length_ge[0..new_len]) */
     biscuit_add_to_index((uint32_t)idx, new_value_copy);
     
     global_index->update_count++;
     
     MemoryContextSwitchTo(oldcontext);
 }
-
  /* INSERT */
  
 /* DELETE (O(1) with lazy tombstones) */
@@ -2581,7 +2676,7 @@ Datum build_biscuit_index(PG_FUNCTION_ARGS)
         
         biscuit_roaring_add(global_index->length_idx.length_bitmaps[len], (uint32_t)idx);
     }
-    
+    biscuit_build_cumulative_length_bitmaps();
     global_index->memory_used = sizeof(RoaringIndex);
     for (ch_idx = 0; ch_idx < CHAR_RANGE; ch_idx++)
     {
@@ -2595,6 +2690,11 @@ Datum build_biscuit_index(PG_FUNCTION_ARGS)
     {
         if (global_index->length_idx.length_bitmaps[i])
             global_index->memory_used += biscuit_roaring_size_bytes(global_index->length_idx.length_bitmaps[i]);
+    }
+    for (i = 0; i <= global_index->length_idx.max_length; i++)
+    {
+        if (global_index->length_idx.length_ge_bitmaps[i])
+            global_index->memory_used += biscuit_roaring_size_bytes(global_index->length_idx.length_ge_bitmaps[i]);
     }
     
     MemoryContextSwitchTo(oldcontext);
@@ -2685,6 +2785,10 @@ Datum biscuit_status(PG_FUNCTION_ARGS)
     appendStringInfo(&buf, "  Items cleaned: %lld\n",
                     (long long)global_index->lazy_del.items_cleaned);
     appendStringInfo(&buf, "  Query/Delete ratio: %.2f\n", query_ratio);
+    appendStringInfo(&buf, "----------------------------------------\n");
+    appendStringInfo(&buf, "Index Statistics:\n");
+    appendStringInfo(&buf, "  Exact length bitmaps: %d\n", global_index->length_idx.max_length);
+    appendStringInfo(&buf, "  Cumulative (>=) bitmaps: %d\n", global_index->length_idx.max_length + 1);
     appendStringInfo(&buf, "----------------------------------------\n");
     appendStringInfo(&buf, "Optimizations:\n");
     appendStringInfo(&buf, "  ✓ O(1) hash table PK lookup\n");
