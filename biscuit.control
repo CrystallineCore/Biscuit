@@ -1,0 +1,18 @@
+# biscuit.control
+# Control file for PostgreSQL biscuit extension
+
+# Extension metadata
+default_version = '1.0'
+comment = 'Bitmap-based pattern matching approach with union and intersection techniques.'
+
+# Module name (must match the shared library name without .so)
+module_pathname = '$libdir/biscuit'
+
+# Supported PostgreSQL versions
+# Minimum version: PostgreSQL 12.0
+# Tested on: PostgreSQL 16
+relocatable = false
+schema = public
+
+# SQL objects to be created
+requires = 'plpgsql'
