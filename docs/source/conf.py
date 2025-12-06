@@ -85,7 +85,6 @@ html_meta = {
 
 myst_enable_extensions = [
     "colon_fence",
-    "linkify",
     "deflist",
     "smartquotes",
     "tasklist",
