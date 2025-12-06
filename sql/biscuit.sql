@@ -60,7 +60,7 @@ Usage: SELECT biscuit_index_stats(''index_name''::regclass::oid);';
 CREATE OPERATOR CLASS biscuit_text_ops
 DEFAULT FOR TYPE text USING biscuit AS
     OPERATOR 1 ~~ (text, text),          -- LIKE operator
-    OPERATOR 2 ~~* (text, text),         -- ILIKE operator (case-insensitive)
+    OPERATOR 2 !~~ (text, text),     -- NOT LIKE operator
     FUNCTION 1 biscuit_like_support(internal);
 
 COMMENT ON OPERATOR CLASS biscuit_text_ops USING biscuit IS

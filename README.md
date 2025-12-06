@@ -3,20 +3,23 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PostgreSQL: 12+](https://img.shields.io/badge/PostgreSQL-16%2B-blue.svg)](https://www.postgresql.org/)
 
-**Biscuit** is a specialized PostgreSQL index access method (IAM) designed for blazing-fast pattern matching on `LIKE`  queries, with native support for multi-column searches. It eliminates the recheck overhead of trigram indexes while delivering significant performance improvements on wildcard-heavy queries.
+**Biscuit** is a specialized PostgreSQL index access method (IAM) designed for blazing-fast pattern matching on `LIKE`  queries, with native support for multi-column searches. It eliminates the recheck overhead of trigram indexes while delivering significant performance improvements on wildcard-heavy queries. It stands for _Bitmap Indexed Searching with Comprehensive Union and Intersection Techniques_.
 
 ---
 
-## 🚀 **Performance Highlights**
+**What's new?**
 
+**v2.0.1 (2024-12-06)**
 
-**Key advantages:**
-- ✅ **Zero recheck overhead** - Returns exact matches, no heap access for validation
-- ✅ **Multi-column optimization** - Query planning across columns
-- ✅ **Query Planning** - Intelligent score-based execution ordering for multiple pattern filters
+* **Fixed incorrect results** when using multiple `LIKE` / `NOT LIKE` predicates on the same column.
+* Root cause: global (not per-predicate) bitmap inversion.
+* Fix: correct per-predicate bitmap handling; all multi-filter patterns now return accurate results.
+* Added full, efficient support for the `NOT LIKE` operator.
+* Backward-compatible; recommended to update and re-verify critical queries.
+
 ---
 
-## 📦 **Installation**
+##  **Installation**
 
 ### **Requirements**
 - Build tools: `gcc`, `make`, `pg_config`
@@ -46,7 +49,7 @@ psql -d your_database -c "CREATE EXTENSION biscuit;"
 
 ---
 
-## 🎯 **Quick Start**
+##  **Quick Start**
 
 ### **Basic Usage**
 
@@ -56,7 +59,7 @@ CREATE INDEX idx_users_name ON users USING biscuit(name);
 
 -- Query with wildcard patterns
 SELECT * FROM users WHERE name LIKE '%john%';
-SELECT * FROM users WHERE name LIKE 'a%b%c';
+SELECT * FROM users WHERE name NOT LIKE 'a%b%c';
 SELECT COUNT(*) FROM users WHERE name LIKE '%test%';
 ```
 
@@ -96,7 +99,7 @@ CREATE INDEX ON flags USING biscuit(is_active, status);
 
 ---
 
-## 🔬 **How It Works**
+##  **How It Works**
 
 ### **Core Concept: Bitmap Position Indices**
 
@@ -200,7 +203,7 @@ Compressed bitmap representation:
 
 ---
 
-## ⚡ **12 Performance Optimizations**
+##  **12 Performance Optimizations**
 
 ### **1. Skip Wildcard Intersections**
 ```c
@@ -323,7 +326,7 @@ score = 1.0 / (concrete_chars + 1)
 
 ---
 
-## 📊 **Benchmarking**
+##  **Benchmarking**
 
 ### **Setup Test Data**
 
@@ -433,7 +436,7 @@ SELECT biscuit_index_stats('idx_biscuit'::regclass);
 
 ---
 
-## 🎓 **Use Cases**
+##  **Use Cases**
 
 ### **1. Full-Text Search Applications**
 ```sql
@@ -501,7 +504,7 @@ WHERE event_type LIKE 'click%'
 
 ---
 
-## 🔧 **Configuration**
+##  **Configuration**
 
 ### **Build Options**
 
@@ -514,7 +517,7 @@ Currently, Biscuit doesn't expose tunable options. All optimizations are automat
 
 ---
 
-## ⚠️ **Limitations and Trade-offs**
+##  **Limitations and Trade-offs**
 
 ### **What Biscuit Does NOT Support**
 
@@ -558,35 +561,35 @@ Biscuit stores bitmaps in memory:
 
 ---
 
-## 🆚 **Comparison with pg_trgm**
+##  **Comparison with pg_trgm**
 
 | Feature                  | Biscuit               | pg_trgm (GIN)        |
 |--------------------------|-----------------------|----------------------|
-| **Wildcard patterns**    | ✅ Native, exact       | ✅ Approximate       |
-| **Recheck overhead**     | ✅ None (deterministic)  | ❌ Always required   |
-| **Multi-column**         | ✅ Optimized           | ⚠️ Via btree_gist    |
-| **Aggregate queries**    | ✅ Optimized           | ❌ Same cost         |
-| **ORDER BY + LIMIT**     | ✅ Works well          | ✅ Ordered scans     |
-| **Memory usage**         | ⚠️ Higher              | ✅ Lower             |
-| **Regex support**        | ❌ No                  | ✅ Yes               |
-| **Similarity search**    | ❌ No                  | ✅ Yes               |
+| **Wildcard patterns**    | ✔ Native, exact       | ✔ Approximate       |
+| **Recheck overhead**     | ✔ None (deterministic)  | ✗ Always required   |
+| **Multi-column**         | ✔ Optimized           | ⚠️ Via btree_gist    |
+| **Aggregate queries**    | ✔ Optimized           | ✗ Same cost         |
+| **ORDER BY + LIMIT**     | ✔ Works well          | ✔ Ordered scans     |
+| **Memory usage**         | ⚠️ Higher              | ✔ Lower             |
+| **Regex support**        | ✗ No                  | ✔ Yes               |
+| **Similarity search**    | ✗ No                  | ✔ Yes               |
 
 **When to use Biscuit:**
-- ✅ Wildcard-heavy `LIKE` queries (`%`, `_`)
-- ✅ Multi-column pattern matching
-- ✅ Need exact results (no false positives)
-- ✅ `COUNT(*)` / aggregate queries
-- ✅ High query volume, can afford memory
+- ✔ Wildcard-heavy `LIKE` queries (`%`, `_`)
+- ✔ Multi-column pattern matching
+- ✔ Need exact results (no false positives)
+- ✔ `COUNT(*)` / aggregate queries
+- ✔ High query volume, can afford memory
 
 **When to use pg_trgm:**
-- ✅ Fuzzy/similarity search (`word <-> pattern`)
-- ✅ Regular expressions
-- ✅ Memory-constrained environments
-- ✅ Write-heavy workloads
+- ✔ Fuzzy/similarity search (`word <-> pattern`)
+- ✔ Regular expressions
+- ✔ Memory-constrained environments
+- ✔ Write-heavy workloads
 
 ---
 
-## 🛠️ **Development**
+## **Development**
 
 ### **Build from Source**
 
@@ -641,7 +644,7 @@ SELECT * FROM test WHERE name LIKE '%pattern%';
 
 ---
 
-## 📚 **Architecture Details**
+##  **Architecture Details**
 
 ### **Index Structure**
 
@@ -690,7 +693,7 @@ BiscuitIndex
 
 ---
 
-## 🤝 **Contributing**
+##  **Contributing**
 
 Contributions are welcome! Please:
 
@@ -710,13 +713,13 @@ Contributions are welcome! Please:
 
 ---
 
-## 📄 **License**
+##  **License**
 
 MIT License - See LICENSE file for details.
 
 ---
 
-## 👤 **Author**
+## **Author**
 
 Sivaprasad Murali
 - Email: sivaprasad.off@gmail.com
@@ -724,7 +727,7 @@ Sivaprasad Murali
 
 ---
 
-## 🙏 **Acknowledgments**
+## **Acknowledgments**
 
 - PostgreSQL community for the extensible index AM framework
 - CRoaring library for efficient bitmap operations
@@ -732,11 +735,10 @@ Sivaprasad Murali
 
 ---
 
-## 📞 **Support**
+## **Support**
 
 - **Issues**: [GitHub Issues](https://github.com/Crystallinecore/biscuit/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/Crystallinecore/biscuit/discussions)
-- **Mailing List**: Coming soon
 
 ---
 

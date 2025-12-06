@@ -52,6 +52,17 @@ typedef struct {
 } RoaringBitmap;
 #endif
 
+/* Strategy numbers for LIKE operators */
+#define BTLessStrategyNumber        1
+#define BTLessEqualStrategyNumber   2
+#define BTEqualStrategyNumber       3
+#define BTGreaterEqualStrategyNumber 4
+#define BTGreaterStrategyNumber     5
+
+/* Biscuit LIKE strategies */
+#define BISCUIT_LIKE_STRATEGY       1
+#define BISCUIT_NOT_LIKE_STRATEGY   2  /* Add this */
+
 /* Safe memory management macros */
 #define SAFE_PFREE(ptr) do { \
     if (ptr) { \
@@ -4448,13 +4459,18 @@ biscuit_rescan_multicolumn(IndexScanDesc scan, ScanKey keys, int nkeys,
     /* ==================== EXECUTE FIRST PREDICATE ==================== */
     
     QueryPredicate *first_pred = &plan->predicates[0];
+    bool is_not_like = (first_pred->scan_key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY);
     
-    //elog(INFO, "[Step 1/%d] Initial query: Col=%d Pattern='%s' (Priority=%d, Selectivity=%.3f)", plan->count, first_pred->column_index, first_pred->pattern,  first_pred->priority, first_pred->selectivity_score);
+    //elog(INFO, "[Step 1/%d] Initial query: Col=%d Pattern='%s' Strategy=%s (Priority=%d, Selectivity=%.3f)", 
+    //     plan->count, first_pred->column_index, first_pred->pattern,
+    //     is_not_like ? "NOT LIKE" : "LIKE",
+    //     first_pred->priority, first_pred->selectivity_score);
     
     /* SAFETY: Verify column index */
     if (first_pred->column_index < 0 || 
         first_pred->column_index >= so->index->num_columns) {
-        //elog(ERROR, "Biscuit: Invalid column index %d (index has %d columns)", first_pred->column_index, so->index->num_columns);
+        //elog(ERROR, "Biscuit: Invalid column index %d (index has %d columns)", 
+        //     first_pred->column_index, so->index->num_columns);
         goto cleanup;
     }
     
@@ -4465,6 +4481,31 @@ biscuit_rescan_multicolumn(IndexScanDesc scan, ScanKey keys, int nkeys,
     if (!candidates) {
         //elog(WARNING, "Biscuit: First query returned NULL bitmap");
         candidates = biscuit_roaring_create();
+    }
+
+    /* ✅ PER-PREDICATE INVERSION: Handle NOT LIKE for first predicate */
+    if (is_not_like) {
+        RoaringBitmap *all_records = biscuit_roaring_create();
+        int j;
+        
+        //elog(INFO, "  → Inverting bitmap for NOT LIKE (before: %llu matches)", 
+        //     (unsigned long long)biscuit_roaring_count(candidates));
+        
+        #ifdef HAVE_ROARING
+        roaring_bitmap_add_range(all_records, 0, so->index->num_records);
+        #else
+        for (j = 0; j < so->index->num_records; j++) {
+            biscuit_roaring_add(all_records, j);
+        }
+        #endif
+        
+        /* Invert: all_records = all_records - candidates */
+        biscuit_roaring_andnot_inplace(all_records, candidates);
+        biscuit_roaring_free(candidates);
+        candidates = all_records;
+        
+        //elog(INFO, "  → After inversion: %llu matches", 
+        //     (unsigned long long)biscuit_roaring_count(candidates));
     }
     
     /* Filter tombstones immediately */
@@ -4490,6 +4531,7 @@ biscuit_rescan_multicolumn(IndexScanDesc scan, ScanKey keys, int nkeys,
         RoaringBitmap *col_result;
         uint64_t after_count;
         double reduction;
+        bool pred_is_not_like = (pred->scan_key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY);
         
         /* SAFETY: Verify column index */
         if (pred->column_index < 0 || 
@@ -4498,8 +4540,14 @@ biscuit_rescan_multicolumn(IndexScanDesc scan, ScanKey keys, int nkeys,
             continue;
         }
         
-        //elog(INFO, "[Step %d/%d] Applying Col=%d Pattern='%s' on %llu candidates", i + 1, plan->count, pred->column_index, pred->pattern, (unsigned long long)before_count);
-        //elog(INFO, "  → (Priority=%d, Selectivity=%.3f, Type=%s)", pred->priority, pred->selectivity_score, pred->is_exact ? "EXACT" : pred->is_prefix ? "PREFIX" : pred->is_suffix ? "SUFFIX" : pred->is_substring ? "SUBSTRING" : "COMPLEX");
+        //elog(INFO, "[Step %d/%d] Applying Col=%d Pattern='%s' Strategy=%s on %llu candidates", 
+        //     i + 1, plan->count, pred->column_index, pred->pattern,
+        //     pred_is_not_like ? "NOT LIKE" : "LIKE",
+        //     (unsigned long long)before_count);
+        //elog(INFO, "  → (Priority=%d, Selectivity=%.3f, Type=%s)", 
+        //     pred->priority, pred->selectivity_score,
+        //     pred->is_exact ? "EXACT" : pred->is_prefix ? "PREFIX" : 
+        //     pred->is_suffix ? "SUFFIX" : pred->is_substring ? "SUBSTRING" : "COMPLEX");
         
         /* Query this column pattern */
         col_result = biscuit_query_column_pattern(
@@ -4510,7 +4558,32 @@ biscuit_rescan_multicolumn(IndexScanDesc scan, ScanKey keys, int nkeys,
             col_result = biscuit_roaring_create();
         }
         
-        /* Intersect with existing candidates */
+        /* ✅ PER-PREDICATE INVERSION: Handle NOT LIKE for this predicate */
+        if (pred_is_not_like) {
+            RoaringBitmap *all_records = biscuit_roaring_create();
+            int j;
+            
+            //elog(INFO, "  → Inverting bitmap for NOT LIKE (before: %llu matches)", 
+            //     (unsigned long long)biscuit_roaring_count(col_result));
+            
+            #ifdef HAVE_ROARING
+            roaring_bitmap_add_range(all_records, 0, so->index->num_records);
+            #else
+            for (j = 0; j < so->index->num_records; j++) {
+                biscuit_roaring_add(all_records, j);
+            }
+            #endif
+            
+            /* Invert: all_records = all_records - col_result */
+            biscuit_roaring_andnot_inplace(all_records, col_result);
+            biscuit_roaring_free(col_result);
+            col_result = all_records;
+            
+            //elog(INFO, "  → After inversion: %llu matches", 
+            //     (unsigned long long)biscuit_roaring_count(col_result));
+        }
+        
+        /* Intersect with existing candidates (AND logic) */
         biscuit_roaring_and_inplace(candidates, col_result);
         biscuit_roaring_free(col_result);
         
@@ -4518,11 +4591,13 @@ biscuit_rescan_multicolumn(IndexScanDesc scan, ScanKey keys, int nkeys,
         reduction = (before_count > 0) ? 
             100.0 * (before_count - after_count) / before_count : 0.0;
         
-        //elog(INFO, "  → Result: %llu → %llu records (%.1f%% filtered)", (unsigned long long)before_count, (unsigned long long)after_count,  reduction);
+        //elog(INFO, "  → Result: %llu → %llu records (%.1f%% filtered)", 
+        //     (unsigned long long)before_count, (unsigned long long)after_count, reduction);
         
         /* OPTIMIZATION: Early exit if no candidates remain */
         if (after_count == 0) {
-            //elog(INFO, "=== Query complete: no matches after step %d/%d ===",  i + 1, plan->count);
+            //elog(INFO, "=== Query complete: no matches after step %d/%d ===", 
+            //     i + 1, plan->count);
             break;
         }
         
@@ -4540,7 +4615,8 @@ biscuit_rescan_multicolumn(IndexScanDesc scan, ScanKey keys, int nkeys,
             }
             
             if (!remaining_are_selective) {
-                //elog(INFO, "=== LIMIT optimization: %llu ≤ %d and remaining predicates not selective ===",(unsigned long long)after_count, limit_hint);
+                //elog(INFO, "=== LIMIT optimization: %llu ≤ %d and remaining predicates not selective ===",
+                //     (unsigned long long)after_count, limit_hint);
                 //elog(INFO, "=== Stopping early at step %d/%d ===", i + 1, plan->count);
                 break;
             }
@@ -4554,7 +4630,8 @@ biscuit_rescan_multicolumn(IndexScanDesc scan, ScanKey keys, int nkeys,
         100.0 * (initial_count - final_count) / initial_count : 0.0;
     
     //elog(INFO, "=== Predicate Filtering Complete ===");
-    //elog(INFO, "Total: %llu → %llu candidates (%.1f%% filtered)",(unsigned long long)initial_count, (unsigned long long)final_count,overall_reduction);
+    //elog(INFO, "Total: %llu → %llu candidates (%.1f%% filtered)",
+    //     (unsigned long long)initial_count, (unsigned long long)final_count, overall_reduction);
     
     if (final_count == 0) {
         //elog(INFO, "=== Query complete: no final matches ===");
@@ -4579,27 +4656,31 @@ biscuit_rescan_multicolumn(IndexScanDesc scan, ScanKey keys, int nkeys,
     
     biscuit_roaring_free(candidates);
     
-    /* Then update biscuit_rescan_multicolumn cleanup section: */
-    cleanup:
-    biscuit_free_query_plan(plan);  // Use safe wrapper
+cleanup:
+    biscuit_free_query_plan(plan);
 }
-
 /*
   * ALSO UPDATE: Main rescan to properly route multi-column queries
   */
  /*
   * Main rescan function - routes to appropriate handler based on index structure
   */
-  static void
+/*
+ * biscuit_rescan - FIXED VERSION with proper multi-key support
+ * 
+ * Handles multiple LIKE predicates on single column correctly
+ * Example: name LIKE '%a%' AND name LIKE '%3%'
+ */
+static void
 biscuit_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
                ScanKey orderbys, int norderbys)
 {
     BiscuitScanOpaque *so = (BiscuitScanOpaque *)scan->opaque;
+    RoaringBitmap *result = NULL;
     bool is_aggregate;
     bool needs_sorting;
     int limit_hint;
-    
-    //elog(INFO, "Biscuit rescan called: nkeys=%d", nkeys);
+    int i;
     
     /* Clear previous results */
     if (so->results) {
@@ -4610,22 +4691,17 @@ biscuit_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
     so->current = 0;
     
     if (!so->index) {
-        //elog(ERROR, "Biscuit: Index is NULL in rescan");
         return;
     }
     
     if (nkeys == 0 || so->index->num_records == 0) {
-        //elog(INFO, "Biscuit: No keys or no records");
         return;
     }
     
-    /* ==================== APPLY OPTIMIZATIONS ==================== */
+    /* ==================== DETECT OPTIMIZATIONS ==================== */
     
-    /* OPTIMIZATION 1: Detect aggregate queries */
     is_aggregate = biscuit_is_aggregate_query(scan);
     needs_sorting = !is_aggregate;
-    
-    /* OPTIMIZATION 2: Estimate LIMIT if possible */
     limit_hint = biscuit_estimate_limit_hint(scan);
     
     /* Update scan opaque */
@@ -4633,53 +4709,91 @@ biscuit_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
     so->needs_sorted_access = needs_sorting;
     so->limit_remaining = limit_hint;
     
-    //elog(INFO, "Biscuit: Query type: %s, Sorting: %s, LIMIT: %d", is_aggregate ? "AGGREGATE" : "REGULAR", needs_sorting ? "YES" : "NO", limit_hint);
-    
-    /* Route to appropriate handler */
+    /* Route to multi-column handler if needed */
     if (so->index->num_columns > 1) {
-        //elog(INFO, "Biscuit: Multi-column rescan");
         biscuit_rescan_multicolumn(scan, keys, nkeys, orderbys, norderbys);
         return;
     }
     
-    /* ========== SINGLE-COLUMN RESCAN ========== */
+    /* ==================== SINGLE-COLUMN MULTI-KEY RESCAN ==================== */
     
-    ScanKey key = &keys[0];
-    
-    if (key->sk_flags & SK_ISNULL) {
-        return;
+    /* Process ALL keys and intersect results (AND logic) */
+    for (i = 0; i < nkeys; i++) {
+        ScanKey key = &keys[i];
+        text *pattern_text;
+        char *pattern;
+        RoaringBitmap *key_result;
+        
+        if (key->sk_flags & SK_ISNULL) {
+            continue;
+        }
+        
+        pattern_text = DatumGetTextPP(key->sk_argument);
+        pattern = text_to_cstring(pattern_text);
+        
+        /* Query using Biscuit engine */
+        key_result = biscuit_query_pattern(so->index, pattern);
+        pfree(pattern);
+        
+        if (!key_result) {
+            if (result) biscuit_roaring_free(result);
+            return;
+        }
+        
+        /* Handle NOT LIKE by inverting the bitmap */
+        if (key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY) {
+            RoaringBitmap *all_records = biscuit_roaring_create();
+            int j;
+            
+            #ifdef HAVE_ROARING
+            roaring_bitmap_add_range(all_records, 0, so->index->num_records);
+            #else
+            for (j = 0; j < so->index->num_records; j++) {
+                biscuit_roaring_add(all_records, j);
+            }
+            #endif
+            
+            biscuit_roaring_andnot_inplace(all_records, key_result);
+            biscuit_roaring_free(key_result);
+            key_result = all_records;
+        }
+        
+        /* Intersect with previous results (AND logic for multiple predicates) */
+        if (result == NULL) {
+            /* First predicate - just use its result */
+            result = key_result;
+        } else {
+            /* Subsequent predicates - intersect with accumulated result */
+            biscuit_roaring_and_inplace(result, key_result);
+            biscuit_roaring_free(key_result);
+            
+            /* Early exit optimization if no matches remain */
+            if (biscuit_roaring_is_empty(result)) {
+                biscuit_roaring_free(result);
+                result = NULL;
+                return;
+            }
+        }
     }
-    
-    text *pattern_text = DatumGetTextPP(key->sk_argument);
-    char *pattern = text_to_cstring(pattern_text);
-    
-    //elog(INFO, "Biscuit: Pattern '%s'", pattern);
-    
-    /* Query using Biscuit engine */
-    RoaringBitmap *result = biscuit_query_pattern(so->index, pattern);
     
     if (!result) {
-        pfree(pattern);
         return;
     }
     
-    /* Filter tombstones */
+    /* Filter out tombstones (deleted records) */
     if (so->index->tombstone_count > 0) {
         biscuit_roaring_andnot_inplace(result, so->index->tombstones);
     }
     
-    /* ==================== USE OPTIMIZED COLLECTION ==================== */
+    /* ==================== COLLECT RESULTS WITH OPTIMIZATIONS ==================== */
+    
     biscuit_collect_tids_optimized(so->index, result, 
                                     &so->results, &so->num_results, 
                                     needs_sorting, limit_hint);
     
-    //elog(INFO, "Biscuit: Found %d matches (aggregate=%d, sorted=%d, limit=%d)",so->num_results, is_aggregate, needs_sorting, limit_hint);
-    
     biscuit_roaring_free(result);
-    pfree(pattern);
-    elog(INFO,"BISCUIT");
 }
-    
+
   static bool
   biscuit_gettuple(IndexScanDesc scan, ScanDirection dir)
   {
@@ -4703,7 +4817,7 @@ biscuit_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
               //elog(DEBUG1, "Biscuit: LIMIT reached, stopping early");
           }
       }
-  
+      //elog(DEBUG1, "Biscuit to your service!");
       return true;
   }
   
