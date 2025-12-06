@@ -1,0 +1,92 @@
+{% extends "!layout.html" %}
+
+{% block extrahead %}
+    {{ super() }}
+
+    <!-- Google Search Console -->
+    <meta name="google-site-verification" content="22G4D8fVRIvJJg67tK5fHXdhOjKv4yjXBF_E2jeATGk" />
+
+    <!-- SEO Meta Tags -->
+    <meta name="description" content="BISCUIT is a deterministic bitmap-based Index Access Method for PostgreSQL, enabling fast multi-column pattern matching, LIKE queries, and exact-match text search.">
+    <meta name="keywords" content="postgresql extension, biscuit, postgres index access method, bitmap indexing, deterministic text search, like optimization, multi-column indexing, pg_trgm alternative">
+    <meta name="author" content="Sivaprasad Murali">
+    <meta name="robots" content="index, follow">
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="BISCUIT – Deterministic Bitmap Indexing for PostgreSQL">
+    <meta property="og:description" content="Documentation, installation guide, and technical reference for BISCUIT, a PostgreSQL Index Access Method providing deterministic bitmap-based text pattern search.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://biscuit.readthedocs.io/">
+    <meta property="og:image" content="https://biscuit.readthedocs.io/en/latest/_static/logo.png">
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="BISCUIT – Deterministic Bitmap Indexing for PostgreSQL">
+    <meta name="twitter:description" content="Documentation and reference for BISCUIT, a PostgreSQL extension for deterministic bitmap-based indexing and multi-column pattern search.">
+    <meta name="twitter:image" content="https://biscuit.readthedocs.io/en/latest/_static/logo.png">
+
+    <!-- JSON-LD Structured Data for Software Application -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "BISCUIT",
+    "description": "A PostgreSQL Index Access Method providing deterministic bitmap-based indexing for LIKE/pattern matching with multi-column support.",
+    "url": "https://biscuit.readthedocs.io/",
+    "applicationCategory": "DatabaseExtension",
+    "operatingSystem": "Linux",
+    "softwareVersion": "{{ release }}",
+    "author": {
+        "@type": "Person",
+        "name": "Sivaprasad Murali"
+    },
+    "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+    },
+    "programmingLanguage": "C",
+    "keywords": "postgresql, extension, indexing, bitmap index, text search, deterministic index, multi-column search",
+    "softwareHelp": "https://biscuit.readthedocs.io/",
+    "downloadUrl": "https://pgxn.org/dist/biscuit/",
+    "codeRepository": "https://github.com/crystallinecore/biscuit",
+    "license": "https://opensource.org/licenses/MIT",
+    "inLanguage": "en"
+    }
+    </script>
+
+    <!-- Breadcrumb Structured Data -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [{
+        "@type": "ListItem",
+        "position": 1,
+        "name": "Home",
+        "item": "https://biscuit.readthedocs.io/"
+    },{
+        "@type": "ListItem",
+        "position": 2,
+        "name": "{{ title }}",
+        "item": "{{ pageurl }}"
+    }]
+    }
+    </script>
+
+    <!-- Organization Structured Data -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    "name": "BISCUIT",
+    "url": "https://biscuit.readthedocs.io/",
+    "logo": "https://biscuit.readthedocs.io/en/latest/_static/logo.png",
+    "sameAs": [
+        "https://github.com/crystallinecore/biscuit",
+        "https://pgxn.org/dist/biscuit/"
+    ]
+    }
+    </script>
+
+{% endblock %}

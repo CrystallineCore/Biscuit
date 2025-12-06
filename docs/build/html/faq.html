@@ -1,0 +1,1435 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Frequently Asked Questions &mdash; BISCUIT 2.0.0 Documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
+
+  
+    <link rel="shortcut icon" href="_static/favicon.ico"/>
+    <link rel="canonical" href="https://biscuit.readthedocs.io/faq.html" />
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=51b770b3"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="prev" title="Performance Tuning Guide" href="performance.html" />
+     
+
+    <!-- Google Search Console -->
+    <meta name="google-site-verification" content="22G4D8fVRIvJJg67tK5fHXdhOjKv4yjXBF_E2jeATGk" />
+
+    <!-- SEO Meta Tags -->
+    <meta name="description" content="BISCUIT is a deterministic bitmap-based Index Access Method for PostgreSQL, enabling fast multi-column pattern matching, LIKE queries, and exact-match text search.">
+    <meta name="keywords" content="postgresql extension, biscuit, postgres index access method, bitmap indexing, deterministic text search, like optimization, multi-column indexing, pg_trgm alternative">
+    <meta name="author" content="Sivaprasad Murali">
+    <meta name="robots" content="index, follow">
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="BISCUIT – Deterministic Bitmap Indexing for PostgreSQL">
+    <meta property="og:description" content="Documentation, installation guide, and technical reference for BISCUIT, a PostgreSQL Index Access Method providing deterministic bitmap-based text pattern search.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://biscuit.readthedocs.io/">
+    <meta property="og:image" content="https://biscuit.readthedocs.io/en/latest/_static/logo.png">
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="BISCUIT – Deterministic Bitmap Indexing for PostgreSQL">
+    <meta name="twitter:description" content="Documentation and reference for BISCUIT, a PostgreSQL extension for deterministic bitmap-based indexing and multi-column pattern search.">
+    <meta name="twitter:image" content="https://biscuit.readthedocs.io/en/latest/_static/logo.png">
+
+    <!-- JSON-LD Structured Data for Software Application -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "BISCUIT",
+    "description": "A PostgreSQL Index Access Method providing deterministic bitmap-based indexing for LIKE/pattern matching with multi-column support.",
+    "url": "https://biscuit.readthedocs.io/",
+    "applicationCategory": "DatabaseExtension",
+    "operatingSystem": "Linux",
+    "softwareVersion": "2.0.0",
+    "author": {
+        "@type": "Person",
+        "name": "Sivaprasad Murali"
+    },
+    "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+    },
+    "programmingLanguage": "C",
+    "keywords": "postgresql, extension, indexing, bitmap index, text search, deterministic index, multi-column search",
+    "softwareHelp": "https://biscuit.readthedocs.io/",
+    "downloadUrl": "https://pgxn.org/dist/biscuit/",
+    "codeRepository": "https://github.com/crystallinecore/biscuit",
+    "license": "https://opensource.org/licenses/MIT",
+    "inLanguage": "en"
+    }
+    </script>
+
+    <!-- Breadcrumb Structured Data -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [{
+        "@type": "ListItem",
+        "position": 1,
+        "name": "Home",
+        "item": "https://biscuit.readthedocs.io/"
+    },{
+        "@type": "ListItem",
+        "position": 2,
+        "name": "Frequently Asked Questions",
+        "item": "https://biscuit.readthedocs.io/faq.html"
+    }]
+    }
+    </script>
+
+    <!-- Organization Structured Data -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    "name": "BISCUIT",
+    "url": "https://biscuit.readthedocs.io/",
+    "logo": "https://biscuit.readthedocs.io/en/latest/_static/logo.png",
+    "sameAs": [
+        "https://github.com/crystallinecore/biscuit",
+        "https://pgxn.org/dist/biscuit/"
+    ]
+    }
+    </script>
+
+
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #2C3E50" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            BISCUIT
+              <img src="_static/logo.png" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#prerequisites">Prerequisites</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#check-postgresql-version">Check PostgreSQL Version</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#installation-methods">Installation Methods</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#method-1-from-source-recommended">Method 1: From Source (Recommended)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-1-install-build-dependencies">Step 1: Install Build Dependencies</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-2-clone-repository">Step 2: Clone Repository</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-3-build-and-install">Step 3: Build and Install</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-4-verify-installation">Step 4: Verify Installation</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#method-2-with-croaring-support-enhanced-performance">Method 2: With CRoaring Support (Enhanced Performance)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#install-croaring-library">Install CRoaring Library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#build-biscuit-with-roaring">Build Biscuit with Roaring</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#enable-extension-in-database">Enable Extension in Database</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#post-installation-configuration">Post-Installation Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#set-appropriate-memory-limits">Set Appropriate Memory Limits</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#enable-query-logging-optional">Enable Query Logging (Optional)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#verify-installation-with-test">Verify Installation with Test</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#troubleshooting">Troubleshooting</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#error-could-not-load-library">Error: “could not load library”</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#error-extension-does-not-exist">Error: “extension does not exist”</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#build-errors-with-roaring">Build Errors with Roaring</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#uninstallation">Uninstallation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#platform-specific-notes">Platform-Specific Notes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#windows">Windows</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#docker">Docker</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#getting-help">Getting Help</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick Start Tutorial</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-1-create-sample-data">Step 1: Create Sample Data</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-2-measure-baseline-performance">Step 2: Measure Baseline Performance</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-3-create-biscuit-index">Step 3: Create Biscuit Index</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-4-run-optimized-queries">Step 4: Run Optimized Queries</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-5-try-different-pattern-types">Step 5: Try Different Pattern Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#prefix-patterns-fastest">Prefix Patterns (Fastest)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#suffix-patterns">Suffix Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#substring-patterns">Substring Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#complex-patterns">Complex Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#underscore-wildcards">Underscore Wildcards</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-6-multi-column-indexes">Step 6: Multi-Column Indexes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-7-aggregate-queries-special-optimization">Step 7: Aggregate Queries (Special Optimization)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-8-monitor-index-statistics">Step 8: Monitor Index Statistics</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-9-test-crud-operations">Step 9: Test CRUD Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#insert">INSERT</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#update">UPDATE</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#delete">DELETE</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#best-practices">Best Practices</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#do">✅ DO:</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#dont">❌ DON’T:</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#common-questions">Common Questions</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="api.html">API Reference</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="api.html#table-of-contents">Table of Contents</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#extension-management">Extension Management</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#create-extension">CREATE EXTENSION</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#drop-extension">DROP EXTENSION</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#index-operations">Index Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#create-index">CREATE INDEX</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#drop-index">DROP INDEX</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#reindex">REINDEX</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#query-operators">Query Operators</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#like-operator">LIKE Operator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#not-like-operator">NOT LIKE Operator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#ilike-operator">ILIKE Operator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#multi-column-queries">Multi-Column Queries</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#diagnostic-functions">Diagnostic Functions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-stats">biscuit_index_stats()</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#configuration-parameters">Configuration Parameters</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#server-parameters">Server Parameters</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api.html#shared-buffers">shared_buffers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="api.html#work-mem">work_mem</a></li>
+<li class="toctree-l4"><a class="reference internal" href="api.html#maintenance-work-mem">maintenance_work_mem</a></li>
+<li class="toctree-l4"><a class="reference internal" href="api.html#effective-cache-size">effective_cache_size</a></li>
+<li class="toctree-l4"><a class="reference internal" href="api.html#enable-seqscan">enable_seqscan</a></li>
+<li class="toctree-l4"><a class="reference internal" href="api.html#max-parallel-workers-per-gather">max_parallel_workers_per_gather</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#session-parameters">Session Parameters</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#data-types">Data Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#supported-input-types">Supported Input Types</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api.html#text-types">Text Types</a></li>
+<li class="toctree-l4"><a class="reference internal" href="api.html#numeric-types">Numeric Types</a></li>
+<li class="toctree-l4"><a class="reference internal" href="api.html#date-time-types">Date/Time Types</a></li>
+<li class="toctree-l4"><a class="reference internal" href="api.html#boolean-type">Boolean Type</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#unsupported-types">Unsupported Types</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#system-views">System Views</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#pg-index">pg_index</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#pg-stat-user-indexes">pg_stat_user_indexes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#pg-indexes">pg_indexes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#error-messages">Error Messages</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#error-access-method-biscuit-does-not-exist">ERROR: access method “biscuit” does not exist</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#error-data-type-x-is-not-supported-for-biscuit-index">ERROR: data type X is not supported for biscuit index</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#error-could-not-open-relation-with-oid">ERROR: could not open relation with OID</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#warning-biscuit-index-cache-miss">WARNING: Biscuit: Index cache miss</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="patterns.html">Pattern Syntax Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#wildcard-characters">Wildcard Characters</a></li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-types">Pattern Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#exact-match-fastest">1. Exact Match (Fastest)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#prefix-match-very-fast">2. Prefix Match (Very Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#suffix-match-fast">3. Suffix Match (Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#substring-match-moderate-speed">4. Substring Match (Moderate Speed)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#infix-match-fast">5. Infix Match (Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#complex-multi-part-patterns">6. Complex Multi-Part Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#underscore-patterns-position-specific">7. Underscore Patterns (Position-Specific)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pure-wildcard-patterns-fastest-special-cases">Pure Wildcard Patterns (Fastest Special Cases)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#empty-pattern">Empty Pattern</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#single-percent">Single Percent</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#pure-underscores">Pure Underscores</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#mixed-pure-wildcards">Mixed Pure Wildcards</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-optimization-strategies">Pattern Optimization Strategies</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-1-maximize-concrete-characters">Strategy 1: Maximize Concrete Characters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-2-use-strong-anchors">Strategy 2: Use Strong Anchors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-3-minimize-partitions">Strategy 3: Minimize Partitions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-4-combine-with-other-indexes">Strategy 4: Combine with Other Indexes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-examples-by-use-case">Pattern Examples by Use Case</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#email-filtering">Email Filtering</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#sku-product-code-matching">SKU/Product Code Matching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#log-searching">Log Searching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#url-path-matching">URL/Path Matching</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#case-sensitivity">Case Sensitivity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-performance-hierarchy">Pattern Performance Hierarchy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="multicolumn.html">Multi-Column Indexes</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#overview">Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#creating-multi-column-indexes">Creating Multi-Column Indexes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#basic-syntax">Basic Syntax</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#example-e-commerce-product-search">Example: E-Commerce Product Search</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#how-query-optimization-works">How Query Optimization Works</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#automatic-reordering-example">Automatic Reordering Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#query-planning-deep-dive">Query Planning Deep Dive</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#priority-calculation">Priority Calculation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#selectivity-scoring">Selectivity Scoring</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#viewing-query-plans">Viewing Query Plans</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#best-practices">Best Practices</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#order-columns-by-query-frequency">1. Order Columns by Query Frequency</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#mix-selective-and-general-columns">2. Mix Selective and General Columns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#consider-column-cardinality">3. Consider Column Cardinality</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#avoid-redundant-indexes">4. Avoid Redundant Indexes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#advanced-patterns">Advanced Patterns</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-1-user-search-with-email-domain">Pattern 1: User Search with Email Domain</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-2-product-search-with-multiple-attributes">Pattern 2: Product Search with Multiple Attributes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-3-log-analysis">Pattern 3: Log Analysis</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#type-conversion-support">Type Conversion Support</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#supported-types">Supported Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#type-conversion-details">Type Conversion Details</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#performance-characteristics">Performance Characteristics</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#query-complexity-vs-performance">Query Complexity vs. Performance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#early-termination-example">Early Termination Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#limit-optimization">LIMIT Optimization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#monitoring-and-diagnostics">Monitoring and Diagnostics</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#check-index-statistics">Check Index Statistics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#query-performance-analysis">Query Performance Analysis</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#common-pitfalls">Common Pitfalls</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pitfall-1-too-many-columns">❌ Pitfall 1: Too Many Columns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pitfall-2-low-selectivity-patterns">❌ Pitfall 2: Low Selectivity Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pitfall-3-not-using-explain">❌ Pitfall 3: Not Using EXPLAIN</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#migration-from-single-column">Migration from Single-Column</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#examples-repository">Examples Repository</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="performance.html">Performance Tuning Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#quick-performance-checklist">Quick Performance Checklist</a></li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#understanding-biscuit-performance">Understanding Biscuit Performance</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#active-optimizations">Active Optimizations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#postgresql-configuration">PostgreSQL Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#memory-settings">Memory Settings</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#planner-settings">Planner Settings</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#index-design-optimization">Index Design Optimization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#choose-selective-columns">Choose Selective Columns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#multi-column-order-strategy">Multi-Column Order Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#avoid-over-indexing">Avoid Over-Indexing</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#query-optimization">Query Optimization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#pattern-design">Pattern Design</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="performance.html#maximize-concrete-characters">Maximize Concrete Characters</a></li>
+<li class="toctree-l4"><a class="reference internal" href="performance.html#use-strong-anchors">Use Strong Anchors</a></li>
+<li class="toctree-l4"><a class="reference internal" href="performance.html#minimize-pattern-complexity">Minimize Pattern Complexity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#combine-with-other-filters">Combine with Other Filters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#aggregate-query-optimization">Aggregate Query Optimization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#limit-query-optimization">LIMIT Query Optimization</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#maintenance-and-monitoring">Maintenance and Monitoring</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#regular-statistics-updates">Regular Statistics Updates</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#monitor-index-health">Monitor Index Health</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#cleanup-tombstones">Cleanup Tombstones</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#index-rebuild-strategy">Index Rebuild Strategy</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#hardware-considerations">Hardware Considerations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#memory-requirements">Memory Requirements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#ssd-vs-hdd">SSD vs. HDD</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#cpu-considerations">CPU Considerations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#benchmarking-your-setup">Benchmarking Your Setup</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#create-benchmark-suite">Create Benchmark Suite</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#troubleshooting-performance-issues">Troubleshooting Performance Issues</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-1-index-not-being-used">Issue 1: Index Not Being Used</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-2-slow-query-despite-index">Issue 2: Slow Query Despite Index</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-3-high-memory-usage">Issue 3: High Memory Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-4-slow-index-builds">Issue 4: Slow Index Builds</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#advanced-tuning">Advanced Tuning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#custom-cost-parameters">Custom Cost Parameters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#parallel-query-configuration">Parallel Query Configuration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#performance-monitoring-dashboard">Performance Monitoring Dashboard</a></li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Frequently Asked Questions</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#general-questions">General Questions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#what-is-biscuit">What is Biscuit?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#when-should-i-use-biscuit">When should I use Biscuit?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#is-biscuit-production-ready">Is Biscuit production-ready?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#how-much-memory-does-biscuit-use">How much memory does Biscuit use?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#installation-setup">Installation &amp; Setup</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#how-do-i-install-biscuit">How do I install Biscuit?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#installation-fails-with-could-not-load-library">Installation fails with “could not load library”</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#extension-creation-fails-extension-does-not-exist">Extension creation fails: “extension does not exist”</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#should-i-install-with-croaring-support">Should I install with CRoaring support?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#index-creation">Index Creation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#how-do-i-create-a-biscuit-index">How do I create a Biscuit index?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#can-i-use-biscuit-on-non-text-columns">Can I use Biscuit on non-text columns?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#how-long-does-index-creation-take">How long does index creation take?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#can-i-create-partial-biscuit-indexes">Can I create partial Biscuit indexes?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#how-many-columns-can-i-index">How many columns can I index?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#query-performance">Query Performance</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#why-is-my-query-not-using-the-index">Why is my query not using the index?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#how-can-i-measure-query-performance">How can I measure query performance?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#does-biscuit-support-case-insensitive-search">Does Biscuit support case-insensitive search?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#can-i-use-or-conditions-with-biscuit">Can I use OR conditions with Biscuit?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#does-biscuit-support-regular-expressions">Does Biscuit support regular expressions?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#does-biscuit-optimize-count-queries">Does Biscuit optimize COUNT(*) queries?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#can-i-use-limit-with-biscuit">Can I use LIMIT with Biscuit?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#index-maintenance">Index Maintenance</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#do-i-need-to-manually-maintain-the-index">Do I need to manually maintain the index?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#what-are-tombstones">What are tombstones?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#when-should-i-rebuild-the-index">When should I rebuild the index?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#how-do-i-monitor-index-health">How do I monitor index health?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#does-biscuit-support-parallel-operations">Does Biscuit support parallel operations?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#troubleshooting">Troubleshooting</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#queries-are-slower-than-expected">Queries are slower than expected</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#index-build-fails-with-out-of-memory">Index build fails with out of memory</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#crashes-or-unexpected-restarts">Crashes or unexpected restarts</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#index-is-not-valid-error">“Index is not valid” error</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pattern-not-matching-expected-rows">Pattern not matching expected rows</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#advanced-topics">Advanced Topics</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#can-i-use-biscuit-with-partitioned-tables">Can I use Biscuit with partitioned tables?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#does-biscuit-work-with-replication">Does Biscuit work with replication?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#can-i-use-biscuit-in-read-replicas">Can I use Biscuit in read replicas?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#how-does-biscuit-handle-null-values">How does Biscuit handle NULL values?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#can-i-use-biscuit-with-json-columns">Can I use Biscuit with JSON columns?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#does-biscuit-support-multi-byte-characters-unicode">Does Biscuit support multi-byte characters (Unicode)?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#migration-compatibility">Migration &amp; Compatibility</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#how-do-i-migrate-from-gin-trigram">How do I migrate from GIN trigram?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#can-i-have-both-b-tree-and-biscuit-on-same-column">Can I have both B-tree and Biscuit on same column?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#how-do-i-uninstall-biscuit">How do I uninstall Biscuit?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#getting-help">Getting Help</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#where-can-i-get-support">Where can I get support?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#how-do-i-report-a-bug">How do I report a bug?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#how-can-i-contribute">How can I contribute?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#is-there-a-slack-discord-community">Is there a Slack/Discord community?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#roadmap">Roadmap</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#what-features-are-being-considered">What features are being considered?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#performance-comparisons">Performance Comparisons</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#how-does-biscuit-compare-to-other-indexes">How does Biscuit compare to other indexes?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#still-have-questions">Still Have Questions?</a></li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #2C3E50" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">BISCUIT</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Frequently Asked Questions</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/faq.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="frequently-asked-questions">
+<h1>Frequently Asked Questions<a class="headerlink" href="#frequently-asked-questions" title="Link to this heading"></a></h1>
+<p>Common questions and answers about Biscuit index for PostgreSQL.</p>
+<hr class="docutils" />
+<section id="general-questions">
+<h2>General Questions<a class="headerlink" href="#general-questions" title="Link to this heading"></a></h2>
+<section id="what-is-biscuit">
+<h3>What is Biscuit?<a class="headerlink" href="#what-is-biscuit" title="Link to this heading"></a></h3>
+<p>Biscuit is a PostgreSQL index access method designed for LIKE pattern matching queries. It uses bitmap-based indexing to accelerate searches with wildcards (<code class="docutils literal notranslate"><span class="pre">%</span></code>, <code class="docutils literal notranslate"><span class="pre">_</span></code>). Performance improvements vary depending on your data characteristics, query patterns, and system configuration.</p>
+</section>
+<hr class="docutils" />
+<section id="when-should-i-use-biscuit">
+<h3>When should I use Biscuit?<a class="headerlink" href="#when-should-i-use-biscuit" title="Link to this heading"></a></h3>
+<p>Consider Biscuit when you:</p>
+<ul class="simple">
+<li><p>✅ Run frequent LIKE queries with wildcards</p></li>
+<li><p>✅ Need to search across multiple text columns</p></li>
+<li><p>✅ Have high-cardinality string columns</p></li>
+<li><p>✅ Want to optimize queries with pattern matching</p></li>
+<li><p>✅ Need prefix, suffix, or substring matching</p></li>
+</ul>
+<p><strong>Other options may be better for</strong>:</p>
+<ul class="simple">
+<li><p>Full-text search with stemming/ranking (use tsvector/GIN)</p></li>
+<li><p>Very long strings (&gt;256 chars are truncated)</p></li>
+<li><p>Columns with very few distinct values</p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="is-biscuit-production-ready">
+<h3>Is Biscuit production-ready?<a class="headerlink" href="#is-biscuit-production-ready" title="Link to this heading"></a></h3>
+<p>Biscuit includes:</p>
+<ul class="simple">
+<li><p>Full CRUD support (INSERT, UPDATE, DELETE)</p></li>
+<li><p>Automatic index maintenance</p></li>
+<li><p>Multi-column indexes</p></li>
+<li><p>Multiple performance optimizations</p></li>
+</ul>
+<p>However, as with any index type, we recommend:</p>
+<ol class="arabic simple">
+<li><p>Test thoroughly in your staging environment</p></li>
+<li><p>Benchmark with your actual data and queries</p></li>
+<li><p>Monitor performance metrics</p></li>
+<li><p>Have a rollback plan</p></li>
+<li><p>Start with non-critical workloads</p></li>
+</ol>
+</section>
+<hr class="docutils" />
+<section id="how-much-memory-does-biscuit-use">
+<h3>How much memory does Biscuit use?<a class="headerlink" href="#how-much-memory-does-biscuit-use" title="Link to this heading"></a></h3>
+<p>Memory usage depends on:</p>
+<ul class="simple">
+<li><p>Number of records</p></li>
+<li><p>Average string length</p></li>
+<li><p>Number of indexed columns</p></li>
+<li><p>Character distribution in your data</p></li>
+</ul>
+<p>The index is stored in memory for performance. For large tables, ensure you have adequate RAM. Test with your actual data to determine memory requirements.</p>
+<p><strong>Monitor with</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span><span class="n">pg_size_pretty</span><span class="p">(</span><span class="n">pg_relation_size</span><span class="p">(</span><span class="s1">&#39;idx_name&#39;</span><span class="p">));</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="installation-setup">
+<h2>Installation &amp; Setup<a class="headerlink" href="#installation-setup" title="Link to this heading"></a></h2>
+<section id="how-do-i-install-biscuit">
+<h3>How do I install Biscuit?<a class="headerlink" href="#how-do-i-install-biscuit" title="Link to this heading"></a></h3>
+<p>See the <a class="reference internal" href="installation.html"><span class="std std-doc">Installation Guide</span></a> for detailed instructions.</p>
+<p>Quick steps:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Ubuntu/Debian</span>
+sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>postgresql-server-dev-14<span class="w"> </span>build-essential
+git<span class="w"> </span>clone<span class="w"> </span>https://github.com/crystallinecore/biscuit.git
+<span class="nb">cd</span><span class="w"> </span>biscuit
+make
+sudo<span class="w"> </span>make<span class="w"> </span>install
+</pre></div>
+</div>
+<p>Then in PostgreSQL:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="n">EXTENSION</span><span class="w"> </span><span class="n">biscuit</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="installation-fails-with-could-not-load-library">
+<h3>Installation fails with “could not load library”<a class="headerlink" href="#installation-fails-with-could-not-load-library" title="Link to this heading"></a></h3>
+<p><strong>Problem</strong>: PostgreSQL can’t find <code class="docutils literal notranslate"><span class="pre">biscuit.so</span></code></p>
+<p><strong>Solution</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Find PostgreSQL library directory</span>
+pg_config<span class="w"> </span>--pkglibdir
+
+<span class="c1"># Verify file exists</span>
+ls<span class="w"> </span><span class="k">$(</span>pg_config<span class="w"> </span>--pkglibdir<span class="k">)</span>/biscuit.so
+
+<span class="c1"># If missing, reinstall</span>
+<span class="nb">cd</span><span class="w"> </span>biscuit
+sudo<span class="w"> </span>make<span class="w"> </span>install
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="extension-creation-fails-extension-does-not-exist">
+<h3>Extension creation fails: “extension does not exist”<a class="headerlink" href="#extension-creation-fails-extension-does-not-exist" title="Link to this heading"></a></h3>
+<p><strong>Problem</strong>: Extension control files not in correct location</p>
+<p><strong>Solution</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Check extension directory</span>
+pg_config<span class="w"> </span>--sharedir
+
+<span class="c1"># Verify files</span>
+ls<span class="w"> </span><span class="k">$(</span>pg_config<span class="w"> </span>--sharedir<span class="k">)</span>/extension/biscuit*
+
+<span class="c1"># Should see:</span>
+<span class="c1"># biscuit.control</span>
+<span class="c1"># biscuit--1.0.sql</span>
+
+<span class="c1"># If missing, reinstall</span>
+sudo<span class="w"> </span>make<span class="w"> </span>install
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="should-i-install-with-croaring-support">
+<h3>Should I install with CRoaring support?<a class="headerlink" href="#should-i-install-with-croaring-support" title="Link to this heading"></a></h3>
+<p><strong>Yes, recommended</strong> for production use.</p>
+<p>CRoaring provides:</p>
+<ul class="simple">
+<li><p>Better memory compression</p></li>
+<li><p>More efficient set operations</p></li>
+</ul>
+<p>Install:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Ubuntu/Debian</span>
+sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>libroaring-dev
+
+<span class="c1"># Then build Biscuit</span>
+make<span class="w"> </span><span class="nv">HAVE_ROARING</span><span class="o">=</span><span class="m">1</span>
+sudo<span class="w"> </span>make<span class="w"> </span>install
+</pre></div>
+</div>
+<p>Without CRoaring, Biscuit uses a fallback implementation that’s slower but still functional.</p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="index-creation">
+<h2>Index Creation<a class="headerlink" href="#index-creation" title="Link to this heading"></a></h2>
+<section id="how-do-i-create-a-biscuit-index">
+<h3>How do I create a Biscuit index?<a class="headerlink" href="#how-do-i-create-a-biscuit-index" title="Link to this heading"></a></h3>
+<p><strong>Single column</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">table_name</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="k">column_name</span><span class="p">);</span>
+</pre></div>
+</div>
+<p><strong>Multiple columns</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_multi</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">table_name</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">col1</span><span class="p">,</span><span class="w"> </span><span class="n">col2</span><span class="p">,</span><span class="w"> </span><span class="n">col3</span><span class="p">);</span>
+</pre></div>
+</div>
+<p>See <a class="reference internal" href="quickstart.html"><span class="std std-doc">Quick Start Tutorial</span></a> for examples.</p>
+</section>
+<hr class="docutils" />
+<section id="can-i-use-biscuit-on-non-text-columns">
+<h3>Can I use Biscuit on non-text columns?<a class="headerlink" href="#can-i-use-biscuit-on-non-text-columns" title="Link to this heading"></a></h3>
+<p><strong>Yes!</strong> Biscuit supports automatic type conversion for:</p>
+<ul class="simple">
+<li><p>Integers (SMALLINT, INTEGER, BIGINT)</p></li>
+<li><p>Floats (REAL, DOUBLE PRECISION)</p></li>
+<li><p>Dates (DATE, TIMESTAMP, TIMESTAMPTZ)</p></li>
+<li><p>Booleans (BOOLEAN)</p></li>
+</ul>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Index a date column</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_created</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">created_at</span><span class="p">);</span>
+
+<span class="c1">-- Query by year-month</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">created_at</span><span class="p">::</span><span class="nb">TEXT</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;2024-01%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p>See <a class="reference internal" href="api.html#data-types"><span class="std std-ref">API Reference - Data Types</span></a> for details.</p>
+</section>
+<hr class="docutils" />
+<section id="how-long-does-index-creation-take">
+<h3>How long does index creation take?<a class="headerlink" href="#how-long-does-index-creation-take" title="Link to this heading"></a></h3>
+<p>Build time varies significantly based on:</p>
+<ul class="simple">
+<li><p>Table size</p></li>
+<li><p>Number of columns</p></li>
+<li><p>Average string length</p></li>
+<li><p>Available memory</p></li>
+<li><p>Disk I/O speed</p></li>
+<li><p>System load</p></li>
+</ul>
+<p><strong>Benchmark with your data</strong> to determine actual build times.</p>
+<p><strong>For large tables</strong>, use CONCURRENTLY:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">CONCURRENTLY</span><span class="w"> </span><span class="n">idx_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">table_name</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="k">column_name</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="can-i-create-partial-biscuit-indexes">
+<h3>Can I create partial Biscuit indexes?<a class="headerlink" href="#can-i-create-partial-biscuit-indexes" title="Link to this heading"></a></h3>
+<p><strong>Yes!</strong> Use a WHERE clause:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Index only active users</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_active_users</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">users</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">username</span><span class="p">,</span><span class="w"> </span><span class="n">email</span><span class="p">)</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;active&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Index only recent orders</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_recent_orders</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">customer_name</span><span class="p">)</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">created_at</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="s1">&#39;2024-01-01&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Benefits</strong>:</p>
+<ul class="simple">
+<li><p>Smaller index size</p></li>
+<li><p>Faster queries on filtered data</p></li>
+<li><p>Reduced maintenance overhead</p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="how-many-columns-can-i-index">
+<h3>How many columns can I index?<a class="headerlink" href="#how-many-columns-can-i-index" title="Link to this heading"></a></h3>
+<p>While there’s no hard limit enforced, indexing many columns increases:</p>
+<ul class="simple">
+<li><p>Index size</p></li>
+<li><p>Build time</p></li>
+<li><p>Memory usage</p></li>
+<li><p>Maintenance overhead</p></li>
+</ul>
+<p><strong>Recommendation</strong>: Index only columns you frequently query with LIKE patterns.</p>
+<p><strong>Test performance</strong> with your specific column combinations.</p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="query-performance">
+<h2>Query Performance<a class="headerlink" href="#query-performance" title="Link to this heading"></a></h2>
+<section id="why-is-my-query-not-using-the-index">
+<h3>Why is my query not using the index?<a class="headerlink" href="#why-is-my-query-not-using-the-index" title="Link to this heading"></a></h3>
+<p><strong>Check with EXPLAIN</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">EXPLAIN</span><span class="w"> </span><span class="k">ANALYZE</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%laptop%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Common causes</strong>:</p>
+<ol class="arabic">
+<li><p><strong>Statistics out of date</strong></p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">ANALYZE</span><span class="w"> </span><span class="n">products</span><span class="p">;</span>
+</pre></div>
+</div>
+</li>
+<li><p><strong>Pattern matches too many rows</strong></p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Check selectivity</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="k">table</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">col</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%pattern%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+</li>
+<li><p><strong>Wrong column indexed</strong></p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Check which columns are indexed</span>
+<span class="err">\</span><span class="n">d</span><span class="w"> </span><span class="n">products</span>
+</pre></div>
+</div>
+</li>
+<li><p><strong>Planner estimates sequential scan is faster</strong></p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Test with index forced (testing only!)</span>
+<span class="k">SET</span><span class="w"> </span><span class="n">enable_seqscan</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">off</span><span class="p">;</span>
+</pre></div>
+</div>
+</li>
+</ol>
+<p>Always verify index usage with EXPLAIN ANALYZE before and after creating indexes.</p>
+</section>
+<hr class="docutils" />
+<section id="how-can-i-measure-query-performance">
+<h3>How can I measure query performance?<a class="headerlink" href="#how-can-i-measure-query-performance" title="Link to this heading"></a></h3>
+<p><strong>Use EXPLAIN ANALYZE</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">EXPLAIN</span><span class="w"> </span><span class="k">ANALYZE</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%pattern%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p>Look for:</p>
+<ul class="simple">
+<li><p>Execution time</p></li>
+<li><p>Index scan vs sequential scan</p></li>
+<li><p>Rows processed</p></li>
+<li><p>Planning time</p></li>
+</ul>
+<p><strong>Compare before and after</strong> creating the index to measure improvement.</p>
+<p>Performance varies based on:</p>
+<ul class="simple">
+<li><p>Data characteristics</p></li>
+<li><p>Pattern selectivity</p></li>
+<li><p>System resources</p></li>
+<li><p>Concurrent load</p></li>
+</ul>
+<p>Always benchmark with your actual workload.</p>
+</section>
+<hr class="docutils" />
+<section id="does-biscuit-support-case-insensitive-search">
+<h3>Does Biscuit support case-insensitive search?<a class="headerlink" href="#does-biscuit-support-case-insensitive-search" title="Link to this heading"></a></h3>
+<p><strong>Not directly</strong>, but you can use LOWER():</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Create index on lowercase</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name_lower</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="k">LOWER</span><span class="p">(</span><span class="n">name</span><span class="p">));</span>
+
+<span class="c1">-- Query with lowercase</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="k">LOWER</span><span class="p">(</span><span class="n">name</span><span class="p">)</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%wireless%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Alternative</strong>: Create both indexes:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Case-sensitive</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">);</span>
+
+<span class="c1">-- Case-insensitive</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name_lower</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="k">LOWER</span><span class="p">(</span><span class="n">name</span><span class="p">));</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="can-i-use-or-conditions-with-biscuit">
+<h3>Can I use OR conditions with Biscuit?<a class="headerlink" href="#can-i-use-or-conditions-with-biscuit" title="Link to this heading"></a></h3>
+<p><strong>Yes</strong>, but be aware of performance:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Uses Biscuit (efficient)</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%laptop%&#39;</span>
+<span class="w">   </span><span class="k">OR</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%desktop%&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Better: Combine patterns when possible</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%laptop%&#39;</span><span class="w"> </span>
+<span class="w">   </span><span class="k">OR</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%desktop%&#39;</span>
+<span class="w">   </span><span class="k">OR</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%tablet%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p>PostgreSQL will use bitmap OR to combine results.</p>
+</section>
+<hr class="docutils" />
+<section id="does-biscuit-support-regular-expressions">
+<h3>Does Biscuit support regular expressions?<a class="headerlink" href="#does-biscuit-support-regular-expressions" title="Link to this heading"></a></h3>
+<p><strong>No.</strong> Biscuit only supports SQL LIKE patterns (<code class="docutils literal notranslate"><span class="pre">%</span></code>, <code class="docutils literal notranslate"><span class="pre">_</span></code>).</p>
+<p>For regex, use:</p>
+<ul class="simple">
+<li><p>PostgreSQL’s <code class="docutils literal notranslate"><span class="pre">~</span></code> operator with GIN trigram index</p></li>
+<li><p>Full-text search with tsvector</p></li>
+</ul>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Regex (not Biscuit)</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="o">~</span><span class="w"> </span><span class="s1">&#39;laptop|desktop&#39;</span><span class="p">;</span>
+
+<span class="c1">-- LIKE (uses Biscuit)</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%laptop%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="does-biscuit-optimize-count-queries">
+<h3>Does Biscuit optimize COUNT(*) queries?<a class="headerlink" href="#does-biscuit-optimize-count-queries" title="Link to this heading"></a></h3>
+<p>Biscuit includes optimizations for aggregate queries like COUNT(*):</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- May benefit from aggregate optimizations</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%laptop%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p>The index can process bitmap operations without fetching tuples, which can improve performance for certain query patterns.</p>
+<p><strong>Test with your queries</strong> to measure the actual benefit.</p>
+</section>
+<hr class="docutils" />
+<section id="can-i-use-limit-with-biscuit">
+<h3>Can I use LIMIT with Biscuit?<a class="headerlink" href="#can-i-use-limit-with-biscuit" title="Link to this heading"></a></h3>
+<p><strong>Yes</strong>. Biscuit works with LIMIT clauses:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%gaming%&#39;</span>
+<span class="k">LIMIT</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span>
+</pre></div>
+</div>
+<p>The index includes optimizations for queries with LIMIT, though the actual performance benefit depends on your data and query patterns.</p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="index-maintenance">
+<h2>Index Maintenance<a class="headerlink" href="#index-maintenance" title="Link to this heading"></a></h2>
+<section id="do-i-need-to-manually-maintain-the-index">
+<h3>Do I need to manually maintain the index?<a class="headerlink" href="#do-i-need-to-manually-maintain-the-index" title="Link to this heading"></a></h3>
+<p><strong>No.</strong> Biscuit automatically maintains itself:</p>
+<ul class="simple">
+<li><p>INSERT: Adds new records</p></li>
+<li><p>UPDATE: Removes old, adds new</p></li>
+<li><p>DELETE: Marks as tombstone</p></li>
+</ul>
+<p>PostgreSQL’s VACUUM handles cleanup.</p>
+</section>
+<hr class="docutils" />
+<section id="what-are-tombstones">
+<h3>What are tombstones?<a class="headerlink" href="#what-are-tombstones" title="Link to this heading"></a></h3>
+<p><strong>Tombstones</strong> are deleted records tracked in memory until cleanup.</p>
+<p>Check tombstone count:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_index_stats</span><span class="p">(</span><span class="s1">&#39;idx_name&#39;</span><span class="p">::</span><span class="n">regclass</span><span class="p">);</span>
+</pre></div>
+</div>
+<p>Output:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">Tombstones</span><span class="p">:</span> <span class="mi">245</span>
+</pre></div>
+</div>
+<p><strong>Automatic cleanup</strong> triggers at 1000 tombstones.</p>
+<p><strong>Manual cleanup</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">VACUUM</span><span class="w"> </span><span class="k">table_name</span><span class="p">;</span>
+<span class="c1">-- or</span>
+<span class="k">REINDEX</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="when-should-i-rebuild-the-index">
+<h3>When should I rebuild the index?<a class="headerlink" href="#when-should-i-rebuild-the-index" title="Link to this heading"></a></h3>
+<p>Consider rebuilding when:</p>
+<ul class="simple">
+<li><p>✅ Significant data changes have occurred</p></li>
+<li><p>✅ Index statistics show high tombstone counts</p></li>
+<li><p>✅ Query performance has degraded</p></li>
+<li><p>✅ After major PostgreSQL version upgrades</p></li>
+</ul>
+<p><strong>How to rebuild</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Non-blocking rebuild</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">CONCURRENTLY</span><span class="w"> </span><span class="n">idx_new</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">table_name</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="k">column_name</span><span class="p">);</span>
+
+<span class="k">DROP</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_old</span><span class="p">;</span>
+<span class="k">ALTER</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_new</span><span class="w"> </span><span class="k">RENAME</span><span class="w"> </span><span class="k">TO</span><span class="w"> </span><span class="n">idx_old</span><span class="p">;</span>
+</pre></div>
+</div>
+<p>Monitor index health regularly to determine when rebuilding is beneficial.</p>
+</section>
+<hr class="docutils" />
+<section id="how-do-i-monitor-index-health">
+<h3>How do I monitor index health?<a class="headerlink" href="#how-do-i-monitor-index-health" title="Link to this heading"></a></h3>
+<p><strong>Use the diagnostic function</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_index_stats</span><span class="p">(</span><span class="s1">&#39;idx_name&#39;</span><span class="p">::</span><span class="n">regclass</span><span class="p">);</span>
+</pre></div>
+</div>
+<p><strong>Key metrics provided</strong>:</p>
+<ul class="simple">
+<li><p><strong>Active records</strong>: Current valid records</p></li>
+<li><p><strong>Total slots</strong>: Allocated memory slots</p></li>
+<li><p><strong>Free slots</strong>: Reusable slots from deletes</p></li>
+<li><p><strong>Tombstones</strong>: Deleted but not cleaned records</p></li>
+<li><p><strong>Max length</strong>: Longest indexed string</p></li>
+<li><p><strong>CRUD statistics</strong>: Insert/update/delete counts</p></li>
+</ul>
+<p><strong>Create monitoring view</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">VIEW</span><span class="w"> </span><span class="n">biscuit_health</span><span class="w"> </span><span class="k">AS</span>
+<span class="k">SELECT</span><span class="w"> </span>
+<span class="w">    </span><span class="n">indexrelid</span><span class="p">::</span><span class="n">regclass</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">index_name</span><span class="p">,</span>
+<span class="w">    </span><span class="n">biscuit_index_stats</span><span class="p">(</span><span class="n">indexrelid</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">stats</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">pg_index</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">indexrelid</span><span class="p">::</span><span class="n">regclass</span><span class="p">::</span><span class="nb">text</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%biscuit%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p>Monitor these metrics over time to understand index behavior and maintenance needs.</p>
+</section>
+<hr class="docutils" />
+<section id="does-biscuit-support-parallel-operations">
+<h3>Does Biscuit support parallel operations?<a class="headerlink" href="#does-biscuit-support-parallel-operations" title="Link to this heading"></a></h3>
+<p>Biscuit includes support for parallel bitmap scans during query execution. Parallel index building is not currently implemented.</p>
+<p>Whether parallel queries are used depends on PostgreSQL’s query planner and your configuration settings.</p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="troubleshooting">
+<h2>Troubleshooting<a class="headerlink" href="#troubleshooting" title="Link to this heading"></a></h2>
+<section id="queries-are-slower-than-expected">
+<h3>Queries are slower than expected<a class="headerlink" href="#queries-are-slower-than-expected" title="Link to this heading"></a></h3>
+<p><strong>Debug checklist</strong>:</p>
+<ol class="arabic">
+<li><p><strong>Verify index is being used</strong></p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">EXPLAIN</span><span class="w"> </span><span class="k">ANALYZE</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="k">table</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">col</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%pattern%&#39;</span><span class="p">;</span>
+<span class="c1">-- Should show: Index Scan using idx_name</span>
+</pre></div>
+</div>
+</li>
+<li><p><strong>Check pattern selectivity</strong></p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- How many rows match?</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="k">table</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">col</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%pattern%&#39;</span><span class="p">;</span>
+<span class="c1">-- High match percentage may make index less beneficial</span>
+</pre></div>
+</div>
+</li>
+<li><p><strong>Update statistics</strong></p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">ANALYZE</span><span class="w"> </span><span class="k">table_name</span><span class="p">;</span>
+</pre></div>
+</div>
+</li>
+<li><p><strong>Check index health</strong></p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_index_stats</span><span class="p">(</span><span class="s1">&#39;idx_name&#39;</span><span class="p">::</span><span class="n">regclass</span><span class="p">);</span>
+</pre></div>
+</div>
+</li>
+<li><p><strong>Review memory settings</strong></p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SHOW</span><span class="w"> </span><span class="n">work_mem</span><span class="p">;</span>
+<span class="k">SHOW</span><span class="w"> </span><span class="n">shared_buffers</span><span class="p">;</span>
+<span class="c1">-- See [Performance Tuning](performance.md)</span>
+</pre></div>
+</div>
+</li>
+<li><p><strong>Compare with baseline</strong></p>
+<ul class="simple">
+<li><p>Measure query time without the index</p></li>
+<li><p>Document before/after performance</p></li>
+<li><p>Consider data characteristics</p></li>
+</ul>
+</li>
+</ol>
+</section>
+<hr class="docutils" />
+<section id="index-build-fails-with-out-of-memory">
+<h3>Index build fails with out of memory<a class="headerlink" href="#index-build-fails-with-out-of-memory" title="Link to this heading"></a></h3>
+<p><strong>Problem</strong>: Not enough RAM for index construction</p>
+<p><strong>Solutions</strong>:</p>
+<ol class="arabic">
+<li><p><strong>Increase maintenance_work_mem</strong></p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SET</span><span class="w"> </span><span class="n">maintenance_work_mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;2GB&#39;</span><span class="p">;</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="p">...</span>
+</pre></div>
+</div>
+</li>
+<li><p><strong>Build during low-traffic period</strong></p></li>
+<li><p><strong>Consider partial index</strong></p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Index subset of data</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_recent</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">table</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">col</span><span class="p">)</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">created_at</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="s1">&#39;2024-01-01&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+</li>
+<li><p><strong>Add more RAM to server</strong></p></li>
+</ol>
+</section>
+<hr class="docutils" />
+<section id="crashes-or-unexpected-restarts">
+<h3>Crashes or unexpected restarts<a class="headerlink" href="#crashes-or-unexpected-restarts" title="Link to this heading"></a></h3>
+<p><strong>Possible causes</strong>:</p>
+<ol class="arabic simple">
+<li><p><strong>Memory corruption</strong>: Ensure CRoaring is properly installed</p></li>
+<li><p><strong>PostgreSQL crash</strong>: Check PostgreSQL logs</p></li>
+<li><p><strong>Extension bug</strong>: Report at GitHub Issues</p></li>
+</ol>
+<p><strong>Recovery</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Drop and rebuild index</span>
+<span class="k">DROP</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="p">;</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">table</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">col</span><span class="p">);</span>
+
+<span class="c1">-- Or reindex</span>
+<span class="k">REINDEX</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="index-is-not-valid-error">
+<h3>“Index is not valid” error<a class="headerlink" href="#index-is-not-valid-error" title="Link to this heading"></a></h3>
+<p><strong>Cause</strong>: Index build failed or was interrupted</p>
+<p><strong>Solution</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Drop invalid index</span>
+<span class="k">DROP</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="p">;</span>
+
+<span class="c1">-- Rebuild</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">CONCURRENTLY</span><span class="w"> </span><span class="n">idx_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">table</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">col</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="pattern-not-matching-expected-rows">
+<h3>Pattern not matching expected rows<a class="headerlink" href="#pattern-not-matching-expected-rows" title="Link to this heading"></a></h3>
+<p><strong>Check pattern syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Case-sensitive!</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%Mouse%&#39;</span><span class="p">;</span><span class="w">  </span><span class="c1">-- Matches &quot;Mouse&quot;</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%mouse%&#39;</span><span class="p">;</span><span class="w">  </span><span class="c1">-- Matches &quot;mouse&quot;</span>
+
+<span class="c1">-- Underscore is single-character wildcard</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">sku</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;PROD-___&#39;</span><span class="p">;</span><span class="w">  </span><span class="c1">-- Exactly 3 chars</span>
+</pre></div>
+</div>
+<p><strong>Test without index</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SET</span><span class="w"> </span><span class="n">enable_indexscan</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">off</span><span class="p">;</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%pattern%&#39;</span><span class="p">;</span>
+<span class="c1">-- Compare results</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="advanced-topics">
+<h2>Advanced Topics<a class="headerlink" href="#advanced-topics" title="Link to this heading"></a></h2>
+<section id="can-i-use-biscuit-with-partitioned-tables">
+<h3>Can I use Biscuit with partitioned tables?<a class="headerlink" href="#can-i-use-biscuit-with-partitioned-tables" title="Link to this heading"></a></h3>
+<p><strong>Yes!</strong> Create indexes on each partition:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Create partitioned table</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w"> </span><span class="nb">SERIAL</span><span class="p">,</span>
+<span class="w">    </span><span class="n">customer_name</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">,</span>
+<span class="w">    </span><span class="n">created_at</span><span class="w"> </span><span class="nb">DATE</span>
+<span class="p">)</span><span class="w"> </span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">RANGE</span><span class="w"> </span><span class="p">(</span><span class="n">created_at</span><span class="p">);</span>
+
+<span class="c1">-- Create partitions</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">orders_2024_q1</span><span class="w"> </span><span class="n">PARTITION</span><span class="w"> </span><span class="k">OF</span><span class="w"> </span><span class="n">orders</span>
+<span class="w">    </span><span class="k">FOR</span><span class="w"> </span><span class="k">VALUES</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="p">(</span><span class="s1">&#39;2024-01-01&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">TO</span><span class="w"> </span><span class="p">(</span><span class="s1">&#39;2024-04-01&#39;</span><span class="p">);</span>
+
+<span class="c1">-- Create Biscuit index on partition</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_orders_2024_q1</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">orders_2024_q1</span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">customer_name</span><span class="p">);</span>
+</pre></div>
+</div>
+<p><strong>Note</strong>: Each partition needs its own index.</p>
+</section>
+<hr class="docutils" />
+<section id="does-biscuit-work-with-replication">
+<h3>Does Biscuit work with replication?<a class="headerlink" href="#does-biscuit-work-with-replication" title="Link to this heading"></a></h3>
+<p><strong>Yes.</strong> Biscuit indexes work with:</p>
+<ul class="simple">
+<li><p>✅ Streaming replication</p></li>
+<li><p>✅ Logical replication</p></li>
+<li><p>✅ Hot standby</p></li>
+</ul>
+<p><strong>Caveat</strong>: Indexes are built independently on each server.</p>
+</section>
+<hr class="docutils" />
+<section id="can-i-use-biscuit-in-read-replicas">
+<h3>Can I use Biscuit in read replicas?<a class="headerlink" href="#can-i-use-biscuit-in-read-replicas" title="Link to this heading"></a></h3>
+<p><strong>Yes</strong>, but indexes must be built separately:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- On primary</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">table</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">col</span><span class="p">);</span>
+
+<span class="c1">-- On replica (after replication catches up)</span>
+<span class="c1">-- Index is automatically created from WAL</span>
+<span class="c1">-- Or rebuild if needed:</span>
+<span class="k">REINDEX</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="how-does-biscuit-handle-null-values">
+<h3>How does Biscuit handle NULL values?<a class="headerlink" href="#how-does-biscuit-handle-null-values" title="Link to this heading"></a></h3>
+<p><strong>NULL values are not indexed.</strong></p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Create index</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">middle_name</span><span class="p">);</span>
+
+<span class="c1">-- This uses index</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">middle_name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%Smith%&#39;</span><span class="p">;</span>
+
+<span class="c1">-- This does NOT use index (NULL check)</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">middle_name</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NULL</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>For NULL queries</strong>, add separate condition:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">WHERE</span><span class="w"> </span><span class="n">middle_name</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NULL</span>
+<span class="w">   </span><span class="k">OR</span><span class="w"> </span><span class="n">middle_name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%pattern%&#39;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="can-i-use-biscuit-with-json-columns">
+<h3>Can I use Biscuit with JSON columns?<a class="headerlink" href="#can-i-use-biscuit-with-json-columns" title="Link to this heading"></a></h3>
+<p><strong>Yes</strong>, with expression index:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Index a JSON field</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_json_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">((</span><span class="k">data</span><span class="o">-&gt;&gt;</span><span class="s1">&#39;name&#39;</span><span class="p">));</span>
+
+<span class="c1">-- Query</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="p">(</span><span class="k">data</span><span class="o">-&gt;&gt;</span><span class="s1">&#39;name&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%laptop%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="does-biscuit-support-multi-byte-characters-unicode">
+<h3>Does Biscuit support multi-byte characters (Unicode)?<a class="headerlink" href="#does-biscuit-support-multi-byte-characters-unicode" title="Link to this heading"></a></h3>
+<p><strong>Yes</strong>, UTF-8 is fully supported:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Japanese, Chinese, Arabic, emoji, etc.</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">);</span>
+
+<span class="c1">-- Query with multi-byte characters</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%日本%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Note</strong>: Each multi-byte character counts toward the 256 character limit.</p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="migration-compatibility">
+<h2>Migration &amp; Compatibility<a class="headerlink" href="#migration-compatibility" title="Link to this heading"></a></h2>
+<section id="how-do-i-migrate-from-gin-trigram">
+<h3>How do I migrate from GIN trigram?<a class="headerlink" href="#how-do-i-migrate-from-gin-trigram" title="Link to this heading"></a></h3>
+<p><strong>Evaluate first</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- 1. Create Biscuit index alongside GIN</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_biscuit</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">table</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">col</span><span class="p">);</span>
+
+<span class="c1">-- 2. Test queries with both</span>
+<span class="k">EXPLAIN</span><span class="w"> </span><span class="k">ANALYZE</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="k">table</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">col</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%pattern%&#39;</span><span class="p">;</span>
+
+<span class="c1">-- 3. Compare performance with your actual queries</span>
+<span class="c1">-- Document query times, index sizes, and maintenance costs</span>
+
+<span class="c1">-- 4. If Biscuit meets your needs better, consider transition</span>
+<span class="k">DROP</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_gin_trigram</span><span class="p">;</span>
+
+<span class="c1">-- 5. Keep Biscuit</span>
+</pre></div>
+</div>
+<p>Different index types have different strengths. Choose based on your specific workload requirements.</p>
+</section>
+<hr class="docutils" />
+<section id="can-i-have-both-b-tree-and-biscuit-on-same-column">
+<h3>Can I have both B-tree and Biscuit on same column?<a class="headerlink" href="#can-i-have-both-b-tree-and-biscuit-on-same-column" title="Link to this heading"></a></h3>
+<p><strong>Yes</strong>, and it’s often beneficial:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- B-tree for exact matches and ORDER BY</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name_btree</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">);</span>
+
+<span class="c1">-- Biscuit for LIKE patterns</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name_biscuit</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">);</span>
+</pre></div>
+</div>
+<p>PostgreSQL will choose the appropriate index automatically.</p>
+</section>
+<hr class="docutils" />
+<section id="how-do-i-uninstall-biscuit">
+<h3>How do I uninstall Biscuit?<a class="headerlink" href="#how-do-i-uninstall-biscuit" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- 1. Drop all Biscuit indexes</span>
+<span class="k">DROP</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx1</span><span class="p">,</span><span class="w"> </span><span class="n">idx2</span><span class="p">,</span><span class="w"> </span><span class="n">idx3</span><span class="p">;</span>
+
+<span class="c1">-- 2. Drop extension (drops any remaining indexes)</span>
+<span class="k">DROP</span><span class="w"> </span><span class="n">EXTENSION</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="k">CASCADE</span><span class="p">;</span>
+</pre></div>
+</div>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># 3. Remove files</span>
+sudo<span class="w"> </span>rm<span class="w"> </span><span class="k">$(</span>pg_config<span class="w"> </span>--pkglibdir<span class="k">)</span>/biscuit.so
+sudo<span class="w"> </span>rm<span class="w"> </span><span class="k">$(</span>pg_config<span class="w"> </span>--sharedir<span class="k">)</span>/extension/biscuit*
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="getting-help">
+<h2>Getting Help<a class="headerlink" href="#getting-help" title="Link to this heading"></a></h2>
+<section id="where-can-i-get-support">
+<h3>Where can I get support?<a class="headerlink" href="#where-can-i-get-support" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p><strong>Documentation</strong>: <a class="reference external" href="https://biscuit.readthedocs.io">ReadTheDocs</a></p></li>
+<li><p><strong>Discussions</strong>: <a class="reference external" href="https://github.com/crystallinecore/biscuit/discussions">GitHub Discussions</a></p></li>
+<li><p><strong>Bug Reports</strong>: <a class="reference external" href="https://github.com/crystallinecore/biscuit/issues">GitHub Issues</a></p></li>
+<li><p><strong>Email</strong>: <a class="reference external" href="mailto:sivaprasad&#46;off&#37;&#52;&#48;gmail&#46;com">sivaprasad<span>&#46;</span>off<span>&#64;</span>gmail<span>&#46;</span>com</a></p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="how-do-i-report-a-bug">
+<h3>How do I report a bug?<a class="headerlink" href="#how-do-i-report-a-bug" title="Link to this heading"></a></h3>
+<p><strong>Include in your report</strong>:</p>
+<ol class="arabic simple">
+<li><p>PostgreSQL version: <code class="docutils literal notranslate"><span class="pre">SELECT</span> <span class="pre">version();</span></code></p></li>
+<li><p>Biscuit version: <code class="docutils literal notranslate"><span class="pre">SELECT</span> <span class="pre">*</span> <span class="pre">FROM</span> <span class="pre">pg_extension</span> <span class="pre">WHERE</span> <span class="pre">extname</span> <span class="pre">=</span> <span class="pre">'biscuit';</span></code></p></li>
+<li><p>Table schema: <code class="docutils literal notranslate"><span class="pre">\d</span> <span class="pre">table_name</span></code></p></li>
+<li><p>Index definition: <code class="docutils literal notranslate"><span class="pre">\d+</span> <span class="pre">index_name</span></code></p></li>
+<li><p>Query that fails: <code class="docutils literal notranslate"><span class="pre">EXPLAIN</span> <span class="pre">ANALYZE</span> <span class="pre">...</span></code></p></li>
+<li><p>Error messages from PostgreSQL logs</p></li>
+</ol>
+<p><strong>Submit at</strong>: <a class="reference external" href="https://github.com/crystallinecore/biscuit/issues">GitHub Issues</a></p>
+</section>
+<hr class="docutils" />
+<section id="how-can-i-contribute">
+<h3>How can I contribute?<a class="headerlink" href="#how-can-i-contribute" title="Link to this heading"></a></h3>
+<p>We welcome contributions!</p>
+<ul class="simple">
+<li><p><strong>Code</strong>: Submit pull requests</p></li>
+<li><p><strong>Documentation</strong>: Improve docs</p></li>
+<li><p><strong>Testing</strong>: Test with your data</p></li>
+<li><p><strong>Ideas</strong>: Suggest features</p></li>
+<li><p><strong>Bugs</strong>: Report issues</p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="is-there-a-slack-discord-community">
+<h3>Is there a Slack/Discord community?<a class="headerlink" href="#is-there-a-slack-discord-community" title="Link to this heading"></a></h3>
+<p><strong>Not yet!</strong></p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="roadmap">
+<h2>Roadmap<a class="headerlink" href="#roadmap" title="Link to this heading"></a></h2>
+<section id="what-features-are-being-considered">
+<h3>What features are being considered?<a class="headerlink" href="#what-features-are-being-considered" title="Link to this heading"></a></h3>
+<p>Future development may include:</p>
+<ul class="simple">
+<li><p>Enhanced parallel index builds</p></li>
+<li><p>Additional compression options</p></li>
+<li><p>Extended monitoring capabilities</p></li>
+<li><p>Performance dashboard tools</p></li>
+</ul>
+<p><strong>Long-term possibilities</strong>:</p>
+<ul class="simple">
+<li><p>Persistent bitmap storage options</p></li>
+<li><p>Approximate matching capabilities</p></li>
+<li><p>Additional pattern matching features</p></li>
+<li><p>Enhanced cloud optimizations</p></li>
+</ul>
+<p>Development priorities are based on community feedback and usage patterns. Features listed here are under consideration but not guaranteed for any specific timeline.</p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="performance-comparisons">
+<h2>Performance Comparisons<a class="headerlink" href="#performance-comparisons" title="Link to this heading"></a></h2>
+<section id="how-does-biscuit-compare-to-other-indexes">
+<h3>How does Biscuit compare to other indexes?<a class="headerlink" href="#how-does-biscuit-compare-to-other-indexes" title="Link to this heading"></a></h3>
+<p>Performance characteristics vary significantly based on:</p>
+<ul class="simple">
+<li><p>Data distribution</p></li>
+<li><p>Query patterns</p></li>
+<li><p>Hardware specifications</p></li>
+<li><p>PostgreSQL configuration</p></li>
+<li><p>Concurrent workload</p></li>
+</ul>
+<p><strong>General considerations</strong>:</p>
+<p><strong>B-tree</strong>:</p>
+<ul class="simple">
+<li><p>Excellent for exact matches and range queries</p></li>
+<li><p>Good for prefix patterns with concrete characters</p></li>
+<li><p>Not suitable for suffix or substring patterns</p></li>
+</ul>
+<p><strong>GIN (trigram)</strong>:</p>
+<ul class="simple">
+<li><p>Designed for full-text and trigram matching</p></li>
+<li><p>Larger index size</p></li>
+<li><p>Different optimization characteristics</p></li>
+</ul>
+<p><strong>Biscuit</strong>:</p>
+<ul class="simple">
+<li><p>Optimized for LIKE pattern matching</p></li>
+<li><p>Bitmap-based approach</p></li>
+<li><p>In-memory index structures</p></li>
+<li><p>Multi-column query optimization</p></li>
+</ul>
+<p><strong>Always benchmark with your specific workload</strong> to make informed decisions. Test with:</p>
+<ul class="simple">
+<li><p>Your actual data</p></li>
+<li><p>Representative queries</p></li>
+<li><p>Expected query volume</p></li>
+<li><p>Production-like hardware</p></li>
+</ul>
+</section>
+</section>
+<hr class="docutils" />
+<section id="still-have-questions">
+<h2>Still Have Questions?<a class="headerlink" href="#still-have-questions" title="Link to this heading"></a></h2>
+<p>Can’t find your answer?</p>
+<ul class="simple">
+<li><p>Check the <a class="reference internal" href="installation.html"><span class="std std-doc">Installation Guide</span></a></p></li>
+<li><p>Read the <a class="reference internal" href="quickstart.html"><span class="std std-doc">Quick Start</span></a></p></li>
+<li><p>Browse <a class="reference internal" href="performance.html"><span class="std std-doc">Performance Tuning</span></a></p></li>
+<li><p>Contact us: <a class="reference external" href="mailto:sivaprasad&#46;off&#37;&#52;&#48;gmail&#46;com">sivaprasad<span>&#46;</span>off<span>&#64;</span>gmail<span>&#46;</span>com</a></p></li>
+</ul>
+<hr class="docutils" />
+<p><strong>Happy pattern matching! 🚀</strong></p>
+<hr class="docutils" />
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="performance.html" class="btn btn-neutral float-left" title="Performance Tuning Guide" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

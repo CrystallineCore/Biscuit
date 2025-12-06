@@ -1,0 +1,1221 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>API Reference &mdash; BISCUIT 2.0.0 Documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
+
+  
+    <link rel="shortcut icon" href="_static/favicon.ico"/>
+    <link rel="canonical" href="https://biscuit.readthedocs.io/api.html" />
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=51b770b3"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Pattern Syntax Guide" href="patterns.html" />
+    <link rel="prev" title="Quick Start Tutorial" href="quickstart.html" />
+     
+
+    <!-- Google Search Console -->
+    <meta name="google-site-verification" content="22G4D8fVRIvJJg67tK5fHXdhOjKv4yjXBF_E2jeATGk" />
+
+    <!-- SEO Meta Tags -->
+    <meta name="description" content="BISCUIT is a deterministic bitmap-based Index Access Method for PostgreSQL, enabling fast multi-column pattern matching, LIKE queries, and exact-match text search.">
+    <meta name="keywords" content="postgresql extension, biscuit, postgres index access method, bitmap indexing, deterministic text search, like optimization, multi-column indexing, pg_trgm alternative">
+    <meta name="author" content="Sivaprasad Murali">
+    <meta name="robots" content="index, follow">
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="BISCUIT – Deterministic Bitmap Indexing for PostgreSQL">
+    <meta property="og:description" content="Documentation, installation guide, and technical reference for BISCUIT, a PostgreSQL Index Access Method providing deterministic bitmap-based text pattern search.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://biscuit.readthedocs.io/">
+    <meta property="og:image" content="https://biscuit.readthedocs.io/en/latest/_static/logo.png">
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="BISCUIT – Deterministic Bitmap Indexing for PostgreSQL">
+    <meta name="twitter:description" content="Documentation and reference for BISCUIT, a PostgreSQL extension for deterministic bitmap-based indexing and multi-column pattern search.">
+    <meta name="twitter:image" content="https://biscuit.readthedocs.io/en/latest/_static/logo.png">
+
+    <!-- JSON-LD Structured Data for Software Application -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "BISCUIT",
+    "description": "A PostgreSQL Index Access Method providing deterministic bitmap-based indexing for LIKE/pattern matching with multi-column support.",
+    "url": "https://biscuit.readthedocs.io/",
+    "applicationCategory": "DatabaseExtension",
+    "operatingSystem": "Linux",
+    "softwareVersion": "2.0.0",
+    "author": {
+        "@type": "Person",
+        "name": "Sivaprasad Murali"
+    },
+    "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+    },
+    "programmingLanguage": "C",
+    "keywords": "postgresql, extension, indexing, bitmap index, text search, deterministic index, multi-column search",
+    "softwareHelp": "https://biscuit.readthedocs.io/",
+    "downloadUrl": "https://pgxn.org/dist/biscuit/",
+    "codeRepository": "https://github.com/crystallinecore/biscuit",
+    "license": "https://opensource.org/licenses/MIT",
+    "inLanguage": "en"
+    }
+    </script>
+
+    <!-- Breadcrumb Structured Data -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [{
+        "@type": "ListItem",
+        "position": 1,
+        "name": "Home",
+        "item": "https://biscuit.readthedocs.io/"
+    },{
+        "@type": "ListItem",
+        "position": 2,
+        "name": "API Reference",
+        "item": "https://biscuit.readthedocs.io/api.html"
+    }]
+    }
+    </script>
+
+    <!-- Organization Structured Data -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    "name": "BISCUIT",
+    "url": "https://biscuit.readthedocs.io/",
+    "logo": "https://biscuit.readthedocs.io/en/latest/_static/logo.png",
+    "sameAs": [
+        "https://github.com/crystallinecore/biscuit",
+        "https://pgxn.org/dist/biscuit/"
+    ]
+    }
+    </script>
+
+
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #2C3E50" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            BISCUIT
+              <img src="_static/logo.png" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#prerequisites">Prerequisites</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#check-postgresql-version">Check PostgreSQL Version</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#installation-methods">Installation Methods</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#method-1-from-source-recommended">Method 1: From Source (Recommended)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-1-install-build-dependencies">Step 1: Install Build Dependencies</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-2-clone-repository">Step 2: Clone Repository</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-3-build-and-install">Step 3: Build and Install</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-4-verify-installation">Step 4: Verify Installation</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#method-2-with-croaring-support-enhanced-performance">Method 2: With CRoaring Support (Enhanced Performance)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#install-croaring-library">Install CRoaring Library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#build-biscuit-with-roaring">Build Biscuit with Roaring</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#enable-extension-in-database">Enable Extension in Database</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#post-installation-configuration">Post-Installation Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#set-appropriate-memory-limits">Set Appropriate Memory Limits</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#enable-query-logging-optional">Enable Query Logging (Optional)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#verify-installation-with-test">Verify Installation with Test</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#troubleshooting">Troubleshooting</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#error-could-not-load-library">Error: “could not load library”</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#error-extension-does-not-exist">Error: “extension does not exist”</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#build-errors-with-roaring">Build Errors with Roaring</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#uninstallation">Uninstallation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#platform-specific-notes">Platform-Specific Notes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#windows">Windows</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#docker">Docker</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#getting-help">Getting Help</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick Start Tutorial</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-1-create-sample-data">Step 1: Create Sample Data</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-2-measure-baseline-performance">Step 2: Measure Baseline Performance</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-3-create-biscuit-index">Step 3: Create Biscuit Index</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-4-run-optimized-queries">Step 4: Run Optimized Queries</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-5-try-different-pattern-types">Step 5: Try Different Pattern Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#prefix-patterns-fastest">Prefix Patterns (Fastest)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#suffix-patterns">Suffix Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#substring-patterns">Substring Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#complex-patterns">Complex Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#underscore-wildcards">Underscore Wildcards</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-6-multi-column-indexes">Step 6: Multi-Column Indexes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-7-aggregate-queries-special-optimization">Step 7: Aggregate Queries (Special Optimization)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-8-monitor-index-statistics">Step 8: Monitor Index Statistics</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-9-test-crud-operations">Step 9: Test CRUD Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#insert">INSERT</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#update">UPDATE</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#delete">DELETE</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#best-practices">Best Practices</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#do">✅ DO:</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#dont">❌ DON’T:</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#common-questions">Common Questions</a></li>
+</ul>
+</li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">API Reference</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#table-of-contents">Table of Contents</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#extension-management">Extension Management</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#create-extension">CREATE EXTENSION</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#drop-extension">DROP EXTENSION</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#index-operations">Index Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#create-index">CREATE INDEX</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#drop-index">DROP INDEX</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#reindex">REINDEX</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#query-operators">Query Operators</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#like-operator">LIKE Operator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#not-like-operator">NOT LIKE Operator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#ilike-operator">ILIKE Operator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#multi-column-queries">Multi-Column Queries</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#diagnostic-functions">Diagnostic Functions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#biscuit-index-stats">biscuit_index_stats()</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#configuration-parameters">Configuration Parameters</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#server-parameters">Server Parameters</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#shared-buffers">shared_buffers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#work-mem">work_mem</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#maintenance-work-mem">maintenance_work_mem</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#effective-cache-size">effective_cache_size</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#enable-seqscan">enable_seqscan</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#max-parallel-workers-per-gather">max_parallel_workers_per_gather</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#session-parameters">Session Parameters</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#data-types">Data Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#supported-input-types">Supported Input Types</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#text-types">Text Types</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#numeric-types">Numeric Types</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#date-time-types">Date/Time Types</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#boolean-type">Boolean Type</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#unsupported-types">Unsupported Types</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#system-views">System Views</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#pg-index">pg_index</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pg-stat-user-indexes">pg_stat_user_indexes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pg-indexes">pg_indexes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#error-messages">Error Messages</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#error-access-method-biscuit-does-not-exist">ERROR: access method “biscuit” does not exist</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#error-data-type-x-is-not-supported-for-biscuit-index">ERROR: data type X is not supported for biscuit index</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#error-could-not-open-relation-with-oid">ERROR: could not open relation with OID</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#warning-biscuit-index-cache-miss">WARNING: Biscuit: Index cache miss</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="patterns.html">Pattern Syntax Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#wildcard-characters">Wildcard Characters</a></li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-types">Pattern Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#exact-match-fastest">1. Exact Match (Fastest)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#prefix-match-very-fast">2. Prefix Match (Very Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#suffix-match-fast">3. Suffix Match (Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#substring-match-moderate-speed">4. Substring Match (Moderate Speed)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#infix-match-fast">5. Infix Match (Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#complex-multi-part-patterns">6. Complex Multi-Part Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#underscore-patterns-position-specific">7. Underscore Patterns (Position-Specific)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pure-wildcard-patterns-fastest-special-cases">Pure Wildcard Patterns (Fastest Special Cases)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#empty-pattern">Empty Pattern</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#single-percent">Single Percent</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#pure-underscores">Pure Underscores</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#mixed-pure-wildcards">Mixed Pure Wildcards</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-optimization-strategies">Pattern Optimization Strategies</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-1-maximize-concrete-characters">Strategy 1: Maximize Concrete Characters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-2-use-strong-anchors">Strategy 2: Use Strong Anchors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-3-minimize-partitions">Strategy 3: Minimize Partitions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-4-combine-with-other-indexes">Strategy 4: Combine with Other Indexes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-examples-by-use-case">Pattern Examples by Use Case</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#email-filtering">Email Filtering</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#sku-product-code-matching">SKU/Product Code Matching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#log-searching">Log Searching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#url-path-matching">URL/Path Matching</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#case-sensitivity">Case Sensitivity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-performance-hierarchy">Pattern Performance Hierarchy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="multicolumn.html">Multi-Column Indexes</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#overview">Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#creating-multi-column-indexes">Creating Multi-Column Indexes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#basic-syntax">Basic Syntax</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#example-e-commerce-product-search">Example: E-Commerce Product Search</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#how-query-optimization-works">How Query Optimization Works</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#automatic-reordering-example">Automatic Reordering Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#query-planning-deep-dive">Query Planning Deep Dive</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#priority-calculation">Priority Calculation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#selectivity-scoring">Selectivity Scoring</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#viewing-query-plans">Viewing Query Plans</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#best-practices">Best Practices</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#order-columns-by-query-frequency">1. Order Columns by Query Frequency</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#mix-selective-and-general-columns">2. Mix Selective and General Columns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#consider-column-cardinality">3. Consider Column Cardinality</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#avoid-redundant-indexes">4. Avoid Redundant Indexes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#advanced-patterns">Advanced Patterns</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-1-user-search-with-email-domain">Pattern 1: User Search with Email Domain</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-2-product-search-with-multiple-attributes">Pattern 2: Product Search with Multiple Attributes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-3-log-analysis">Pattern 3: Log Analysis</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#type-conversion-support">Type Conversion Support</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#supported-types">Supported Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#type-conversion-details">Type Conversion Details</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#performance-characteristics">Performance Characteristics</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#query-complexity-vs-performance">Query Complexity vs. Performance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#early-termination-example">Early Termination Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#limit-optimization">LIMIT Optimization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#monitoring-and-diagnostics">Monitoring and Diagnostics</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#check-index-statistics">Check Index Statistics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#query-performance-analysis">Query Performance Analysis</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#common-pitfalls">Common Pitfalls</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pitfall-1-too-many-columns">❌ Pitfall 1: Too Many Columns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pitfall-2-low-selectivity-patterns">❌ Pitfall 2: Low Selectivity Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pitfall-3-not-using-explain">❌ Pitfall 3: Not Using EXPLAIN</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#migration-from-single-column">Migration from Single-Column</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#examples-repository">Examples Repository</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="performance.html">Performance Tuning Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#quick-performance-checklist">Quick Performance Checklist</a></li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#understanding-biscuit-performance">Understanding Biscuit Performance</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#active-optimizations">Active Optimizations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#postgresql-configuration">PostgreSQL Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#memory-settings">Memory Settings</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#planner-settings">Planner Settings</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#index-design-optimization">Index Design Optimization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#choose-selective-columns">Choose Selective Columns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#multi-column-order-strategy">Multi-Column Order Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#avoid-over-indexing">Avoid Over-Indexing</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#query-optimization">Query Optimization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#pattern-design">Pattern Design</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="performance.html#maximize-concrete-characters">Maximize Concrete Characters</a></li>
+<li class="toctree-l4"><a class="reference internal" href="performance.html#use-strong-anchors">Use Strong Anchors</a></li>
+<li class="toctree-l4"><a class="reference internal" href="performance.html#minimize-pattern-complexity">Minimize Pattern Complexity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#combine-with-other-filters">Combine with Other Filters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#aggregate-query-optimization">Aggregate Query Optimization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#limit-query-optimization">LIMIT Query Optimization</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#maintenance-and-monitoring">Maintenance and Monitoring</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#regular-statistics-updates">Regular Statistics Updates</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#monitor-index-health">Monitor Index Health</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#cleanup-tombstones">Cleanup Tombstones</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#index-rebuild-strategy">Index Rebuild Strategy</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#hardware-considerations">Hardware Considerations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#memory-requirements">Memory Requirements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#ssd-vs-hdd">SSD vs. HDD</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#cpu-considerations">CPU Considerations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#benchmarking-your-setup">Benchmarking Your Setup</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#create-benchmark-suite">Create Benchmark Suite</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#troubleshooting-performance-issues">Troubleshooting Performance Issues</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-1-index-not-being-used">Issue 1: Index Not Being Used</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-2-slow-query-despite-index">Issue 2: Slow Query Despite Index</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-3-high-memory-usage">Issue 3: High Memory Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-4-slow-index-builds">Issue 4: Slow Index Builds</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#advanced-tuning">Advanced Tuning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#custom-cost-parameters">Custom Cost Parameters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#parallel-query-configuration">Parallel Query Configuration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#performance-monitoring-dashboard">Performance Monitoring Dashboard</a></li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #2C3E50" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">BISCUIT</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">API Reference</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/api.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="api-reference">
+<h1>API Reference<a class="headerlink" href="#api-reference" title="Link to this heading"></a></h1>
+<p>Complete reference for Biscuit index SQL API, functions, and operators.</p>
+<hr class="docutils" />
+<section id="table-of-contents">
+<h2>Table of Contents<a class="headerlink" href="#table-of-contents" title="Link to this heading"></a></h2>
+<ol class="arabic simple">
+<li><p><a class="reference internal" href="#extension-management"><span class="xref myst">Extension Management</span></a></p></li>
+<li><p><a class="reference internal" href="#index-operations"><span class="xref myst">Index Operations</span></a></p></li>
+<li><p><a class="reference internal" href="#query-operators"><span class="xref myst">Query Operators</span></a></p></li>
+<li><p><a class="reference internal" href="#diagnostic-functions"><span class="xref myst">Diagnostic Functions</span></a></p></li>
+<li><p><a class="reference internal" href="#configuration-parameters"><span class="xref myst">Configuration Parameters</span></a></p></li>
+<li><p><a class="reference internal" href="#data-types"><span class="xref myst">Data Types</span></a></p></li>
+</ol>
+</section>
+<hr class="docutils" />
+<section id="extension-management">
+<h2>Extension Management<a class="headerlink" href="#extension-management" title="Link to this heading"></a></h2>
+<section id="create-extension">
+<h3>CREATE EXTENSION<a class="headerlink" href="#create-extension" title="Link to this heading"></a></h3>
+<p>Creates the Biscuit extension in the current database.</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="n">EXTENSION</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="k">WITH</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="k">SCHEMA</span><span class="w"> </span><span class="k">schema_name</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="k">VERSION</span><span class="w"> </span><span class="k">version</span><span class="w"> </span><span class="p">];</span>
+</pre></div>
+</div>
+<p><strong>Parameters</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">schema_name</span></code> - Schema to install extension (default: current schema)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">version</span></code> - Specific version to install (default: latest)</p></li>
+</ul>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Install in public schema</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="n">EXTENSION</span><span class="w"> </span><span class="n">biscuit</span><span class="p">;</span>
+
+<span class="c1">-- Install in specific schema</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="n">EXTENSION</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="k">SCHEMA</span><span class="w"> </span><span class="n">extensions</span><span class="p">;</span>
+
+<span class="c1">-- Install specific version</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="n">EXTENSION</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="k">VERSION</span><span class="w"> </span><span class="s1">&#39;1.0&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Returns</strong>: Nothing on success</p>
+<p><strong>Errors</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">ERROR:</span> <span class="pre">extension</span> <span class="pre">&quot;biscuit&quot;</span> <span class="pre">already</span> <span class="pre">exists</span></code> - Extension already installed</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">ERROR:</span> <span class="pre">could</span> <span class="pre">not</span> <span class="pre">open</span> <span class="pre">extension</span> <span class="pre">control</span> <span class="pre">file</span></code> - Installation files missing</p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="drop-extension">
+<h3>DROP EXTENSION<a class="headerlink" href="#drop-extension" title="Link to this heading"></a></h3>
+<p>Removes the Biscuit extension from the database.</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">DROP</span><span class="w"> </span><span class="n">EXTENSION</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="k">CASCADE</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="k">RESTRICT</span><span class="w"> </span><span class="p">];</span>
+</pre></div>
+</div>
+<p><strong>Parameters</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">IF</span> <span class="pre">EXISTS</span></code> - Don’t error if extension doesn’t exist</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CASCADE</span></code> - Drop dependent objects (including indexes)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">RESTRICT</span></code> - Refuse if dependent objects exist (default)</p></li>
+</ul>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Drop extension (fails if indexes exist)</span>
+<span class="k">DROP</span><span class="w"> </span><span class="n">EXTENSION</span><span class="w"> </span><span class="n">biscuit</span><span class="p">;</span>
+
+<span class="c1">-- Drop extension and all Biscuit indexes</span>
+<span class="k">DROP</span><span class="w"> </span><span class="n">EXTENSION</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="k">CASCADE</span><span class="p">;</span>
+
+<span class="c1">-- Drop only if exists</span>
+<span class="k">DROP</span><span class="w"> </span><span class="n">EXTENSION</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="k">CASCADE</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Side Effects</strong>:</p>
+<ul class="simple">
+<li><p>All Biscuit indexes are dropped (with CASCADE)</p></li>
+<li><p>Index cache is cleared</p></li>
+<li><p>Memory is freed</p></li>
+</ul>
+</section>
+</section>
+<hr class="docutils" />
+<section id="index-operations">
+<h2>Index Operations<a class="headerlink" href="#index-operations" title="Link to this heading"></a></h2>
+<section id="create-index">
+<h3>CREATE INDEX<a class="headerlink" href="#create-index" title="Link to this heading"></a></h3>
+<p>Creates a Biscuit index on one or more columns.</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="n">CONCURRENTLY</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="n">index_name</span>
+<span class="w">    </span><span class="k">ON</span><span class="w"> </span><span class="k">table_name</span>
+<span class="w">    </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="w"> </span><span class="k">column_name</span><span class="w"> </span><span class="p">[,</span><span class="w"> </span><span class="p">...]</span><span class="w"> </span><span class="p">)</span>
+<span class="w">    </span><span class="p">[</span><span class="w"> </span><span class="k">WITH</span><span class="w"> </span><span class="p">(</span><span class="w"> </span><span class="n">storage_parameter</span><span class="w"> </span><span class="p">[</span><span class="o">=</span><span class="w"> </span><span class="n">value</span><span class="p">]</span><span class="w"> </span><span class="p">[,</span><span class="w"> </span><span class="p">...</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">]</span>
+<span class="w">    </span><span class="p">[</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">predicate</span><span class="w"> </span><span class="p">];</span>
+</pre></div>
+</div>
+<p><strong>Parameters</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">index_name</span></code> - Name of the index to create</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">table_name</span></code> - Table to index</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">column_name</span></code> - Column(s) to index (1 or more)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">CONCURRENTLY</span></code> - Build without blocking writes</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">IF</span> <span class="pre">NOT</span> <span class="pre">EXISTS</span></code> - Don’t error if index exists</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">UNIQUE</span></code> - Not supported (will error)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">WHERE</span> <span class="pre">predicate</span></code> - Create partial index</p></li>
+</ul>
+<p><strong>Supported Column Types</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">TEXT</span></code>, <code class="docutils literal notranslate"><span class="pre">VARCHAR</span></code>, <code class="docutils literal notranslate"><span class="pre">CHAR</span></code> - Direct indexing</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">INTEGER</span></code>, <code class="docutils literal notranslate"><span class="pre">BIGINT</span></code>, <code class="docutils literal notranslate"><span class="pre">SMALLINT</span></code> - Converted to sortable text</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">FLOAT</span></code>, <code class="docutils literal notranslate"><span class="pre">DOUBLE</span> <span class="pre">PRECISION</span></code> - Converted to scientific notation</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">DATE</span></code> - Converted to sortable integer</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">TIMESTAMP</span></code>, <code class="docutils literal notranslate"><span class="pre">TIMESTAMPTZ</span></code> - Converted to microseconds</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">BOOLEAN</span></code> - Converted to ‘t’ or ‘f’</p></li>
+</ul>
+<p><strong>Examples</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Single column index</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products_name</span><span class="w"> </span>
+<span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">);</span>
+
+<span class="c1">-- Multi-column index</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products_search</span><span class="w"> </span>
+<span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">sku</span><span class="p">,</span><span class="w"> </span><span class="n">category</span><span class="p">);</span>
+
+<span class="c1">-- Concurrent build (non-blocking)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">CONCURRENTLY</span><span class="w"> </span><span class="n">idx_products_name</span><span class="w"> </span>
+<span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">);</span>
+
+<span class="c1">-- Partial index (filtered)</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_active_products</span><span class="w"> </span>
+<span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;active&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Index with type conversion</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_orders_date</span><span class="w"> </span>
+<span class="k">ON</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">created_at</span><span class="p">);</span>
+
+<span class="c1">-- Index on expression</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products_lower</span><span class="w"> </span>
+<span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="k">LOWER</span><span class="p">(</span><span class="n">name</span><span class="p">));</span>
+</pre></div>
+</div>
+<p><strong>Limitations</strong>:</p>
+<ul class="simple">
+<li><p>Maximum 256 characters per string (longer strings truncated)</p></li>
+<li><p>Maximum 256 positions indexed per string</p></li>
+<li><p>UNIQUE constraint not supported</p></li>
+<li><p>ORDER BY not supported in index</p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="drop-index">
+<h3>DROP INDEX<a class="headerlink" href="#drop-index" title="Link to this heading"></a></h3>
+<p>Removes a Biscuit index.</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">DROP</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="n">CONCURRENTLY</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="n">index_name</span><span class="w"> </span><span class="p">[,</span><span class="w"> </span><span class="p">...]</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="k">CASCADE</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="k">RESTRICT</span><span class="w"> </span><span class="p">];</span>
+</pre></div>
+</div>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Drop index</span>
+<span class="k">DROP</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products_name</span><span class="p">;</span>
+
+<span class="c1">-- Drop without blocking</span>
+<span class="k">DROP</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">CONCURRENTLY</span><span class="w"> </span><span class="n">idx_products_name</span><span class="p">;</span>
+
+<span class="c1">-- Drop multiple indexes</span>
+<span class="k">DROP</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products_name</span><span class="p">,</span><span class="w"> </span><span class="n">idx_products_sku</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="reindex">
+<h3>REINDEX<a class="headerlink" href="#reindex" title="Link to this heading"></a></h3>
+<p>Rebuilds a Biscuit index.</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">REINDEX</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="p">(</span><span class="w"> </span><span class="k">option</span><span class="w"> </span><span class="p">[,</span><span class="w"> </span><span class="p">...]</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="k">SCHEMA</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="k">DATABASE</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="k">SYSTEM</span><span class="w"> </span><span class="err">}</span><span class="w"> </span><span class="n">name</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Rebuild single index</span>
+<span class="k">REINDEX</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products_name</span><span class="p">;</span>
+
+<span class="c1">-- Rebuild all indexes on table</span>
+<span class="k">REINDEX</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">products</span><span class="p">;</span>
+
+<span class="c1">-- Rebuild concurrently (PG14+)</span>
+<span class="k">REINDEX</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">CONCURRENTLY</span><span class="w"> </span><span class="n">idx_products_name</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>When to Reindex</strong>:</p>
+<ul class="simple">
+<li><p>After massive data changes (&gt;50% rows)</p></li>
+<li><p>Tombstone count exceeds 5000</p></li>
+<li><p>Performance degradation detected</p></li>
+<li><p>After pg_upgrade</p></li>
+</ul>
+</section>
+</section>
+<hr class="docutils" />
+<section id="query-operators">
+<h2>Query Operators<a class="headerlink" href="#query-operators" title="Link to this heading"></a></h2>
+<section id="like-operator">
+<h3>LIKE Operator<a class="headerlink" href="#like-operator" title="Link to this heading"></a></h3>
+<p>Pattern matching operator supported by Biscuit indexes.</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">column_name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="n">pattern</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="k">ESCAPE</span><span class="w"> </span><span class="n">escape_character</span><span class="w"> </span><span class="p">]</span>
+</pre></div>
+</div>
+<p><strong>Pattern Syntax</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">%</span></code> - Matches zero or more characters</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">_</span></code> - Matches exactly one character</p></li>
+<li><p>Other characters match themselves</p></li>
+<li><p>Case-sensitive matching</p></li>
+</ul>
+<p><strong>Examples</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Prefix match</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Wireless%&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Suffix match</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%Mouse&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Substring match</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%gaming%&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Underscore wildcard</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">sku</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;PROD-____-2024&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Exact match</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Wireless Mouse&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Complex pattern</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Wireless%RGB%Gaming%&#39;</span><span class="p">;</span>
+
+<span class="c1">-- With ESCAPE character</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Price: 100\%&#39;</span><span class="w"> </span><span class="k">ESCAPE</span><span class="w"> </span><span class="s1">&#39;\&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Performance</strong>: See <a class="reference internal" href="patterns.html"><span class="std std-doc">Pattern Syntax Guide</span></a> for optimization details</p>
+</section>
+<hr class="docutils" />
+<section id="not-like-operator">
+<h3>NOT LIKE Operator<a class="headerlink" href="#not-like-operator" title="Link to this heading"></a></h3>
+<p>Negated pattern matching.</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">column_name</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="n">pattern</span>
+</pre></div>
+</div>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Find products NOT containing &quot;test&quot;</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%test%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="ilike-operator">
+<h3>ILIKE Operator<a class="headerlink" href="#ilike-operator" title="Link to this heading"></a></h3>
+<p>Case-insensitive pattern matching (not directly supported).</p>
+<p><strong>Workaround</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Create index on LOWER()</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products_lower</span><span class="w"> </span>
+<span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="k">LOWER</span><span class="p">(</span><span class="n">name</span><span class="p">));</span>
+
+<span class="c1">-- Query with LOWER()</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="k">LOWER</span><span class="p">(</span><span class="n">name</span><span class="p">)</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%wireless%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="multi-column-queries">
+<h3>Multi-Column Queries<a class="headerlink" href="#multi-column-queries" title="Link to this heading"></a></h3>
+<p>Query multiple columns with automatic optimization.</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">WHERE</span><span class="w"> </span><span class="n">column1</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="n">pattern1</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">column2</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="n">pattern2</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">column3</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="n">pattern3</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Automatic predicate reordering</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%laptop%&#39;</span><span class="w">          </span><span class="c1">-- Priority: 50 (substring)</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">brand</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Dell%&#39;</span><span class="w">            </span><span class="c1">-- Priority: 20 (prefix)</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">category</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Computer%&#39;</span><span class="p">;</span><span class="w">    </span><span class="c1">-- Priority: 21 (prefix)</span>
+
+<span class="c1">-- Execution order: brand → category → name</span>
+</pre></div>
+</div>
+<p><strong>Performance</strong>: Biscuit automatically reorders predicates by selectivity for optimal performance.</p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="diagnostic-functions">
+<h2>Diagnostic Functions<a class="headerlink" href="#diagnostic-functions" title="Link to this heading"></a></h2>
+<section id="biscuit-index-stats">
+<h3>biscuit_index_stats()<a class="headerlink" href="#biscuit-index-stats" title="Link to this heading"></a></h3>
+<p>Returns detailed statistics about a Biscuit index.</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="n">biscuit_index_stats</span><span class="p">(</span><span class="n">index_oid</span><span class="w"> </span><span class="n">regclass</span><span class="p">)</span><span class="w"> </span><span class="k">RETURNS</span><span class="w"> </span><span class="nb">text</span>
+</pre></div>
+</div>
+<p><strong>Parameters</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">index_oid</span></code> - OID or name of the Biscuit index</p></li>
+</ul>
+<p><strong>Returns</strong>: Multi-line text report with statistics</p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Get statistics for an index</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_index_stats</span><span class="p">(</span><span class="s1">&#39;idx_products_name&#39;</span><span class="p">::</span><span class="n">regclass</span><span class="p">);</span>
+
+<span class="c1">-- With formatted output</span>
+<span class="err">\</span><span class="n">x</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_index_stats</span><span class="p">(</span><span class="s1">&#39;idx_products_name&#39;</span><span class="p">::</span><span class="n">regclass</span><span class="p">);</span>
+<span class="err">\</span><span class="n">x</span>
+</pre></div>
+</div>
+<p><strong>Output Format</strong>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>Biscuit Index Statistics (FULLY OPTIMIZED)
+==========================================
+Index: idx_products_name
+Active records: 50000
+Total slots: 50245
+Free slots: 245
+Tombstones: 0
+Max length: 128
+------------------------
+CRUD Statistics:
+  Inserts: 50245
+  Updates: 1205
+  Deletes: 245
+------------------------
+Active Optimizations:
+  ✓ 1. Skip wildcard intersections
+  ✓ 2. Early termination on empty
+  [... 12 optimizations listed ...]
+</pre></div>
+</div>
+<p><strong>Metrics Explained</strong>:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Metric</p></th>
+<th class="head"><p>Description</p></th>
+<th class="head"><p>Ideal Value</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Active records</p></td>
+<td><p>Current valid records</p></td>
+<td><p>= table row count</p></td>
+</tr>
+<tr class="row-odd"><td><p>Total slots</p></td>
+<td><p>Allocated memory slots</p></td>
+<td><p>≥ active records</p></td>
+</tr>
+<tr class="row-even"><td><p>Free slots</p></td>
+<td><p>Reusable slots from deletes</p></td>
+<td><p>&lt; 1000</p></td>
+</tr>
+<tr class="row-odd"><td><p>Tombstones</p></td>
+<td><p>Deleted but not cleaned</p></td>
+<td><p>&lt; 1000</p></td>
+</tr>
+<tr class="row-even"><td><p>Max length</p></td>
+<td><p>Longest indexed string</p></td>
+<td><p>&lt; 256</p></td>
+</tr>
+<tr class="row-odd"><td><p>Inserts</p></td>
+<td><p>Total insert operations</p></td>
+<td><p>Monotonic increase</p></td>
+</tr>
+<tr class="row-even"><td><p>Updates</p></td>
+<td><p>Total update operations</p></td>
+<td><p>-</p></td>
+</tr>
+<tr class="row-odd"><td><p>Deletes</p></td>
+<td><p>Total delete operations</p></td>
+<td><p>-</p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Usage</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Monitor index health</span>
+<span class="k">SELECT</span><span class="w"> </span>
+<span class="w">    </span><span class="n">indexrelid</span><span class="p">::</span><span class="n">regclass</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">index_name</span><span class="p">,</span>
+<span class="w">    </span><span class="n">biscuit_index_stats</span><span class="p">(</span><span class="n">indexrelid</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">stats</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">pg_index</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">indexrelid</span><span class="p">::</span><span class="n">regclass</span><span class="p">::</span><span class="nb">text</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%biscuit%&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Create monitoring view</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">VIEW</span><span class="w"> </span><span class="n">biscuit_health</span><span class="w"> </span><span class="k">AS</span>
+<span class="k">SELECT</span><span class="w"> </span>
+<span class="w">    </span><span class="n">i</span><span class="p">.</span><span class="n">indexrelid</span><span class="p">::</span><span class="n">regclass</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">index_name</span><span class="p">,</span>
+<span class="w">    </span><span class="n">t</span><span class="p">.</span><span class="n">relname</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="k">table_name</span><span class="p">,</span>
+<span class="w">    </span><span class="n">pg_size_pretty</span><span class="p">(</span><span class="n">pg_relation_size</span><span class="p">(</span><span class="n">i</span><span class="p">.</span><span class="n">indexrelid</span><span class="p">))</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">index_size</span><span class="p">,</span>
+<span class="w">    </span><span class="n">biscuit_index_stats</span><span class="p">(</span><span class="n">i</span><span class="p">.</span><span class="n">indexrelid</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">stats</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">pg_index</span><span class="w"> </span><span class="n">i</span>
+<span class="k">JOIN</span><span class="w"> </span><span class="n">pg_class</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">i</span><span class="p">.</span><span class="n">indrelid</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">t</span><span class="p">.</span><span class="n">oid</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">i</span><span class="p">.</span><span class="n">indexrelid</span><span class="p">::</span><span class="n">regclass</span><span class="p">::</span><span class="nb">text</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%biscuit%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="configuration-parameters">
+<h2>Configuration Parameters<a class="headerlink" href="#configuration-parameters" title="Link to this heading"></a></h2>
+<section id="server-parameters">
+<h3>Server Parameters<a class="headerlink" href="#server-parameters" title="Link to this heading"></a></h3>
+<p>These PostgreSQL parameters affect Biscuit performance:</p>
+<section id="shared-buffers">
+<h4>shared_buffers<a class="headerlink" href="#shared-buffers" title="Link to this heading"></a></h4>
+<p><strong>Description</strong>: Memory for caching index data</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- In postgresql.conf</span>
+<span class="n">shared_buffers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;4GB&#39;</span>
+
+<span class="c1">-- Or per session</span>
+<span class="k">SET</span><span class="w"> </span><span class="n">shared_buffers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;4GB&#39;</span><span class="p">;</span><span class="w">  </span><span class="c1">-- Requires restart</span>
+</pre></div>
+</div>
+<p><strong>Recommendation</strong>: 25% of system RAM</p>
+</section>
+<hr class="docutils" />
+<section id="work-mem">
+<h4>work_mem<a class="headerlink" href="#work-mem" title="Link to this heading"></a></h4>
+<p><strong>Description</strong>: Memory for sorting and bitmap operations</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- In postgresql.conf</span>
+<span class="n">work_mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;256MB&#39;</span>
+
+<span class="c1">-- Or per session</span>
+<span class="k">SET</span><span class="w"> </span><span class="n">work_mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;256MB&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Recommendation</strong>:</p>
+<ul class="simple">
+<li><p>Small queries: 64MB</p></li>
+<li><p>Medium queries: 256MB</p></li>
+<li><p>Large queries: 512MB-1GB</p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="maintenance-work-mem">
+<h4>maintenance_work_mem<a class="headerlink" href="#maintenance-work-mem" title="Link to this heading"></a></h4>
+<p><strong>Description</strong>: Memory for index building</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- In postgresql.conf</span>
+<span class="n">maintenance_work_mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;1GB&#39;</span>
+
+<span class="c1">-- Or for current session</span>
+<span class="k">SET</span><span class="w"> </span><span class="n">maintenance_work_mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;1GB&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Recommendation</strong>: 1GB minimum for large indexes</p>
+</section>
+<hr class="docutils" />
+<section id="effective-cache-size">
+<h4>effective_cache_size<a class="headerlink" href="#effective-cache-size" title="Link to this heading"></a></h4>
+<p><strong>Description</strong>: Hint to planner about available cache</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- In postgresql.conf</span>
+<span class="n">effective_cache_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;12GB&#39;</span>
+</pre></div>
+</div>
+<p><strong>Recommendation</strong>: 75% of system RAM</p>
+</section>
+<hr class="docutils" />
+<section id="enable-seqscan">
+<h4>enable_seqscan<a class="headerlink" href="#enable-seqscan" title="Link to this heading"></a></h4>
+<p><strong>Description</strong>: Allow/disallow sequential scans</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Disable sequential scans (testing only!)</span>
+<span class="k">SET</span><span class="w"> </span><span class="n">enable_seqscan</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">off</span><span class="p">;</span>
+
+<span class="c1">-- Re-enable</span>
+<span class="k">SET</span><span class="w"> </span><span class="n">enable_seqscan</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">on</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Use Case</strong>: Force index usage during testing</p>
+</section>
+<hr class="docutils" />
+<section id="max-parallel-workers-per-gather">
+<h4>max_parallel_workers_per_gather<a class="headerlink" href="#max-parallel-workers-per-gather" title="Link to this heading"></a></h4>
+<p><strong>Description</strong>: Workers for parallel bitmap scans</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- In postgresql.conf</span>
+<span class="n">max_parallel_workers_per_gather</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span>
+
+<span class="c1">-- Or per session</span>
+<span class="k">SET</span><span class="w"> </span><span class="n">max_parallel_workers_per_gather</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Recommendation</strong>: 2-4 for most workloads</p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="session-parameters">
+<h3>Session Parameters<a class="headerlink" href="#session-parameters" title="Link to this heading"></a></h3>
+<p>Parameters you can set per connection:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Increase work memory for this session</span>
+<span class="k">SET</span><span class="w"> </span><span class="n">work_mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;512MB&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Enable query timing</span>
+<span class="err">\</span><span class="n">timing</span><span class="w"> </span><span class="k">on</span>
+
+<span class="c1">-- Show query plans</span>
+<span class="k">SET</span><span class="w"> </span><span class="n">client_min_messages</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">INFO</span><span class="p">;</span>
+
+<span class="c1">-- Force index usage (testing)</span>
+<span class="k">SET</span><span class="w"> </span><span class="n">enable_seqscan</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">off</span><span class="p">;</span>
+
+<span class="c1">-- Enable parallel queries</span>
+<span class="k">SET</span><span class="w"> </span><span class="n">max_parallel_workers_per_gather</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span>
+
+<span class="c1">-- Reset all to defaults</span>
+<span class="k">RESET</span><span class="w"> </span><span class="k">ALL</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="data-types">
+<h2>Data Types<a class="headerlink" href="#data-types" title="Link to this heading"></a></h2>
+<section id="supported-input-types">
+<h3>Supported Input Types<a class="headerlink" href="#supported-input-types" title="Link to this heading"></a></h3>
+<p>Biscuit indexes can be created on these column types:</p>
+<section id="text-types">
+<h4>Text Types<a class="headerlink" href="#text-types" title="Link to this heading"></a></h4>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Direct support (no conversion)</span>
+<span class="nb">TEXT</span>
+<span class="nb">VARCHAR</span><span class="p">(</span><span class="n">n</span><span class="p">)</span>
+<span class="nb">CHAR</span><span class="p">(</span><span class="n">n</span><span class="p">)</span>
+<span class="n">NAME</span>
+</pre></div>
+</div>
+<p><strong>Storage</strong>: As-is, up to 256 characters</p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_text</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">table1</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">text_column</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="numeric-types">
+<h4>Numeric Types<a class="headerlink" href="#numeric-types" title="Link to this heading"></a></h4>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Converted to sortable text</span>
+<span class="nb">SMALLINT</span><span class="p">,</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">,</span><span class="w"> </span><span class="nb">BIGINT</span>
+<span class="nb">NUMERIC</span><span class="p">,</span><span class="w"> </span><span class="nb">DECIMAL</span>
+<span class="nb">REAL</span><span class="p">,</span><span class="w"> </span><span class="n">DOUBLE</span><span class="w"> </span><span class="k">PRECISION</span>
+</pre></div>
+</div>
+<p><strong>Storage Format</strong>:</p>
+<ul class="simple">
+<li><p>Integers: <code class="docutils literal notranslate"><span class="pre">+0000000042</span></code> (sign + zero-padded)</p></li>
+<li><p>Floats: <code class="docutils literal notranslate"><span class="pre">1.234567e+02</span></code> (scientific notation)</p></li>
+</ul>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_price</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">price</span><span class="p">);</span>
+
+<span class="c1">-- Query with pattern</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">price</span><span class="p">::</span><span class="nb">TEXT</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;1%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Use Cases</strong>:</p>
+<ul class="simple">
+<li><p>Price ranges: <code class="docutils literal notranslate"><span class="pre">WHERE</span> <span class="pre">price::TEXT</span> <span class="pre">LIKE</span> <span class="pre">'1%'</span></code> (100-199)</p></li>
+<li><p>ID prefixes: <code class="docutils literal notranslate"><span class="pre">WHERE</span> <span class="pre">id::TEXT</span> <span class="pre">LIKE</span> <span class="pre">'2024%'</span></code></p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="date-time-types">
+<h4>Date/Time Types<a class="headerlink" href="#date-time-types" title="Link to this heading"></a></h4>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Converted to sortable integers</span>
+<span class="nb">DATE</span>
+<span class="k">TIMESTAMP</span>
+<span class="n">TIMESTAMPTZ</span>
+<span class="k">TIME</span>
+</pre></div>
+</div>
+<p><strong>Storage Format</strong>:</p>
+<ul class="simple">
+<li><p>DATE: Days since epoch (zero-padded)</p></li>
+<li><p>TIMESTAMP: Microseconds since epoch</p></li>
+</ul>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_created</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">created_at</span><span class="p">);</span>
+
+<span class="c1">-- Query by year-month</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">created_at</span><span class="p">::</span><span class="nb">TEXT</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;2024-01%&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Query by year</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">created_at</span><span class="p">::</span><span class="nb">TEXT</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;2024%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="boolean-type">
+<h4>Boolean Type<a class="headerlink" href="#boolean-type" title="Link to this heading"></a></h4>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="nb">BOOLEAN</span>
+</pre></div>
+</div>
+<p><strong>Storage</strong>: <code class="docutils literal notranslate"><span class="pre">'t'</span></code> or <code class="docutils literal notranslate"><span class="pre">'f'</span></code></p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_active</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">is_active</span><span class="p">);</span>
+
+<span class="c1">-- Query</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">is_active</span><span class="p">::</span><span class="nb">TEXT</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;t&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Note</strong>: B-tree is more efficient for boolean columns</p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="unsupported-types">
+<h3>Unsupported Types<a class="headerlink" href="#unsupported-types" title="Link to this heading"></a></h3>
+<p>These types cannot be indexed directly:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">BYTEA</span></code> - Binary data</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">JSON</span></code>, <code class="docutils literal notranslate"><span class="pre">JSONB</span></code> - Use expression index on text field</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">ARRAY</span></code> - Use expression index on array_to_string</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">UUID</span></code> - Cast to TEXT first</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">INET</span></code>, <code class="docutils literal notranslate"><span class="pre">CIDR</span></code> - Cast to TEXT first</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">GEOMETRY</span></code> (PostGIS) - Not supported</p></li>
+</ul>
+<p><strong>Workarounds</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- JSON field</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_json</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">table1</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">((</span><span class="k">data</span><span class="o">-&gt;&gt;</span><span class="s1">&#39;name&#39;</span><span class="p">));</span>
+
+<span class="c1">-- Array</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_array</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">table1</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">array_to_string</span><span class="p">(</span><span class="n">tags</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;,&#39;</span><span class="p">));</span>
+
+<span class="c1">-- UUID</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_uuid</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">table1</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">id</span><span class="p">::</span><span class="nb">TEXT</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="system-views">
+<h2>System Views<a class="headerlink" href="#system-views" title="Link to this heading"></a></h2>
+<section id="pg-index">
+<h3>pg_index<a class="headerlink" href="#pg-index" title="Link to this heading"></a></h3>
+<p>Check if an index is a Biscuit index:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span>
+<span class="w">    </span><span class="n">indexrelid</span><span class="p">::</span><span class="n">regclass</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">index_name</span><span class="p">,</span>
+<span class="w">    </span><span class="n">indrelid</span><span class="p">::</span><span class="n">regclass</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="k">table_name</span><span class="p">,</span>
+<span class="w">    </span><span class="n">indnatts</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">num_columns</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">pg_index</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">indexrelid</span><span class="p">::</span><span class="n">regclass</span><span class="p">::</span><span class="nb">text</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%biscuit%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="pg-stat-user-indexes">
+<h3>pg_stat_user_indexes<a class="headerlink" href="#pg-stat-user-indexes" title="Link to this heading"></a></h3>
+<p>Monitor index usage:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span>
+<span class="w">    </span><span class="n">indexrelname</span><span class="p">,</span>
+<span class="w">    </span><span class="n">idx_scan</span><span class="p">,</span>
+<span class="w">    </span><span class="n">idx_tup_read</span><span class="p">,</span>
+<span class="w">    </span><span class="n">idx_tup_fetch</span><span class="p">,</span>
+<span class="w">    </span><span class="n">pg_size_pretty</span><span class="p">(</span><span class="n">pg_relation_size</span><span class="p">(</span><span class="n">indexrelid</span><span class="p">))</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="k">size</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">pg_stat_user_indexes</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">indexrelname</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%biscuit%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="pg-indexes">
+<h3>pg_indexes<a class="headerlink" href="#pg-indexes" title="Link to this heading"></a></h3>
+<p>View index definitions:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span>
+<span class="w">    </span><span class="n">schemaname</span><span class="p">,</span>
+<span class="w">    </span><span class="n">tablename</span><span class="p">,</span>
+<span class="w">    </span><span class="n">indexname</span><span class="p">,</span>
+<span class="w">    </span><span class="n">indexdef</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">pg_indexes</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">indexdef</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%biscuit%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="error-messages">
+<h2>Error Messages<a class="headerlink" href="#error-messages" title="Link to this heading"></a></h2>
+<p>Common errors and solutions:</p>
+<section id="error-access-method-biscuit-does-not-exist">
+<h3>ERROR: access method “biscuit” does not exist<a class="headerlink" href="#error-access-method-biscuit-does-not-exist" title="Link to this heading"></a></h3>
+<p><strong>Cause</strong>: Extension not installed</p>
+<p><strong>Solution</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="n">EXTENSION</span><span class="w"> </span><span class="n">biscuit</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="error-data-type-x-is-not-supported-for-biscuit-index">
+<h3>ERROR: data type X is not supported for biscuit index<a class="headerlink" href="#error-data-type-x-is-not-supported-for-biscuit-index" title="Link to this heading"></a></h3>
+<p><strong>Cause</strong>: Attempting to index unsupported type</p>
+<p><strong>Solution</strong>: Cast to TEXT or use expression index</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">table1</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="k">column</span><span class="p">::</span><span class="nb">TEXT</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="error-could-not-open-relation-with-oid">
+<h3>ERROR: could not open relation with OID<a class="headerlink" href="#error-could-not-open-relation-with-oid" title="Link to this heading"></a></h3>
+<p><strong>Cause</strong>: Index cache corruption after crash</p>
+<p><strong>Solution</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">REINDEX</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="warning-biscuit-index-cache-miss">
+<h3>WARNING: Biscuit: Index cache miss<a class="headerlink" href="#warning-biscuit-index-cache-miss" title="Link to this heading"></a></h3>
+<p><strong>Cause</strong>: Normal - index loaded on first use</p>
+<p><strong>Solution</strong>: No action needed (informational only)</p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="next-steps">
+<h2>Next Steps<a class="headerlink" href="#next-steps" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>Learn how it works: <a class="reference internal" href="#architecture.md"><span class="xref myst">Architecture Guide</span></a></p></li>
+<li><p>Master patterns: <a class="reference internal" href="patterns.html"><span class="std std-doc">Pattern Syntax</span></a></p></li>
+<li><p>Optimize queries: <a class="reference internal" href="performance.html"><span class="std std-doc">Performance Tuning</span></a></p></li>
+<li><p>Get help: <a class="reference internal" href="#faq.md"><span class="xref myst">FAQ</span></a></p></li>
+</ul>
+<hr class="docutils" />
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="quickstart.html" class="btn btn-neutral float-left" title="Quick Start Tutorial" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="patterns.html" class="btn btn-neutral float-right" title="Pattern Syntax Guide" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

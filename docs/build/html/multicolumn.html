@@ -1,0 +1,971 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multi-Column Indexes &mdash; BISCUIT 2.0.0 Documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
+
+  
+    <link rel="shortcut icon" href="_static/favicon.ico"/>
+    <link rel="canonical" href="https://biscuit.readthedocs.io/multicolumn.html" />
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=51b770b3"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Performance Tuning Guide" href="performance.html" />
+    <link rel="prev" title="Pattern Syntax Guide" href="patterns.html" />
+     
+
+    <!-- Google Search Console -->
+    <meta name="google-site-verification" content="22G4D8fVRIvJJg67tK5fHXdhOjKv4yjXBF_E2jeATGk" />
+
+    <!-- SEO Meta Tags -->
+    <meta name="description" content="BISCUIT is a deterministic bitmap-based Index Access Method for PostgreSQL, enabling fast multi-column pattern matching, LIKE queries, and exact-match text search.">
+    <meta name="keywords" content="postgresql extension, biscuit, postgres index access method, bitmap indexing, deterministic text search, like optimization, multi-column indexing, pg_trgm alternative">
+    <meta name="author" content="Sivaprasad Murali">
+    <meta name="robots" content="index, follow">
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="BISCUIT – Deterministic Bitmap Indexing for PostgreSQL">
+    <meta property="og:description" content="Documentation, installation guide, and technical reference for BISCUIT, a PostgreSQL Index Access Method providing deterministic bitmap-based text pattern search.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://biscuit.readthedocs.io/">
+    <meta property="og:image" content="https://biscuit.readthedocs.io/en/latest/_static/logo.png">
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="BISCUIT – Deterministic Bitmap Indexing for PostgreSQL">
+    <meta name="twitter:description" content="Documentation and reference for BISCUIT, a PostgreSQL extension for deterministic bitmap-based indexing and multi-column pattern search.">
+    <meta name="twitter:image" content="https://biscuit.readthedocs.io/en/latest/_static/logo.png">
+
+    <!-- JSON-LD Structured Data for Software Application -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "BISCUIT",
+    "description": "A PostgreSQL Index Access Method providing deterministic bitmap-based indexing for LIKE/pattern matching with multi-column support.",
+    "url": "https://biscuit.readthedocs.io/",
+    "applicationCategory": "DatabaseExtension",
+    "operatingSystem": "Linux",
+    "softwareVersion": "2.0.0",
+    "author": {
+        "@type": "Person",
+        "name": "Sivaprasad Murali"
+    },
+    "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+    },
+    "programmingLanguage": "C",
+    "keywords": "postgresql, extension, indexing, bitmap index, text search, deterministic index, multi-column search",
+    "softwareHelp": "https://biscuit.readthedocs.io/",
+    "downloadUrl": "https://pgxn.org/dist/biscuit/",
+    "codeRepository": "https://github.com/crystallinecore/biscuit",
+    "license": "https://opensource.org/licenses/MIT",
+    "inLanguage": "en"
+    }
+    </script>
+
+    <!-- Breadcrumb Structured Data -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [{
+        "@type": "ListItem",
+        "position": 1,
+        "name": "Home",
+        "item": "https://biscuit.readthedocs.io/"
+    },{
+        "@type": "ListItem",
+        "position": 2,
+        "name": "Multi-Column Indexes",
+        "item": "https://biscuit.readthedocs.io/multicolumn.html"
+    }]
+    }
+    </script>
+
+    <!-- Organization Structured Data -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    "name": "BISCUIT",
+    "url": "https://biscuit.readthedocs.io/",
+    "logo": "https://biscuit.readthedocs.io/en/latest/_static/logo.png",
+    "sameAs": [
+        "https://github.com/crystallinecore/biscuit",
+        "https://pgxn.org/dist/biscuit/"
+    ]
+    }
+    </script>
+
+
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #2C3E50" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            BISCUIT
+              <img src="_static/logo.png" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#prerequisites">Prerequisites</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#check-postgresql-version">Check PostgreSQL Version</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#installation-methods">Installation Methods</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#method-1-from-source-recommended">Method 1: From Source (Recommended)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-1-install-build-dependencies">Step 1: Install Build Dependencies</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-2-clone-repository">Step 2: Clone Repository</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-3-build-and-install">Step 3: Build and Install</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-4-verify-installation">Step 4: Verify Installation</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#method-2-with-croaring-support-enhanced-performance">Method 2: With CRoaring Support (Enhanced Performance)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#install-croaring-library">Install CRoaring Library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#build-biscuit-with-roaring">Build Biscuit with Roaring</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#enable-extension-in-database">Enable Extension in Database</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#post-installation-configuration">Post-Installation Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#set-appropriate-memory-limits">Set Appropriate Memory Limits</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#enable-query-logging-optional">Enable Query Logging (Optional)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#verify-installation-with-test">Verify Installation with Test</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#troubleshooting">Troubleshooting</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#error-could-not-load-library">Error: “could not load library”</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#error-extension-does-not-exist">Error: “extension does not exist”</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#build-errors-with-roaring">Build Errors with Roaring</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#uninstallation">Uninstallation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#platform-specific-notes">Platform-Specific Notes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#windows">Windows</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#docker">Docker</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#getting-help">Getting Help</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick Start Tutorial</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-1-create-sample-data">Step 1: Create Sample Data</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-2-measure-baseline-performance">Step 2: Measure Baseline Performance</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-3-create-biscuit-index">Step 3: Create Biscuit Index</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-4-run-optimized-queries">Step 4: Run Optimized Queries</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-5-try-different-pattern-types">Step 5: Try Different Pattern Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#prefix-patterns-fastest">Prefix Patterns (Fastest)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#suffix-patterns">Suffix Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#substring-patterns">Substring Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#complex-patterns">Complex Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#underscore-wildcards">Underscore Wildcards</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-6-multi-column-indexes">Step 6: Multi-Column Indexes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-7-aggregate-queries-special-optimization">Step 7: Aggregate Queries (Special Optimization)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-8-monitor-index-statistics">Step 8: Monitor Index Statistics</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-9-test-crud-operations">Step 9: Test CRUD Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#insert">INSERT</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#update">UPDATE</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#delete">DELETE</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#performance-comparison">Performance Comparison</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#best-practices">Best Practices</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#do">✅ DO:</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#dont">❌ DON’T:</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#common-questions">Common Questions</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="patterns.html">Pattern Syntax Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#wildcard-characters">Wildcard Characters</a></li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-types">Pattern Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#exact-match-fastest">1. Exact Match (Fastest)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#prefix-match-very-fast">2. Prefix Match (Very Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#suffix-match-fast">3. Suffix Match (Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#substring-match-moderate-speed">4. Substring Match (Moderate Speed)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#infix-match-fast">5. Infix Match (Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#complex-multi-part-patterns">6. Complex Multi-Part Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#underscore-patterns-position-specific">7. Underscore Patterns (Position-Specific)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pure-wildcard-patterns-fastest-special-cases">Pure Wildcard Patterns (Fastest Special Cases)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#empty-pattern">Empty Pattern</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#single-percent">Single Percent</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#pure-underscores">Pure Underscores</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#mixed-pure-wildcards">Mixed Pure Wildcards</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-optimization-strategies">Pattern Optimization Strategies</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-1-maximize-concrete-characters">Strategy 1: Maximize Concrete Characters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-2-use-strong-anchors">Strategy 2: Use Strong Anchors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-3-minimize-partitions">Strategy 3: Minimize Partitions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-4-combine-with-other-indexes">Strategy 4: Combine with Other Indexes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-examples-by-use-case">Pattern Examples by Use Case</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#email-filtering">Email Filtering</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#sku-product-code-matching">SKU/Product Code Matching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#log-searching">Log Searching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#url-path-matching">URL/Path Matching</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#case-sensitivity">Case Sensitivity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-performance-hierarchy">Pattern Performance Hierarchy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Multi-Column Indexes</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#creating-multi-column-indexes">Creating Multi-Column Indexes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#basic-syntax">Basic Syntax</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#example-e-commerce-product-search">Example: E-Commerce Product Search</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#how-query-optimization-works">How Query Optimization Works</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#automatic-reordering-example">Automatic Reordering Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#query-planning-deep-dive">Query Planning Deep Dive</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#priority-calculation">Priority Calculation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#selectivity-scoring">Selectivity Scoring</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#viewing-query-plans">Viewing Query Plans</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#best-practices">Best Practices</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#order-columns-by-query-frequency">1. Order Columns by Query Frequency</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#mix-selective-and-general-columns">2. Mix Selective and General Columns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#consider-column-cardinality">3. Consider Column Cardinality</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#avoid-redundant-indexes">4. Avoid Redundant Indexes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#advanced-patterns">Advanced Patterns</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#pattern-1-user-search-with-email-domain">Pattern 1: User Search with Email Domain</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pattern-2-product-search-with-multiple-attributes">Pattern 2: Product Search with Multiple Attributes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pattern-3-log-analysis">Pattern 3: Log Analysis</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#type-conversion-support">Type Conversion Support</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#supported-types">Supported Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#type-conversion-details">Type Conversion Details</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#performance-characteristics">Performance Characteristics</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#query-complexity-vs-performance">Query Complexity vs. Performance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#early-termination-example">Early Termination Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#limit-optimization">LIMIT Optimization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#monitoring-and-diagnostics">Monitoring and Diagnostics</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#check-index-statistics">Check Index Statistics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#query-performance-analysis">Query Performance Analysis</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#common-pitfalls">Common Pitfalls</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#pitfall-1-too-many-columns">❌ Pitfall 1: Too Many Columns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pitfall-2-low-selectivity-patterns">❌ Pitfall 2: Low Selectivity Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pitfall-3-not-using-explain">❌ Pitfall 3: Not Using EXPLAIN</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#migration-from-single-column">Migration from Single-Column</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#examples-repository">Examples Repository</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="performance.html">Performance Tuning Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#quick-performance-checklist">Quick Performance Checklist</a></li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#understanding-biscuit-performance">Understanding Biscuit Performance</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#active-optimizations">Active Optimizations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#postgresql-configuration">PostgreSQL Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#memory-settings">Memory Settings</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#planner-settings">Planner Settings</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#index-design-optimization">Index Design Optimization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#choose-selective-columns">Choose Selective Columns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#multi-column-order-strategy">Multi-Column Order Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#avoid-over-indexing">Avoid Over-Indexing</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#query-optimization">Query Optimization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#pattern-design">Pattern Design</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="performance.html#maximize-concrete-characters">Maximize Concrete Characters</a></li>
+<li class="toctree-l4"><a class="reference internal" href="performance.html#use-strong-anchors">Use Strong Anchors</a></li>
+<li class="toctree-l4"><a class="reference internal" href="performance.html#minimize-pattern-complexity">Minimize Pattern Complexity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#combine-with-other-filters">Combine with Other Filters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#aggregate-query-optimization">Aggregate Query Optimization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#limit-query-optimization">LIMIT Query Optimization</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#maintenance-and-monitoring">Maintenance and Monitoring</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#regular-statistics-updates">Regular Statistics Updates</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#monitor-index-health">Monitor Index Health</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#cleanup-tombstones">Cleanup Tombstones</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#index-rebuild-strategy">Index Rebuild Strategy</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#hardware-considerations">Hardware Considerations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#memory-requirements">Memory Requirements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#ssd-vs-hdd">SSD vs. HDD</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#cpu-considerations">CPU Considerations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#benchmarking-your-setup">Benchmarking Your Setup</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#create-benchmark-suite">Create Benchmark Suite</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#baseline-performance-targets">Baseline Performance Targets</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#troubleshooting-performance-issues">Troubleshooting Performance Issues</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-1-index-not-being-used">Issue 1: Index Not Being Used</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-2-slow-query-despite-index">Issue 2: Slow Query Despite Index</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-3-high-memory-usage">Issue 3: High Memory Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-4-slow-index-builds">Issue 4: Slow Index Builds</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#advanced-tuning">Advanced Tuning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#custom-cost-parameters">Custom Cost Parameters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#parallel-query-configuration">Parallel Query Configuration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#performance-monitoring-dashboard">Performance Monitoring Dashboard</a></li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #2C3E50" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">BISCUIT</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Multi-Column Indexes</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/multicolumn.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="multi-column-indexes">
+<h1>Multi-Column Indexes<a class="headerlink" href="#multi-column-indexes" title="Link to this heading"></a></h1>
+<p>Advanced guide to using Biscuit with multiple columns, including automatic query optimization and best practices.</p>
+<hr class="docutils" />
+<section id="overview">
+<h2>Overview<a class="headerlink" href="#overview" title="Link to this heading"></a></h2>
+<p>Biscuit’s multi-column support allows you to create indexes spanning multiple text columns. The query planner automatically reorders predicates for optimal performance based on selectivity analysis.</p>
+<p><strong>Key Features</strong>:</p>
+<ul class="simple">
+<li><p>Automatic predicate reordering</p></li>
+<li><p>Per-column bitmap indices</p></li>
+<li><p>Intelligent query planning</p></li>
+<li><p>Support for mixed data types</p></li>
+<li><p>Early termination optimization</p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="creating-multi-column-indexes">
+<h2>Creating Multi-Column Indexes<a class="headerlink" href="#creating-multi-column-indexes" title="Link to this heading"></a></h2>
+<section id="basic-syntax">
+<h3>Basic Syntax<a class="headerlink" href="#basic-syntax" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">index_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">table_name</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">column1</span><span class="p">,</span><span class="w"> </span><span class="n">column2</span><span class="p">,</span><span class="w"> </span><span class="n">column3</span><span class="p">,</span><span class="w"> </span><span class="p">...);</span>
+</pre></div>
+</div>
+</section>
+<section id="example-e-commerce-product-search">
+<h3>Example: E-Commerce Product Search<a class="headerlink" href="#example-e-commerce-product-search" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Create multi-column index</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products_search</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">description</span><span class="p">,</span><span class="w"> </span><span class="n">category</span><span class="p">,</span><span class="w"> </span><span class="n">sku</span><span class="p">);</span>
+
+<span class="c1">-- All columns are now searchable with LIKE</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%laptop%&#39;</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">description</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%gaming%&#39;</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">category</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Elect%&#39;</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">sku</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;SKU-2024%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="how-query-optimization-works">
+<h2>How Query Optimization Works<a class="headerlink" href="#how-query-optimization-works" title="Link to this heading"></a></h2>
+<p>Biscuit analyzes each predicate and assigns a <strong>priority</strong> based on:</p>
+<ol class="arabic simple">
+<li><p><strong>Selectivity</strong>: How much data gets filtered</p></li>
+<li><p><strong>Pattern type</strong>: Exact &gt; Prefix &gt; Suffix &gt; Substring</p></li>
+<li><p><strong>Concrete characters</strong>: More = better selectivity</p></li>
+<li><p><strong>Anchor strength</strong>: Strong anchors filter more</p></li>
+</ol>
+<section id="automatic-reordering-example">
+<h3>Automatic Reordering Example<a class="headerlink" href="#automatic-reordering-example" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Your query (predicates in arbitrary order)</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">users</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">department</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%engineering%&#39;</span><span class="w">    </span><span class="c1">-- Low selectivity</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">username</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;admin%&#39;</span><span class="w">              </span><span class="c1">-- High selectivity</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%@company.com&#39;</span><span class="p">;</span><span class="w">         </span><span class="c1">-- Medium selectivity</span>
+
+<span class="c1">-- Biscuit automatically executes as:</span>
+<span class="c1">-- 1. username LIKE &#39;admin%&#39;           (Priority 20 - prefix, high select)</span>
+<span class="c1">-- 2. email LIKE &#39;%@company.com&#39;       (Priority 30 - suffix, medium)</span>
+<span class="c1">-- 3. department LIKE &#39;%engineering%&#39;  (Priority 50 - substring, low)</span>
+</pre></div>
+</div>
+<p><strong>Result</strong>: Query runs 5-10x faster by filtering aggressively first!</p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="query-planning-deep-dive">
+<h2>Query Planning Deep Dive<a class="headerlink" href="#query-planning-deep-dive" title="Link to this heading"></a></h2>
+<section id="priority-calculation">
+<h3>Priority Calculation<a class="headerlink" href="#priority-calculation" title="Link to this heading"></a></h3>
+<p>Biscuit assigns priorities in tiers:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Tier</p></th>
+<th class="head"><p>Priority</p></th>
+<th class="head"><p>Pattern Type</p></th>
+<th class="head"><p>Example</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>1</p></td>
+<td><p>0-10</p></td>
+<td><p>Exact match</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">'admin'</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>2</p></td>
+<td><p>10-20</p></td>
+<td><p>Underscore patterns</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">'test__%'</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>3</p></td>
+<td><p>20-30</p></td>
+<td><p>Strong prefix/suffix</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">'admin%'</span></code>, <code class="docutils literal notranslate"><span class="pre">'%&#64;company.com'</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>4</p></td>
+<td><p>30-40</p></td>
+<td><p>Weak anchors</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">'a%'</span></code>, <code class="docutils literal notranslate"><span class="pre">'%m'</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>5</p></td>
+<td><p>40-50</p></td>
+<td><p>Multi-partition</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">'%a%b%c%'</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>6</p></td>
+<td><p>50+</p></td>
+<td><p>Pure substring</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">'%test%'</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="selectivity-scoring">
+<h3>Selectivity Scoring<a class="headerlink" href="#selectivity-scoring" title="Link to this heading"></a></h3>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>Selectivity Formula:
+  base = 1.0 / (concrete_chars + 1)
+  - underscore_bonus = count(&#39;_&#39;) × 0.05
+  - partition_penalty = count(partitions) × 0.15
+  - anchor_bonus = anchor_strength / 200
+  + substring_penalty = 0.5 (if &#39;%...%&#39;)
+</pre></div>
+</div>
+<p><strong>Lower score = more selective = executes first</strong></p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="viewing-query-plans">
+<h2>Viewing Query Plans<a class="headerlink" href="#viewing-query-plans" title="Link to this heading"></a></h2>
+<p>Use the debug logging to see execution order:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Enable query logging</span>
+<span class="k">SET</span><span class="w"> </span><span class="n">client_min_messages</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">INFO</span><span class="p">;</span>
+
+<span class="c1">-- Run query</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%laptop%&#39;</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">sku</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;SKU-2024%&#39;</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">category</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Elect%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Output</strong>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">INFO</span><span class="p">:</span>  <span class="o">===</span> <span class="n">BISCUIT</span> <span class="n">QUERY</span> <span class="n">EXECUTION</span> <span class="n">PLAN</span> <span class="o">===</span>
+<span class="n">INFO</span><span class="p">:</span>  <span class="n">Total</span> <span class="n">predicates</span><span class="p">:</span> <span class="mi">3</span>
+<span class="n">INFO</span><span class="p">:</span>  <span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="n">Col</span><span class="o">=</span><span class="mi">1</span> <span class="n">Pattern</span><span class="o">=</span><span class="s1">&#39;SKU-2024%&#39;</span> <span class="n">Type</span><span class="o">=</span><span class="n">PREFIX</span> <span class="n">Priority</span><span class="o">=</span><span class="mi">20</span> 
+       <span class="n">Selectivity</span><span class="o">=</span><span class="mf">0.048</span>
+<span class="n">INFO</span><span class="p">:</span>  <span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="n">Col</span><span class="o">=</span><span class="mi">2</span> <span class="n">Pattern</span><span class="o">=</span><span class="s1">&#39;Elect%&#39;</span> <span class="n">Type</span><span class="o">=</span><span class="n">PREFIX</span> <span class="n">Priority</span><span class="o">=</span><span class="mi">21</span> 
+       <span class="n">Selectivity</span><span class="o">=</span><span class="mf">0.091</span>
+<span class="n">INFO</span><span class="p">:</span>  <span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="n">Col</span><span class="o">=</span><span class="mi">0</span> <span class="n">Pattern</span><span class="o">=</span><span class="s1">&#39;</span><span class="si">%la</span><span class="s1">ptop%&#39;</span> <span class="n">Type</span><span class="o">=</span><span class="n">SUBSTRING</span> <span class="n">Priority</span><span class="o">=</span><span class="mi">50</span> 
+       <span class="n">Selectivity</span><span class="o">=</span><span class="mf">0.450</span>
+<span class="n">INFO</span><span class="p">:</span>  <span class="o">====================================</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="best-practices">
+<h2>Best Practices<a class="headerlink" href="#best-practices" title="Link to this heading"></a></h2>
+<section id="order-columns-by-query-frequency">
+<h3>1. Order Columns by Query Frequency<a class="headerlink" href="#order-columns-by-query-frequency" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- ✅ GOOD: Most-queried columns first</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">category</span><span class="p">,</span><span class="w"> </span><span class="n">sku</span><span class="p">);</span>
+
+<span class="c1">-- ❌ LESS OPTIMAL: Rarely-queried columns first  </span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">internal_notes</span><span class="p">,</span><span class="w"> </span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">category</span><span class="p">);</span>
+</pre></div>
+</div>
+<p><strong>Why?</strong> Column order doesn’t affect query performance (Biscuit reorders automatically), but it’s clearer for maintenance.</p>
+</section>
+<hr class="docutils" />
+<section id="mix-selective-and-general-columns">
+<h3>2. Mix Selective and General Columns<a class="headerlink" href="#mix-selective-and-general-columns" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- ✅ GOOD: Mix of selective and broad columns</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_users</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">users</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">username</span><span class="p">,</span><span class="w"> </span><span class="n">email</span><span class="p">,</span><span class="w"> </span><span class="n">department</span><span class="p">);</span>
+<span class="c1">-- username: high selectivity (unique)</span>
+<span class="c1">-- email: medium selectivity (domains)</span>
+<span class="c1">-- department: low selectivity (few values)</span>
+
+<span class="c1">-- This allows queries like:</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">department</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%sales%&#39;</span><span class="w">     </span><span class="c1">-- Broad filter</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">username</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;john%&#39;</span><span class="p">;</span><span class="w">        </span><span class="c1">-- Narrows down quickly</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="consider-column-cardinality">
+<h3>3. Consider Column Cardinality<a class="headerlink" href="#consider-column-cardinality" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Check column cardinality</span>
+<span class="k">SELECT</span><span class="w"> </span>
+<span class="w">    </span><span class="k">COUNT</span><span class="p">(</span><span class="k">DISTINCT</span><span class="w"> </span><span class="n">name</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">name_unique</span><span class="p">,</span>
+<span class="w">    </span><span class="k">COUNT</span><span class="p">(</span><span class="k">DISTINCT</span><span class="w"> </span><span class="n">category</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">category_unique</span><span class="p">,</span>
+<span class="w">    </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">total</span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="p">;</span>
+
+<span class="c1">-- High cardinality (many unique values) = better for Biscuit</span>
+<span class="c1">-- Low cardinality (few values) = consider other strategies</span>
+</pre></div>
+</div>
+<p><strong>Rule of Thumb</strong>:</p>
+<ul class="simple">
+<li><p>High cardinality (&gt;1000 unique): ✅ Excellent for Biscuit</p></li>
+<li><p>Medium cardinality (100-1000): ✅ Good for Biscuit</p></li>
+<li><p>Low cardinality (&lt;100): ⚠️ Consider B-tree or partial index</p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="avoid-redundant-indexes">
+<h3>4. Avoid Redundant Indexes<a class="headerlink" href="#avoid-redundant-indexes" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- ❌ DON&#39;T: Create overlapping indexes</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx1</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx2</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">category</span><span class="p">);</span>
+<span class="c1">-- idx1 is redundant!</span>
+
+<span class="c1">-- ✅ DO: Use multi-column for flexibility</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">category</span><span class="p">,</span><span class="w"> </span><span class="n">sku</span><span class="p">);</span>
+<span class="c1">-- Handles queries on any combination of these columns</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="advanced-patterns">
+<h2>Advanced Patterns<a class="headerlink" href="#advanced-patterns" title="Link to this heading"></a></h2>
+<section id="pattern-1-user-search-with-email-domain">
+<h3>Pattern 1: User Search with Email Domain<a class="headerlink" href="#pattern-1-user-search-with-email-domain" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_users_search</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">users</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">username</span><span class="p">,</span><span class="w"> </span><span class="n">email</span><span class="p">,</span><span class="w"> </span><span class="n">full_name</span><span class="p">);</span>
+
+<span class="c1">-- Find all admins at company.com</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">users</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">username</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;admin%&#39;</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%@company.com&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Execution:</span>
+<span class="c1">-- 1. username filter (prefix, high selectivity)</span>
+<span class="c1">-- 2. email filter (suffix, medium selectivity)</span>
+<span class="c1">-- Result: ~2-5ms</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="pattern-2-product-search-with-multiple-attributes">
+<h3>Pattern 2: Product Search with Multiple Attributes<a class="headerlink" href="#pattern-2-product-search-with-multiple-attributes" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products_full</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">brand</span><span class="p">,</span><span class="w"> </span><span class="n">category</span><span class="p">,</span><span class="w"> </span><span class="n">sku</span><span class="p">,</span><span class="w"> </span><span class="n">tags</span><span class="p">);</span>
+
+<span class="c1">-- Complex product search</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%laptop%&#39;</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">brand</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Dell%&#39;</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">category</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Computers%&#39;</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">tags</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%business%&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Biscuit reorders to execute brand first (prefix),</span>
+<span class="c1">-- then category, then tags, then name (substring last)</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="pattern-3-log-analysis">
+<h3>Pattern 3: Log Analysis<a class="headerlink" href="#pattern-3-log-analysis" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_logs</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">application_logs</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="k">level</span><span class="p">,</span><span class="w"> </span><span class="n">service</span><span class="p">,</span><span class="w"> </span><span class="n">message</span><span class="p">,</span><span class="w"> </span><span class="n">user_id</span><span class="p">);</span>
+
+<span class="c1">-- Find errors from auth service with specific message</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">application_logs</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="k">level</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;ERROR&#39;</span><span class="w">              </span><span class="c1">-- Exact (fastest)</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">service</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;auth%&#39;</span><span class="w">            </span><span class="c1">-- Prefix (fast)</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">message</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%timeout%&#39;</span><span class="w">        </span><span class="c1">-- Substring (slower)</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">user_id</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;user_%&#39;</span><span class="p">;</span><span class="w">          </span><span class="c1">-- Underscore (fast)</span>
+
+<span class="c1">-- Execution order: level → service → user_id → message</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="type-conversion-support">
+<h2>Type Conversion Support<a class="headerlink" href="#type-conversion-support" title="Link to this heading"></a></h2>
+<p>Biscuit supports multiple data types through automatic text conversion:</p>
+<section id="supported-types">
+<h3>Supported Types<a class="headerlink" href="#supported-types" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_orders</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">customer_name</span><span class="p">,</span><span class="w">      </span><span class="c1">-- TEXT</span>
+<span class="w">    </span><span class="n">order_id</span><span class="p">,</span><span class="w">           </span><span class="c1">-- INTEGER → sortable text</span>
+<span class="w">    </span><span class="n">created_at</span><span class="p">,</span><span class="w">         </span><span class="c1">-- TIMESTAMP → sortable text</span>
+<span class="w">    </span><span class="n">total_amount</span><span class="p">,</span><span class="w">       </span><span class="c1">-- NUMERIC → sortable text</span>
+<span class="w">    </span><span class="n">status</span><span class="w">              </span><span class="c1">-- VARCHAR</span>
+<span class="p">);</span>
+
+<span class="c1">-- Query with type conversion</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">created_at</span><span class="p">::</span><span class="nb">TEXT</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;2024-01%&#39;</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">total_amount</span><span class="p">::</span><span class="nb">TEXT</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;1%&#39;</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">customer_name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%Smith%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<section id="type-conversion-details">
+<h3>Type Conversion Details<a class="headerlink" href="#type-conversion-details" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Type</p></th>
+<th class="head"><p>Conversion</p></th>
+<th class="head"><p>Example</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>INTEGER</p></td>
+<td><p>Zero-padded with sign</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">+0000000042</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>FLOAT</p></td>
+<td><p>Scientific notation</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">1.500000e+02</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>DATE</p></td>
+<td><p>Zero-padded days</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">+0018628</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>TIMESTAMP</p></td>
+<td><p>Microsecond precision</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">00001704067200000000</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>BOOLEAN</p></td>
+<td><p>‘t’ or ‘f’</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">t</span></code></p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Note</strong>: Conversions are sortable and comparable!</p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="performance-characteristics">
+<h2>Performance Characteristics<a class="headerlink" href="#performance-characteristics" title="Link to this heading"></a></h2>
+<section id="query-complexity-vs-performance">
+<h3>Query Complexity vs. Performance<a class="headerlink" href="#query-complexity-vs-performance" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Predicate Count</p></th>
+<th class="head"><p>Typical Time</p></th>
+<th class="head"><p>Optimization</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>1 column</p></td>
+<td><p>1-5ms</p></td>
+<td><p>Single bitmap lookup</p></td>
+</tr>
+<tr class="row-odd"><td><p>2 columns</p></td>
+<td><p>2-8ms</p></td>
+<td><p>Sequential intersection</p></td>
+</tr>
+<tr class="row-even"><td><p>3-4 columns</p></td>
+<td><p>5-15ms</p></td>
+<td><p>Early termination</p></td>
+</tr>
+<tr class="row-odd"><td><p>5+ columns</p></td>
+<td><p>10-30ms</p></td>
+<td><p>LIMIT-aware collection</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="early-termination-example">
+<h3>Early Termination Example<a class="headerlink" href="#early-termination-example" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Query with 5 predicates</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%laptop%&#39;</span><span class="w">        </span><span class="c1">-- Priority 50</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">brand</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Dell%&#39;</span><span class="w">          </span><span class="c1">-- Priority 20</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">price</span><span class="p">::</span><span class="nb">TEXT</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;1%&#39;</span><span class="w">       </span><span class="c1">-- Priority 25</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">category</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Comp%&#39;</span><span class="w">       </span><span class="c1">-- Priority 21  </span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">rating</span><span class="p">::</span><span class="nb">TEXT</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;4%&#39;</span><span class="p">;</span><span class="w">     </span><span class="c1">-- Priority 22</span>
+
+<span class="c1">-- Execution:</span>
+<span class="c1">-- [1] brand filter → 1000 results</span>
+<span class="c1">-- [2] category filter → 500 results</span>
+<span class="c1">-- [3] rating filter → 200 results</span>
+<span class="c1">-- [4] price filter → 50 results</span>
+<span class="c1">-- [5] name filter (stopped early if &lt;10 results remain)</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="limit-optimization">
+<h2>LIMIT Optimization<a class="headerlink" href="#limit-optimization" title="Link to this heading"></a></h2>
+<p>Biscuit optimizes LIMIT queries with early termination:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Only need 10 results</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%laptop%&#39;</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">brand</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%&#39;</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">category</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%&#39;</span>
+<span class="k">LIMIT</span><span class="w"> </span><span class="mi">10</span><span class="p">;</span>
+
+<span class="c1">-- Biscuit stops collecting after ~20 TIDs</span>
+<span class="c1">-- (2x buffer for safety)</span>
+</pre></div>
+</div>
+<p><strong>Benefit</strong>: 5-10x faster for small LIMIT values!</p>
+</section>
+<hr class="docutils" />
+<section id="monitoring-and-diagnostics">
+<h2>Monitoring and Diagnostics<a class="headerlink" href="#monitoring-and-diagnostics" title="Link to this heading"></a></h2>
+<section id="check-index-statistics">
+<h3>Check Index Statistics<a class="headerlink" href="#check-index-statistics" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_index_stats</span><span class="p">(</span><span class="s1">&#39;idx_products_search&#39;</span><span class="p">::</span><span class="n">regclass</span><span class="p">);</span>
+</pre></div>
+</div>
+<p>Output shows per-column statistics:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">Biscuit</span> <span class="n">Index</span> <span class="n">Statistics</span>
+<span class="o">========================</span>
+<span class="n">Index</span><span class="p">:</span> <span class="n">idx_products_search</span>
+<span class="n">Active</span> <span class="n">records</span><span class="p">:</span> <span class="mi">50000</span>
+<span class="n">Columns</span><span class="p">:</span> <span class="mi">4</span>
+
+<span class="n">Column</span> <span class="mi">0</span> <span class="p">(</span><span class="n">name</span><span class="p">):</span>
+  <span class="n">Max</span> <span class="n">length</span><span class="p">:</span> <span class="mi">128</span>
+  <span class="n">Character</span> <span class="n">bitmaps</span><span class="p">:</span> <span class="mi">256</span>
+  <span class="n">Length</span> <span class="n">bitmaps</span><span class="p">:</span> <span class="p">[</span><span class="mf">0..128</span><span class="p">]</span>
+  
+<span class="n">Column</span> <span class="mi">1</span> <span class="p">(</span><span class="n">category</span><span class="p">):</span>  
+  <span class="n">Max</span> <span class="n">length</span><span class="p">:</span> <span class="mi">64</span>
+  <span class="n">Character</span> <span class="n">bitmaps</span><span class="p">:</span> <span class="mi">256</span>
+  <span class="n">Length</span> <span class="n">bitmaps</span><span class="p">:</span> <span class="p">[</span><span class="mf">0..64</span><span class="p">]</span>
+
+<span class="p">[</span><span class="o">...</span> <span class="n">continues</span> <span class="k">for</span> <span class="n">each</span> <span class="n">column</span> <span class="o">...</span><span class="p">]</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="query-performance-analysis">
+<h3>Query Performance Analysis<a class="headerlink" href="#query-performance-analysis" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">EXPLAIN</span><span class="w"> </span><span class="p">(</span><span class="k">ANALYZE</span><span class="p">,</span><span class="w"> </span><span class="n">BUFFERS</span><span class="p">)</span><span class="w"> </span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%laptop%&#39;</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">category</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Elect%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p>Look for:</p>
+<ul class="simple">
+<li><p><strong>Index Scan using Biscuit</strong>: ✅ Good</p></li>
+<li><p><strong>Seq Scan</strong>: ❌ Index not being used</p></li>
+<li><p><strong>Planning Time</strong>: Should be &lt;1ms</p></li>
+<li><p><strong>Execution Time</strong>: Should be &lt;20ms for typical queries</p></li>
+</ul>
+</section>
+</section>
+<hr class="docutils" />
+<section id="common-pitfalls">
+<h2>Common Pitfalls<a class="headerlink" href="#common-pitfalls" title="Link to this heading"></a></h2>
+<section id="pitfall-1-too-many-columns">
+<h3>❌ Pitfall 1: Too Many Columns<a class="headerlink" href="#pitfall-1-too-many-columns" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- DON&#39;T: Index everything</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_huge</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">col1</span><span class="p">,</span><span class="w"> </span><span class="n">col2</span><span class="p">,</span><span class="w"> </span><span class="n">col3</span><span class="p">,</span><span class="w"> </span><span class="n">col4</span><span class="p">,</span><span class="w"> </span><span class="n">col5</span><span class="p">,</span><span class="w"> </span><span class="n">col6</span><span class="p">,</span><span class="w"> </span><span class="n">col7</span><span class="p">,</span><span class="w"> </span><span class="n">col8</span><span class="p">);</span>
+</pre></div>
+</div>
+<p><strong>Problem</strong>: Larger index, slower builds, more memory</p>
+<p><strong>Solution</strong>: Index only frequently-queried columns (3-5 max recommended)</p>
+</section>
+<hr class="docutils" />
+<section id="pitfall-2-low-selectivity-patterns">
+<h3>❌ Pitfall 2: Low Selectivity Patterns<a class="headerlink" href="#pitfall-2-low-selectivity-patterns" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- All predicates are low-selectivity substrings</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">col1</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%a%&#39;</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">col2</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%e%&#39;</span><span class="w">  </span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">col3</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%i%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Problem</strong>: Even with reordering, all filters are weak</p>
+<p><strong>Solution</strong>: Combine with equality filters or use better patterns</p>
+</section>
+<hr class="docutils" />
+<section id="pitfall-3-not-using-explain">
+<h3>❌ Pitfall 3: Not Using EXPLAIN<a class="headerlink" href="#pitfall-3-not-using-explain" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Assuming the index is being used</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%laptop%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Problem</strong>: Might be doing sequential scan!</p>
+<p><strong>Solution</strong>: Always verify with <code class="docutils literal notranslate"><span class="pre">EXPLAIN</span> <span class="pre">ANALYZE</span></code></p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="migration-from-single-column">
+<h2>Migration from Single-Column<a class="headerlink" href="#migration-from-single-column" title="Link to this heading"></a></h2>
+<p>Migrating from single-column to multi-column is straightforward:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Old: Multiple single-column indexes</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_sku</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">sku</span><span class="p">);</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_category</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">category</span><span class="p">);</span>
+
+<span class="c1">-- New: Single multi-column index</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products_multi</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">sku</span><span class="p">,</span><span class="w"> </span><span class="n">category</span><span class="p">);</span>
+
+<span class="c1">-- Drop old indexes</span>
+<span class="k">DROP</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="p">;</span>
+<span class="k">DROP</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_sku</span><span class="p">;</span>
+<span class="k">DROP</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_category</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Benefits</strong>:</p>
+<ul class="simple">
+<li><p>Single index to maintain</p></li>
+<li><p>Automatic query optimization</p></li>
+<li><p>Support for multi-column queries</p></li>
+<li><p>Reduced disk space</p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="next-steps">
+<h2>Next Steps<a class="headerlink" href="#next-steps" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>Learn <a class="reference internal" href="performance.html"><span class="std std-doc">Performance Tuning</span></a> techniques</p></li>
+<li><p>Understand the <a class="reference internal" href="#architecture.md"><span class="xref myst">Architecture</span></a></p></li>
+<li><p>Review <a class="reference internal" href="patterns.html"><span class="std std-doc">Pattern Syntax</span></a></p></li>
+<li><p>Check the <a class="reference internal" href="#faq.md"><span class="xref myst">FAQ</span></a></p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="examples-repository">
+<h2>Examples Repository<a class="headerlink" href="#examples-repository" title="Link to this heading"></a></h2>
+<p>More examples at: <code class="docutils literal notranslate"><span class="pre">/examples/multicolumn/</span></code></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">user_search.sql</span></code> - User management queries</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">product_catalog.sql</span></code> - E-commerce search</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">log_analysis.sql</span></code> - Application log filtering</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">document_search.sql</span></code> - Document management</p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="patterns.html" class="btn btn-neutral float-left" title="Pattern Syntax Guide" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="performance.html" class="btn btn-neutral float-right" title="Performance Tuning Guide" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

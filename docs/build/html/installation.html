@@ -1,0 +1,718 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Installation Guide &mdash; BISCUIT 2.0.0 Documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
+
+  
+    <link rel="shortcut icon" href="_static/favicon.ico"/>
+    <link rel="canonical" href="https://biscuit.readthedocs.io/installation.html" />
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=51b770b3"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Quick Start Tutorial" href="quickstart.html" />
+    <link rel="prev" title="Biscuit Documentation" href="index.html" />
+     
+
+    <!-- Google Search Console -->
+    <meta name="google-site-verification" content="22G4D8fVRIvJJg67tK5fHXdhOjKv4yjXBF_E2jeATGk" />
+
+    <!-- SEO Meta Tags -->
+    <meta name="description" content="BISCUIT is a deterministic bitmap-based Index Access Method for PostgreSQL, enabling fast multi-column pattern matching, LIKE queries, and exact-match text search.">
+    <meta name="keywords" content="postgresql extension, biscuit, postgres index access method, bitmap indexing, deterministic text search, like optimization, multi-column indexing, pg_trgm alternative">
+    <meta name="author" content="Sivaprasad Murali">
+    <meta name="robots" content="index, follow">
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="BISCUIT – Deterministic Bitmap Indexing for PostgreSQL">
+    <meta property="og:description" content="Documentation, installation guide, and technical reference for BISCUIT, a PostgreSQL Index Access Method providing deterministic bitmap-based text pattern search.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://biscuit.readthedocs.io/">
+    <meta property="og:image" content="https://biscuit.readthedocs.io/en/latest/_static/logo.png">
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="BISCUIT – Deterministic Bitmap Indexing for PostgreSQL">
+    <meta name="twitter:description" content="Documentation and reference for BISCUIT, a PostgreSQL extension for deterministic bitmap-based indexing and multi-column pattern search.">
+    <meta name="twitter:image" content="https://biscuit.readthedocs.io/en/latest/_static/logo.png">
+
+    <!-- JSON-LD Structured Data for Software Application -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "BISCUIT",
+    "description": "A PostgreSQL Index Access Method providing deterministic bitmap-based indexing for LIKE/pattern matching with multi-column support.",
+    "url": "https://biscuit.readthedocs.io/",
+    "applicationCategory": "DatabaseExtension",
+    "operatingSystem": "Linux",
+    "softwareVersion": "2.0.0",
+    "author": {
+        "@type": "Person",
+        "name": "Sivaprasad Murali"
+    },
+    "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+    },
+    "programmingLanguage": "C",
+    "keywords": "postgresql, extension, indexing, bitmap index, text search, deterministic index, multi-column search",
+    "softwareHelp": "https://biscuit.readthedocs.io/",
+    "downloadUrl": "https://pgxn.org/dist/biscuit/",
+    "codeRepository": "https://github.com/crystallinecore/biscuit",
+    "license": "https://opensource.org/licenses/MIT",
+    "inLanguage": "en"
+    }
+    </script>
+
+    <!-- Breadcrumb Structured Data -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [{
+        "@type": "ListItem",
+        "position": 1,
+        "name": "Home",
+        "item": "https://biscuit.readthedocs.io/"
+    },{
+        "@type": "ListItem",
+        "position": 2,
+        "name": "Installation Guide",
+        "item": "https://biscuit.readthedocs.io/installation.html"
+    }]
+    }
+    </script>
+
+    <!-- Organization Structured Data -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    "name": "BISCUIT",
+    "url": "https://biscuit.readthedocs.io/",
+    "logo": "https://biscuit.readthedocs.io/en/latest/_static/logo.png",
+    "sameAs": [
+        "https://github.com/crystallinecore/biscuit",
+        "https://pgxn.org/dist/biscuit/"
+    ]
+    }
+    </script>
+
+
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #2C3E50" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            BISCUIT
+              <img src="_static/logo.png" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Installation Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#prerequisites">Prerequisites</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#check-postgresql-version">Check PostgreSQL Version</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#installation-methods">Installation Methods</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#method-1-from-source-recommended">Method 1: From Source (Recommended)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#step-1-install-build-dependencies">Step 1: Install Build Dependencies</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#step-2-clone-repository">Step 2: Clone Repository</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#step-3-build-and-install">Step 3: Build and Install</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#step-4-verify-installation">Step 4: Verify Installation</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="#method-2-with-croaring-support-enhanced-performance">Method 2: With CRoaring Support (Enhanced Performance)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#install-croaring-library">Install CRoaring Library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#build-biscuit-with-roaring">Build Biscuit with Roaring</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#enable-extension-in-database">Enable Extension in Database</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#post-installation-configuration">Post-Installation Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#set-appropriate-memory-limits">Set Appropriate Memory Limits</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#enable-query-logging-optional">Enable Query Logging (Optional)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#verify-installation-with-test">Verify Installation with Test</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#troubleshooting">Troubleshooting</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#error-could-not-load-library">Error: “could not load library”</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#error-extension-does-not-exist">Error: “extension does not exist”</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#build-errors-with-roaring">Build Errors with Roaring</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#uninstallation">Uninstallation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#platform-specific-notes">Platform-Specific Notes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#windows">Windows</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#docker">Docker</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#getting-help">Getting Help</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick Start Tutorial</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-1-create-sample-data">Step 1: Create Sample Data</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-2-measure-baseline-performance">Step 2: Measure Baseline Performance</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-3-create-biscuit-index">Step 3: Create Biscuit Index</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-4-run-optimized-queries">Step 4: Run Optimized Queries</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-5-try-different-pattern-types">Step 5: Try Different Pattern Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#prefix-patterns-fastest">Prefix Patterns (Fastest)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#suffix-patterns">Suffix Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#substring-patterns">Substring Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#complex-patterns">Complex Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#underscore-wildcards">Underscore Wildcards</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-6-multi-column-indexes">Step 6: Multi-Column Indexes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-7-aggregate-queries-special-optimization">Step 7: Aggregate Queries (Special Optimization)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-8-monitor-index-statistics">Step 8: Monitor Index Statistics</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-9-test-crud-operations">Step 9: Test CRUD Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#insert">INSERT</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#update">UPDATE</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#delete">DELETE</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#performance-comparison">Performance Comparison</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#best-practices">Best Practices</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#do">✅ DO:</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#dont">❌ DON’T:</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#common-questions">Common Questions</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="patterns.html">Pattern Syntax Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#wildcard-characters">Wildcard Characters</a></li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-types">Pattern Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#exact-match-fastest">1. Exact Match (Fastest)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#prefix-match-very-fast">2. Prefix Match (Very Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#suffix-match-fast">3. Suffix Match (Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#substring-match-moderate-speed">4. Substring Match (Moderate Speed)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#infix-match-fast">5. Infix Match (Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#complex-multi-part-patterns">6. Complex Multi-Part Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#underscore-patterns-position-specific">7. Underscore Patterns (Position-Specific)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pure-wildcard-patterns-fastest-special-cases">Pure Wildcard Patterns (Fastest Special Cases)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#empty-pattern">Empty Pattern</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#single-percent">Single Percent</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#pure-underscores">Pure Underscores</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#mixed-pure-wildcards">Mixed Pure Wildcards</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-optimization-strategies">Pattern Optimization Strategies</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-1-maximize-concrete-characters">Strategy 1: Maximize Concrete Characters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-2-use-strong-anchors">Strategy 2: Use Strong Anchors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-3-minimize-partitions">Strategy 3: Minimize Partitions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-4-combine-with-other-indexes">Strategy 4: Combine with Other Indexes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-examples-by-use-case">Pattern Examples by Use Case</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#email-filtering">Email Filtering</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#sku-product-code-matching">SKU/Product Code Matching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#log-searching">Log Searching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#url-path-matching">URL/Path Matching</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#case-sensitivity">Case Sensitivity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-performance-hierarchy">Pattern Performance Hierarchy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="multicolumn.html">Multi-Column Indexes</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#overview">Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#creating-multi-column-indexes">Creating Multi-Column Indexes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#basic-syntax">Basic Syntax</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#example-e-commerce-product-search">Example: E-Commerce Product Search</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#how-query-optimization-works">How Query Optimization Works</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#automatic-reordering-example">Automatic Reordering Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#query-planning-deep-dive">Query Planning Deep Dive</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#priority-calculation">Priority Calculation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#selectivity-scoring">Selectivity Scoring</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#viewing-query-plans">Viewing Query Plans</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#best-practices">Best Practices</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#order-columns-by-query-frequency">1. Order Columns by Query Frequency</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#mix-selective-and-general-columns">2. Mix Selective and General Columns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#consider-column-cardinality">3. Consider Column Cardinality</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#avoid-redundant-indexes">4. Avoid Redundant Indexes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#advanced-patterns">Advanced Patterns</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-1-user-search-with-email-domain">Pattern 1: User Search with Email Domain</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-2-product-search-with-multiple-attributes">Pattern 2: Product Search with Multiple Attributes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-3-log-analysis">Pattern 3: Log Analysis</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#type-conversion-support">Type Conversion Support</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#supported-types">Supported Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#type-conversion-details">Type Conversion Details</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#performance-characteristics">Performance Characteristics</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#query-complexity-vs-performance">Query Complexity vs. Performance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#early-termination-example">Early Termination Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#limit-optimization">LIMIT Optimization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#monitoring-and-diagnostics">Monitoring and Diagnostics</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#check-index-statistics">Check Index Statistics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#query-performance-analysis">Query Performance Analysis</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#common-pitfalls">Common Pitfalls</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pitfall-1-too-many-columns">❌ Pitfall 1: Too Many Columns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pitfall-2-low-selectivity-patterns">❌ Pitfall 2: Low Selectivity Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pitfall-3-not-using-explain">❌ Pitfall 3: Not Using EXPLAIN</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#migration-from-single-column">Migration from Single-Column</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#examples-repository">Examples Repository</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="performance.html">Performance Tuning Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#quick-performance-checklist">Quick Performance Checklist</a></li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#understanding-biscuit-performance">Understanding Biscuit Performance</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#active-optimizations">Active Optimizations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#postgresql-configuration">PostgreSQL Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#memory-settings">Memory Settings</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#planner-settings">Planner Settings</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#index-design-optimization">Index Design Optimization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#choose-selective-columns">Choose Selective Columns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#multi-column-order-strategy">Multi-Column Order Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#avoid-over-indexing">Avoid Over-Indexing</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#query-optimization">Query Optimization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#pattern-design">Pattern Design</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="performance.html#maximize-concrete-characters">Maximize Concrete Characters</a></li>
+<li class="toctree-l4"><a class="reference internal" href="performance.html#use-strong-anchors">Use Strong Anchors</a></li>
+<li class="toctree-l4"><a class="reference internal" href="performance.html#minimize-pattern-complexity">Minimize Pattern Complexity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#combine-with-other-filters">Combine with Other Filters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#aggregate-query-optimization">Aggregate Query Optimization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#limit-query-optimization">LIMIT Query Optimization</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#maintenance-and-monitoring">Maintenance and Monitoring</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#regular-statistics-updates">Regular Statistics Updates</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#monitor-index-health">Monitor Index Health</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#cleanup-tombstones">Cleanup Tombstones</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#index-rebuild-strategy">Index Rebuild Strategy</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#hardware-considerations">Hardware Considerations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#memory-requirements">Memory Requirements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#ssd-vs-hdd">SSD vs. HDD</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#cpu-considerations">CPU Considerations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#benchmarking-your-setup">Benchmarking Your Setup</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#create-benchmark-suite">Create Benchmark Suite</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#baseline-performance-targets">Baseline Performance Targets</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#troubleshooting-performance-issues">Troubleshooting Performance Issues</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-1-index-not-being-used">Issue 1: Index Not Being Used</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-2-slow-query-despite-index">Issue 2: Slow Query Despite Index</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-3-high-memory-usage">Issue 3: High Memory Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-4-slow-index-builds">Issue 4: Slow Index Builds</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#advanced-tuning">Advanced Tuning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#custom-cost-parameters">Custom Cost Parameters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#parallel-query-configuration">Parallel Query Configuration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#performance-monitoring-dashboard">Performance Monitoring Dashboard</a></li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #2C3E50" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">BISCUIT</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Installation Guide</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/installation.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="installation-guide">
+<h1>Installation Guide<a class="headerlink" href="#installation-guide" title="Link to this heading"></a></h1>
+<p>This guide walks you through installing the Biscuit index extension for PostgreSQL.</p>
+<hr class="docutils" />
+<section id="prerequisites">
+<h2>Prerequisites<a class="headerlink" href="#prerequisites" title="Link to this heading"></a></h2>
+<p>Before installing Biscuit, ensure you have:</p>
+<ul class="simple">
+<li><p>PostgreSQL 16 or higher installed</p></li>
+<li><p>PostgreSQL development headers (<code class="docutils literal notranslate"><span class="pre">postgresql-server-dev</span></code> package)</p></li>
+<li><p>C compiler (gcc or clang)</p></li>
+<li><p>Make build tool</p></li>
+<li><p>Git (for source installation)</p></li>
+</ul>
+<section id="check-postgresql-version">
+<h3>Check PostgreSQL Version<a class="headerlink" href="#check-postgresql-version" title="Link to this heading"></a></h3>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>psql<span class="w"> </span>--version
+<span class="c1"># Should show: psql (PostgreSQL) 16.x or higher</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="installation-methods">
+<h2>Installation Methods<a class="headerlink" href="#installation-methods" title="Link to this heading"></a></h2>
+<section id="method-1-from-source-recommended">
+<h3>Method 1: From Source (Recommended)<a class="headerlink" href="#method-1-from-source-recommended" title="Link to this heading"></a></h3>
+<section id="step-1-install-build-dependencies">
+<h4>Step 1: Install Build Dependencies<a class="headerlink" href="#step-1-install-build-dependencies" title="Link to this heading"></a></h4>
+<p><strong>Ubuntu/Debian:</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sudo<span class="w"> </span>apt-get<span class="w"> </span>update
+sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>postgresql-server-dev-14<span class="w"> </span>build-essential<span class="w"> </span>git
+</pre></div>
+</div>
+<p><strong>RHEL/CentOS/Fedora:</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sudo<span class="w"> </span>yum<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>postgresql-devel<span class="w"> </span>gcc<span class="w"> </span>make<span class="w"> </span>git
+</pre></div>
+</div>
+<p><strong>macOS (Homebrew):</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>brew<span class="w"> </span>install<span class="w"> </span>postgresql
+</pre></div>
+</div>
+</section>
+<section id="step-2-clone-repository">
+<h4>Step 2: Clone Repository<a class="headerlink" href="#step-2-clone-repository" title="Link to this heading"></a></h4>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/crystallinecore/biscuit.git
+<span class="nb">cd</span><span class="w"> </span>biscuit
+</pre></div>
+</div>
+</section>
+<section id="step-3-build-and-install">
+<h4>Step 3: Build and Install<a class="headerlink" href="#step-3-build-and-install" title="Link to this heading"></a></h4>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Build the extension</span>
+make
+
+<span class="c1"># Install system-wide (requires sudo)</span>
+sudo<span class="w"> </span>make<span class="w"> </span>install
+
+<span class="c1"># Or install to PostgreSQL extension directory</span>
+make<span class="w"> </span>install<span class="w"> </span><span class="nv">PG_CONFIG</span><span class="o">=</span>/path/to/pg_config
+</pre></div>
+</div>
+</section>
+<section id="step-4-verify-installation">
+<h4>Step 4: Verify Installation<a class="headerlink" href="#step-4-verify-installation" title="Link to this heading"></a></h4>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Check that biscuit.so was installed</span>
+ls<span class="w"> </span><span class="k">$(</span>pg_config<span class="w"> </span>--pkglibdir<span class="k">)</span>/biscuit.so
+
+<span class="c1"># Check control file</span>
+ls<span class="w"> </span><span class="k">$(</span>pg_config<span class="w"> </span>--sharedir<span class="k">)</span>/extension/biscuit.control
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="method-2-with-croaring-support-enhanced-performance">
+<h3>Method 2: With CRoaring Support (Enhanced Performance)<a class="headerlink" href="#method-2-with-croaring-support-enhanced-performance" title="Link to this heading"></a></h3>
+<p>For optimal performance, install with the CRoaring library:</p>
+<section id="install-croaring-library">
+<h4>Install CRoaring Library<a class="headerlink" href="#install-croaring-library" title="Link to this heading"></a></h4>
+<p><strong>Ubuntu/Debian:</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>libroaring-dev
+</pre></div>
+</div>
+<p><strong>From Source:</strong></p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/RoaringBitmap/CRoaring.git
+<span class="nb">cd</span><span class="w"> </span>CRoaring
+mkdir<span class="w"> </span>build<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>build
+cmake<span class="w"> </span>..
+make
+sudo<span class="w"> </span>make<span class="w"> </span>install
+</pre></div>
+</div>
+</section>
+<section id="build-biscuit-with-roaring">
+<h4>Build Biscuit with Roaring<a class="headerlink" href="#build-biscuit-with-roaring" title="Link to this heading"></a></h4>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">cd</span><span class="w"> </span>biscuit
+make<span class="w"> </span><span class="nv">HAVE_ROARING</span><span class="o">=</span><span class="m">1</span>
+sudo<span class="w"> </span>make<span class="w"> </span>install
+</pre></div>
+</div>
+</section>
+</section>
+</section>
+<hr class="docutils" />
+<section id="enable-extension-in-database">
+<h2>Enable Extension in Database<a class="headerlink" href="#enable-extension-in-database" title="Link to this heading"></a></h2>
+<p>After installation, enable Biscuit in your PostgreSQL database:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Connect to your database</span>
+<span class="n">psql</span><span class="w"> </span><span class="o">-</span><span class="n">U</span><span class="w"> </span><span class="n">postgres</span><span class="w"> </span><span class="o">-</span><span class="n">d</span><span class="w"> </span><span class="n">your_database</span>
+
+<span class="c1">-- Create the extension</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="n">EXTENSION</span><span class="w"> </span><span class="n">biscuit</span><span class="p">;</span>
+
+<span class="c1">-- Verify installation</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">pg_available_extensions</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;biscuit&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p>Expected output:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>   <span class="n">name</span>   <span class="o">|</span> <span class="n">default_version</span> <span class="o">|</span> <span class="n">installed_version</span> <span class="o">|</span> <span class="n">comment</span>
+<span class="o">----------+-----------------+-------------------+---------</span>
+ <span class="n">biscuit</span>  <span class="o">|</span> <span class="mf">1.0</span>             <span class="o">|</span> <span class="mf">1.0</span>               <span class="o">|</span> <span class="n">Bitmap</span><span class="o">-</span><span class="n">based</span><span class="o">...</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="post-installation-configuration">
+<h2>Post-Installation Configuration<a class="headerlink" href="#post-installation-configuration" title="Link to this heading"></a></h2>
+<section id="set-appropriate-memory-limits">
+<h3>Set Appropriate Memory Limits<a class="headerlink" href="#set-appropriate-memory-limits" title="Link to this heading"></a></h3>
+<p>Biscuit stores indexes in memory. Adjust PostgreSQL memory settings:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- In postgresql.conf</span>
+<span class="n">shared_buffers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="n">GB</span><span class="w">           </span><span class="o">#</span><span class="w"> </span><span class="n">Increase</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="k">large</span><span class="w"> </span><span class="n">indexes</span>
+<span class="n">work_mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">256</span><span class="n">MB</span><span class="w">               </span><span class="o">#</span><span class="w"> </span><span class="k">For</span><span class="w"> </span><span class="n">sorting</span><span class="w"> </span><span class="n">operations</span>
+<span class="n">maintenance_work_mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="n">GB</span><span class="w">     </span><span class="o">#</span><span class="w"> </span><span class="k">For</span><span class="w"> </span><span class="k">index</span><span class="w"> </span><span class="n">building</span>
+</pre></div>
+</div>
+</section>
+<section id="enable-query-logging-optional">
+<h3>Enable Query Logging (Optional)<a class="headerlink" href="#enable-query-logging-optional" title="Link to this heading"></a></h3>
+<p>Monitor Biscuit performance:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Enable timing</span>
+<span class="err">\</span><span class="n">timing</span><span class="w"> </span><span class="k">on</span>
+
+<span class="c1">-- Log slow queries</span>
+<span class="k">SET</span><span class="w"> </span><span class="n">log_min_duration_statement</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="p">;</span><span class="w">  </span><span class="c1">-- Log queries &gt; 100ms</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="verify-installation-with-test">
+<h2>Verify Installation with Test<a class="headerlink" href="#verify-installation-with-test" title="Link to this heading"></a></h2>
+<p>Create a test table and index:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Create test table</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">test_biscuit</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">id</span><span class="w"> </span><span class="nb">SERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
+<span class="w">    </span><span class="n">name</span><span class="w"> </span><span class="nb">TEXT</span>
+<span class="p">);</span>
+
+<span class="c1">-- Insert test data</span>
+<span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">test_biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="s1">&#39;product_&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">generate_series</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">10000</span><span class="p">)</span><span class="w"> </span><span class="n">i</span><span class="p">;</span>
+
+<span class="c1">-- Create Biscuit index</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_test_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">test_biscuit</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">);</span>
+
+<span class="c1">-- Test query</span>
+<span class="k">EXPLAIN</span><span class="w"> </span><span class="k">ANALYZE</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">test_biscuit</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%product_42%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p>Expected output should show:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">Index</span> <span class="n">Scan</span> <span class="n">using</span> <span class="n">idx_test_name</span> <span class="n">on</span> <span class="n">test_biscuit</span>
+  <span class="p">(</span><span class="n">cost</span><span class="o">=</span><span class="mf">0.00</span><span class="o">.</span><span class="mf">.8.27</span> <span class="n">rows</span><span class="o">=</span><span class="mi">1</span> <span class="n">width</span><span class="o">=...</span><span class="p">)</span>
+  <span class="n">Index</span> <span class="n">Cond</span><span class="p">:</span> <span class="p">(</span><span class="n">name</span> <span class="o">~~</span> <span class="s1">&#39;%product_42%&#39;</span><span class="p">::</span><span class="n">text</span><span class="p">)</span>
+<span class="n">Planning</span> <span class="n">Time</span><span class="p">:</span> <span class="mf">0.123</span> <span class="n">ms</span>
+<span class="n">Execution</span> <span class="n">Time</span><span class="p">:</span> <span class="mf">0.567</span> <span class="n">ms</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="troubleshooting">
+<h2>Troubleshooting<a class="headerlink" href="#troubleshooting" title="Link to this heading"></a></h2>
+<section id="error-could-not-load-library">
+<h3>Error: “could not load library”<a class="headerlink" href="#error-could-not-load-library" title="Link to this heading"></a></h3>
+<p><strong>Problem</strong>: PostgreSQL can’t find <code class="docutils literal notranslate"><span class="pre">biscuit.so</span></code></p>
+<p><strong>Solution</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Check installation directory</span>
+pg_config<span class="w"> </span>--pkglibdir
+
+<span class="c1"># Manually copy if needed</span>
+sudo<span class="w"> </span>cp<span class="w"> </span>biscuit.so<span class="w"> </span><span class="k">$(</span>pg_config<span class="w"> </span>--pkglibdir<span class="k">)</span>/
+</pre></div>
+</div>
+</section>
+<section id="error-extension-does-not-exist">
+<h3>Error: “extension does not exist”<a class="headerlink" href="#error-extension-does-not-exist" title="Link to this heading"></a></h3>
+<p><strong>Problem</strong>: Extension files not in correct location</p>
+<p><strong>Solution</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Check extension directory</span>
+pg_config<span class="w"> </span>--sharedir
+
+<span class="c1"># Verify files exist</span>
+ls<span class="w"> </span><span class="k">$(</span>pg_config<span class="w"> </span>--sharedir<span class="k">)</span>/extension/biscuit*
+</pre></div>
+</div>
+</section>
+<section id="build-errors-with-roaring">
+<h3>Build Errors with Roaring<a class="headerlink" href="#build-errors-with-roaring" title="Link to this heading"></a></h3>
+<p><strong>Problem</strong>: CRoaring headers not found</p>
+<p><strong>Solution</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Specify include path explicitly</span>
+make<span class="w"> </span><span class="nv">HAVE_ROARING</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="nv">CFLAGS</span><span class="o">=</span><span class="s2">&quot;-I/usr/local/include&quot;</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="uninstallation">
+<h2>Uninstallation<a class="headerlink" href="#uninstallation" title="Link to this heading"></a></h2>
+<p>To remove Biscuit:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Drop from database first</span>
+<span class="k">DROP</span><span class="w"> </span><span class="n">EXTENSION</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="k">CASCADE</span><span class="p">;</span>
+</pre></div>
+</div>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Remove files</span>
+sudo<span class="w"> </span>rm<span class="w"> </span><span class="k">$(</span>pg_config<span class="w"> </span>--pkglibdir<span class="k">)</span>/biscuit.so
+sudo<span class="w"> </span>rm<span class="w"> </span><span class="k">$(</span>pg_config<span class="w"> </span>--sharedir<span class="k">)</span>/extension/biscuit*
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="next-steps">
+<h2>Next Steps<a class="headerlink" href="#next-steps" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><strong>Installation complete!</strong></p></li>
+<li><p>Continue to <a class="reference internal" href="quickstart.html"><span class="std std-doc">Quick Start Tutorial</span></a></p></li>
+<li><p>Read about <a class="reference internal" href="patterns.html"><span class="std std-doc">Pattern Syntax</span></a></p></li>
+<li><p>Learn about <a class="reference internal" href="performance.html"><span class="std std-doc">Performance Tuning</span></a></p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="platform-specific-notes">
+<h2>Platform-Specific Notes<a class="headerlink" href="#platform-specific-notes" title="Link to this heading"></a></h2>
+<section id="windows">
+<h3>Windows<a class="headerlink" href="#windows" title="Link to this heading"></a></h3>
+<p>For Windows installation:</p>
+<ol class="arabic simple">
+<li><p>Install Visual Studio with C++ support</p></li>
+<li><p>Use PostgreSQL Windows build tools</p></li>
+<li><p>Compile with: <code class="docutils literal notranslate"><span class="pre">nmake</span> <span class="pre">/f</span> <span class="pre">Makefile.win</span></code></p></li>
+</ol>
+</section>
+<section id="docker">
+<h3>Docker<a class="headerlink" href="#docker" title="Link to this heading"></a></h3>
+<p>Run Biscuit in Docker:</p>
+<div class="highlight-dockerfile notranslate"><div class="highlight"><pre><span></span><span class="k">FROM</span><span class="w"> </span><span class="s">postgres:14</span>
+
+<span class="c"># Install build dependencies</span>
+<span class="k">RUN</span><span class="w"> </span>apt-get<span class="w"> </span>update<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>postgresql-server-dev-14<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>build-essential<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>git
+
+<span class="c"># Build and install Biscuit</span>
+<span class="k">RUN</span><span class="w"> </span>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/crystallinecore/biscuit.git<span class="w"> </span>/tmp/biscuit
+<span class="k">WORKDIR</span><span class="w"> </span><span class="s">/tmp/biscuit</span>
+<span class="k">RUN</span><span class="w"> </span>make<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>make<span class="w"> </span>install
+
+<span class="c"># Cleanup</span>
+<span class="k">RUN</span><span class="w"> </span>rm<span class="w"> </span>-rf<span class="w"> </span>/tmp/biscuit
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="getting-help">
+<h2>Getting Help<a class="headerlink" href="#getting-help" title="Link to this heading"></a></h2>
+<p>If you encounter issues:</p>
+<ol class="arabic simple">
+<li><p>Check the <a class="reference internal" href="#faq.md"><span class="xref myst">FAQ</span></a></p></li>
+<li><p>Search <a class="reference external" href="https://github.com/crystallinecore/biscuit/issues">GitHub Issues</a></p></li>
+<li><p>Ask on <a class="reference external" href="https://github.com/crystallinecore/biscuit/discussions">GitHub Discussions</a></p></li>
+<li><p>Email: <a class="reference external" href="mailto:sivaprasad&#46;off&#37;&#52;&#48;gmail&#46;com">sivaprasad<span>&#46;</span>off<span>&#64;</span>gmail<span>&#46;</span>com</a></p></li>
+</ol>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="index.html" class="btn btn-neutral float-left" title="Biscuit Documentation" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="quickstart.html" class="btn btn-neutral float-right" title="Quick Start Tutorial" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

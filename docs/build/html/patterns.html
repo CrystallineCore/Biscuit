@@ -1,0 +1,885 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pattern Syntax Guide &mdash; BISCUIT 2.0.0 Documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
+
+  
+    <link rel="shortcut icon" href="_static/favicon.ico"/>
+    <link rel="canonical" href="https://biscuit.readthedocs.io/patterns.html" />
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=51b770b3"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Multi-Column Indexes" href="multicolumn.html" />
+    <link rel="prev" title="Quick Start Tutorial" href="quickstart.html" />
+     
+
+    <!-- Google Search Console -->
+    <meta name="google-site-verification" content="22G4D8fVRIvJJg67tK5fHXdhOjKv4yjXBF_E2jeATGk" />
+
+    <!-- SEO Meta Tags -->
+    <meta name="description" content="BISCUIT is a deterministic bitmap-based Index Access Method for PostgreSQL, enabling fast multi-column pattern matching, LIKE queries, and exact-match text search.">
+    <meta name="keywords" content="postgresql extension, biscuit, postgres index access method, bitmap indexing, deterministic text search, like optimization, multi-column indexing, pg_trgm alternative">
+    <meta name="author" content="Sivaprasad Murali">
+    <meta name="robots" content="index, follow">
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="BISCUIT – Deterministic Bitmap Indexing for PostgreSQL">
+    <meta property="og:description" content="Documentation, installation guide, and technical reference for BISCUIT, a PostgreSQL Index Access Method providing deterministic bitmap-based text pattern search.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://biscuit.readthedocs.io/">
+    <meta property="og:image" content="https://biscuit.readthedocs.io/en/latest/_static/logo.png">
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="BISCUIT – Deterministic Bitmap Indexing for PostgreSQL">
+    <meta name="twitter:description" content="Documentation and reference for BISCUIT, a PostgreSQL extension for deterministic bitmap-based indexing and multi-column pattern search.">
+    <meta name="twitter:image" content="https://biscuit.readthedocs.io/en/latest/_static/logo.png">
+
+    <!-- JSON-LD Structured Data for Software Application -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "BISCUIT",
+    "description": "A PostgreSQL Index Access Method providing deterministic bitmap-based indexing for LIKE/pattern matching with multi-column support.",
+    "url": "https://biscuit.readthedocs.io/",
+    "applicationCategory": "DatabaseExtension",
+    "operatingSystem": "Linux",
+    "softwareVersion": "2.0.0",
+    "author": {
+        "@type": "Person",
+        "name": "Sivaprasad Murali"
+    },
+    "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+    },
+    "programmingLanguage": "C",
+    "keywords": "postgresql, extension, indexing, bitmap index, text search, deterministic index, multi-column search",
+    "softwareHelp": "https://biscuit.readthedocs.io/",
+    "downloadUrl": "https://pgxn.org/dist/biscuit/",
+    "codeRepository": "https://github.com/crystallinecore/biscuit",
+    "license": "https://opensource.org/licenses/MIT",
+    "inLanguage": "en"
+    }
+    </script>
+
+    <!-- Breadcrumb Structured Data -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [{
+        "@type": "ListItem",
+        "position": 1,
+        "name": "Home",
+        "item": "https://biscuit.readthedocs.io/"
+    },{
+        "@type": "ListItem",
+        "position": 2,
+        "name": "Pattern Syntax Guide",
+        "item": "https://biscuit.readthedocs.io/patterns.html"
+    }]
+    }
+    </script>
+
+    <!-- Organization Structured Data -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    "name": "BISCUIT",
+    "url": "https://biscuit.readthedocs.io/",
+    "logo": "https://biscuit.readthedocs.io/en/latest/_static/logo.png",
+    "sameAs": [
+        "https://github.com/crystallinecore/biscuit",
+        "https://pgxn.org/dist/biscuit/"
+    ]
+    }
+    </script>
+
+
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search"  style="background: #2C3E50" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            BISCUIT
+              <img src="_static/logo.png" class="logo" alt="Logo"/>
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#prerequisites">Prerequisites</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#check-postgresql-version">Check PostgreSQL Version</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#installation-methods">Installation Methods</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#method-1-from-source-recommended">Method 1: From Source (Recommended)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-1-install-build-dependencies">Step 1: Install Build Dependencies</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-2-clone-repository">Step 2: Clone Repository</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-3-build-and-install">Step 3: Build and Install</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-4-verify-installation">Step 4: Verify Installation</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#method-2-with-croaring-support-enhanced-performance">Method 2: With CRoaring Support (Enhanced Performance)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#install-croaring-library">Install CRoaring Library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#build-biscuit-with-roaring">Build Biscuit with Roaring</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#enable-extension-in-database">Enable Extension in Database</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#post-installation-configuration">Post-Installation Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#set-appropriate-memory-limits">Set Appropriate Memory Limits</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#enable-query-logging-optional">Enable Query Logging (Optional)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#verify-installation-with-test">Verify Installation with Test</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#troubleshooting">Troubleshooting</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#error-could-not-load-library">Error: “could not load library”</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#error-extension-does-not-exist">Error: “extension does not exist”</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#build-errors-with-roaring">Build Errors with Roaring</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#uninstallation">Uninstallation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#platform-specific-notes">Platform-Specific Notes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#windows">Windows</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#docker">Docker</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#getting-help">Getting Help</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick Start Tutorial</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-1-create-sample-data">Step 1: Create Sample Data</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-2-measure-baseline-performance">Step 2: Measure Baseline Performance</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-3-create-biscuit-index">Step 3: Create Biscuit Index</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-4-run-optimized-queries">Step 4: Run Optimized Queries</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-5-try-different-pattern-types">Step 5: Try Different Pattern Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#prefix-patterns-fastest">Prefix Patterns (Fastest)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#suffix-patterns">Suffix Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#substring-patterns">Substring Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#complex-patterns">Complex Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#underscore-wildcards">Underscore Wildcards</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-6-multi-column-indexes">Step 6: Multi-Column Indexes</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-7-aggregate-queries-special-optimization">Step 7: Aggregate Queries (Special Optimization)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-8-monitor-index-statistics">Step 8: Monitor Index Statistics</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#step-9-test-crud-operations">Step 9: Test CRUD Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#insert">INSERT</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#update">UPDATE</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#delete">DELETE</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#performance-comparison">Performance Comparison</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#best-practices">Best Practices</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#do">✅ DO:</a></li>
+<li class="toctree-l3"><a class="reference internal" href="quickstart.html#dont">❌ DON’T:</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#common-questions">Common Questions</a></li>
+</ul>
+</li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Pattern Syntax Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#wildcard-characters">Wildcard Characters</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#pattern-types">Pattern Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#exact-match-fastest">1. Exact Match (Fastest)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#prefix-match-very-fast">2. Prefix Match (Very Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#suffix-match-fast">3. Suffix Match (Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#substring-match-moderate-speed">4. Substring Match (Moderate Speed)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#infix-match-fast">5. Infix Match (Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#complex-multi-part-patterns">6. Complex Multi-Part Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#underscore-patterns-position-specific">7. Underscore Patterns (Position-Specific)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#pure-wildcard-patterns-fastest-special-cases">Pure Wildcard Patterns (Fastest Special Cases)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#empty-pattern">Empty Pattern</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#single-percent">Single Percent</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pure-underscores">Pure Underscores</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#mixed-pure-wildcards">Mixed Pure Wildcards</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#pattern-optimization-strategies">Pattern Optimization Strategies</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#strategy-1-maximize-concrete-characters">Strategy 1: Maximize Concrete Characters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#strategy-2-use-strong-anchors">Strategy 2: Use Strong Anchors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#strategy-3-minimize-partitions">Strategy 3: Minimize Partitions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#strategy-4-combine-with-other-indexes">Strategy 4: Combine with Other Indexes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#pattern-examples-by-use-case">Pattern Examples by Use Case</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#email-filtering">Email Filtering</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#sku-product-code-matching">SKU/Product Code Matching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#log-searching">Log Searching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#url-path-matching">URL/Path Matching</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#case-sensitivity">Case Sensitivity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#pattern-performance-hierarchy">Pattern Performance Hierarchy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="multicolumn.html">Multi-Column Indexes</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#overview">Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#creating-multi-column-indexes">Creating Multi-Column Indexes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#basic-syntax">Basic Syntax</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#example-e-commerce-product-search">Example: E-Commerce Product Search</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#how-query-optimization-works">How Query Optimization Works</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#automatic-reordering-example">Automatic Reordering Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#query-planning-deep-dive">Query Planning Deep Dive</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#priority-calculation">Priority Calculation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#selectivity-scoring">Selectivity Scoring</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#viewing-query-plans">Viewing Query Plans</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#best-practices">Best Practices</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#order-columns-by-query-frequency">1. Order Columns by Query Frequency</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#mix-selective-and-general-columns">2. Mix Selective and General Columns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#consider-column-cardinality">3. Consider Column Cardinality</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#avoid-redundant-indexes">4. Avoid Redundant Indexes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#advanced-patterns">Advanced Patterns</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-1-user-search-with-email-domain">Pattern 1: User Search with Email Domain</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-2-product-search-with-multiple-attributes">Pattern 2: Product Search with Multiple Attributes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-3-log-analysis">Pattern 3: Log Analysis</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#type-conversion-support">Type Conversion Support</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#supported-types">Supported Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#type-conversion-details">Type Conversion Details</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#performance-characteristics">Performance Characteristics</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#query-complexity-vs-performance">Query Complexity vs. Performance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#early-termination-example">Early Termination Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#limit-optimization">LIMIT Optimization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#monitoring-and-diagnostics">Monitoring and Diagnostics</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#check-index-statistics">Check Index Statistics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#query-performance-analysis">Query Performance Analysis</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#common-pitfalls">Common Pitfalls</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pitfall-1-too-many-columns">❌ Pitfall 1: Too Many Columns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pitfall-2-low-selectivity-patterns">❌ Pitfall 2: Low Selectivity Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pitfall-3-not-using-explain">❌ Pitfall 3: Not Using EXPLAIN</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#migration-from-single-column">Migration from Single-Column</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#examples-repository">Examples Repository</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="performance.html">Performance Tuning Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#quick-performance-checklist">Quick Performance Checklist</a></li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#understanding-biscuit-performance">Understanding Biscuit Performance</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#active-optimizations">Active Optimizations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#postgresql-configuration">PostgreSQL Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#memory-settings">Memory Settings</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#planner-settings">Planner Settings</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#index-design-optimization">Index Design Optimization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#choose-selective-columns">Choose Selective Columns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#multi-column-order-strategy">Multi-Column Order Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#avoid-over-indexing">Avoid Over-Indexing</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#query-optimization">Query Optimization</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#pattern-design">Pattern Design</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="performance.html#maximize-concrete-characters">Maximize Concrete Characters</a></li>
+<li class="toctree-l4"><a class="reference internal" href="performance.html#use-strong-anchors">Use Strong Anchors</a></li>
+<li class="toctree-l4"><a class="reference internal" href="performance.html#minimize-pattern-complexity">Minimize Pattern Complexity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#combine-with-other-filters">Combine with Other Filters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#aggregate-query-optimization">Aggregate Query Optimization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#limit-query-optimization">LIMIT Query Optimization</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#maintenance-and-monitoring">Maintenance and Monitoring</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#regular-statistics-updates">Regular Statistics Updates</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#monitor-index-health">Monitor Index Health</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#cleanup-tombstones">Cleanup Tombstones</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#index-rebuild-strategy">Index Rebuild Strategy</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#hardware-considerations">Hardware Considerations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#memory-requirements">Memory Requirements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#ssd-vs-hdd">SSD vs. HDD</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#cpu-considerations">CPU Considerations</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#benchmarking-your-setup">Benchmarking Your Setup</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#create-benchmark-suite">Create Benchmark Suite</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#baseline-performance-targets">Baseline Performance Targets</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#troubleshooting-performance-issues">Troubleshooting Performance Issues</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-1-index-not-being-used">Issue 1: Index Not Being Used</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-2-slow-query-despite-index">Issue 2: Slow Query Despite Index</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-3-high-memory-usage">Issue 3: High Memory Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#issue-4-slow-index-builds">Issue 4: Slow Index Builds</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#advanced-tuning">Advanced Tuning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#custom-cost-parameters">Custom Cost Parameters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#parallel-query-configuration">Parallel Query Configuration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#performance-monitoring-dashboard">Performance Monitoring Dashboard</a></li>
+<li class="toctree-l2"><a class="reference internal" href="performance.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu"  style="background: #2C3E50" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">BISCUIT</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Pattern Syntax Guide</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/patterns.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="pattern-syntax-guide">
+<h1>Pattern Syntax Guide<a class="headerlink" href="#pattern-syntax-guide" title="Link to this heading"></a></h1>
+<p>Complete guide to LIKE pattern matching with Biscuit indexes, including optimization strategies for each pattern type.</p>
+<hr class="docutils" />
+<section id="wildcard-characters">
+<h2>Wildcard Characters<a class="headerlink" href="#wildcard-characters" title="Link to this heading"></a></h2>
+<p>Biscuit supports standard SQL LIKE wildcards:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Wildcard</p></th>
+<th class="head"><p>Meaning</p></th>
+<th class="head"><p>Example</p></th>
+<th class="head"><p>Matches</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">%</span></code></p></td>
+<td><p>Zero or more characters</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">'%test%'</span></code></p></td>
+<td><p>“test”, “mytest”, “testing”</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">_</span></code></p></td>
+<td><p>Exactly one character</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">'test_'</span></code></p></td>
+<td><p>“test1”, “testA”, not “test”</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<hr class="docutils" />
+<section id="pattern-types">
+<h2>Pattern Types<a class="headerlink" href="#pattern-types" title="Link to this heading"></a></h2>
+<p>Biscuit classifies patterns into categories for optimization:</p>
+<section id="exact-match-fastest">
+<h3>1. Exact Match (Fastest)<a class="headerlink" href="#exact-match-fastest" title="Link to this heading"></a></h3>
+<p><strong>Pattern</strong>: No wildcards at all</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Exact string match</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Wireless Mouse&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Performance</strong>:</p>
+<ul class="simple">
+<li><p><strong>How it works</strong>: Direct bitmap lookup + length filter</p></li>
+<li><p><strong>Use case</strong>: When you know the exact string</p></li>
+</ul>
+<p><strong>Note</strong>: For exact matches, regular <code class="docutils literal notranslate"><span class="pre">=</span></code> with B-tree may be equally fast. Use Biscuit when mixing exact and wildcard queries.</p>
+</section>
+<hr class="docutils" />
+<section id="prefix-match-very-fast">
+<h3>2. Prefix Match (Very Fast)<a class="headerlink" href="#prefix-match-very-fast" title="Link to this heading"></a></h3>
+<p><strong>Pattern</strong>: <code class="docutils literal notranslate"><span class="pre">'string%'</span></code> - Starts with concrete characters, ends with <code class="docutils literal notranslate"><span class="pre">%</span></code></p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Find products starting with &quot;Wireless&quot;</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Wireless%&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Email domain filtering</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;admin%&#39;</span><span class="p">;</span>
+
+<span class="c1">-- SKU prefix search</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">inventory</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">sku</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;PROD-2024%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Performance</strong>:</p>
+<ul class="simple">
+<li><p><strong>How it works</strong>: Position-based bitmap intersection from start</p></li>
+<li><p><strong>Optimization</strong>: Strong anchor at position 0</p></li>
+</ul>
+<p><strong>Best Practices</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- ✅ GOOD: Specific prefix</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Wireless%&#39;</span>
+
+<span class="c1">-- ❌ AVOID: Very short prefix (low selectivity)</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;W%&#39;</span>
+
+<span class="c1">-- ✅ BETTER: Longer prefix</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Wireless Mouse%&#39;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="suffix-match-fast">
+<h3>3. Suffix Match (Fast)<a class="headerlink" href="#suffix-match-fast" title="Link to this heading"></a></h3>
+<p><strong>Pattern</strong>: <code class="docutils literal notranslate"><span class="pre">'%string'</span></code> - Ends with concrete characters, starts with <code class="docutils literal notranslate"><span class="pre">%</span></code></p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Find files with specific extension</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">files</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">filename</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%.pdf&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Domain matching</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%@company.com&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Product category suffix</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%Mouse&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Performance</strong>:</p>
+<ul class="simple">
+<li><p><strong>How it works</strong>: Negative-position bitmap indexing from end</p></li>
+<li><p><strong>Optimization</strong>: Uses suffix bitmaps for direct matching</p></li>
+</ul>
+<p><strong>Examples</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Email domain filtering (very efficient)</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%@gmail.com&#39;</span><span class="p">;</span>
+
+<span class="c1">-- File extension queries</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">documents</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">filename</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%.docx&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="substring-match-moderate-speed">
+<h3>4. Substring Match (Moderate Speed)<a class="headerlink" href="#substring-match-moderate-speed" title="Link to this heading"></a></h3>
+<p><strong>Pattern</strong>: <code class="docutils literal notranslate"><span class="pre">'%string%'</span></code> - Contains substring anywhere</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Find products containing &quot;wireless&quot;</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%wireless%&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Description search</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">articles</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">content</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%important%&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Tag searching</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">posts</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">tags</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%python%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Performance</strong>:</p>
+<ul class="simple">
+<li><p><strong>How it works</strong>: Tries all positions from 0 to max_length</p></li>
+<li><p><strong>Optimization</strong>: Early termination when no matches found</p></li>
+</ul>
+<p><strong>Optimization Tips</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- ✅ GOOD: Specific substring</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">description</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%wireless mouse%&#39;</span>
+
+<span class="c1">-- ⚠️ SLOWER: Very common substring</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">description</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%the%&#39;</span>
+
+<span class="c1">-- ✅ COMBINE with other filters</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">description</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%wireless%&#39;</span><span class="w"> </span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">category</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;Electronics&#39;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="infix-match-fast">
+<h3>5. Infix Match (Fast)<a class="headerlink" href="#infix-match-fast" title="Link to this heading"></a></h3>
+<p><strong>Pattern</strong>: <code class="docutils literal notranslate"><span class="pre">'prefix%suffix'</span></code> - Anchored at both ends</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- URL path matching</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">urls</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">path</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;/api/%/users&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Log filtering</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">logs</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">message</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;ERROR%timeout&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Pattern with both anchors</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Wireless%Mouse&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Performance</strong>:</p>
+<ul class="simple">
+<li><p><strong>How it works</strong>: Intersects prefix and suffix bitmaps</p></li>
+<li><p><strong>Optimization</strong>: Both anchors provide strong filtering</p></li>
+</ul>
+<p><strong>Why it’s fast</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Matches must:</span>
+<span class="c1">-- 1. Start with &quot;Wireless&quot; (position 0)</span>
+<span class="c1">-- 2. End with &quot;Mouse&quot; (using negative positions)</span>
+<span class="c1">-- 3. Have length &gt;= len(&quot;Wireless&quot;) + len(&quot;Mouse&quot;)</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Wireless%Mouse&#39;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="complex-multi-part-patterns">
+<h3>6. Complex Multi-Part Patterns<a class="headerlink" href="#complex-multi-part-patterns" title="Link to this heading"></a></h3>
+<p><strong>Pattern</strong>: Multiple <code class="docutils literal notranslate"><span class="pre">%</span></code> separators with concrete parts</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Multiple substrings</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%Wireless%RGB%Gaming%&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Log pattern matching</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">logs</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">message</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;ERROR%connection%timeout%retry&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Multiple conditions</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">users</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%admin%@%company%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Performance</strong>:</p>
+<ul class="simple">
+<li><p><strong>How it works</strong>: Recursive windowed matching algorithm</p></li>
+<li><p><strong>Optimization</strong>: Each part must appear in sequence</p></li>
+</ul>
+<p><strong>Execution Strategy</strong>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">Pattern</span><span class="p">:</span> <span class="s1">&#39;%word1%word2%word3%&#39;</span>
+
+<span class="n">Steps</span><span class="p">:</span>
+<span class="mf">1.</span> <span class="n">Find</span> <span class="nb">all</span> <span class="n">positions</span> <span class="n">where</span> <span class="s2">&quot;word1&quot;</span> <span class="n">appears</span>
+<span class="mf">2.</span> <span class="n">For</span> <span class="n">each</span> <span class="n">match</span><span class="p">,</span> <span class="n">find</span> <span class="s2">&quot;word2&quot;</span> <span class="n">after</span> <span class="n">it</span>
+<span class="mf">3.</span> <span class="n">For</span> <span class="n">each</span> <span class="n">of</span> <span class="n">those</span><span class="p">,</span> <span class="n">find</span> <span class="s2">&quot;word3&quot;</span> <span class="n">after</span> <span class="n">it</span>
+<span class="mf">4.</span> <span class="n">Return</span> <span class="n">only</span> <span class="n">complete</span> <span class="n">matches</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="underscore-patterns-position-specific">
+<h3>7. Underscore Patterns (Position-Specific)<a class="headerlink" href="#underscore-patterns-position-specific" title="Link to this heading"></a></h3>
+<p><strong>Pattern</strong>: Using <code class="docutils literal notranslate"><span class="pre">_</span></code> for single-character wildcards</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Exactly 4 characters starting with &quot;test&quot;</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">codes</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">code</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;test____&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Pattern with specific positions</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">sku</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;PROD-___-2024&#39;</span><span class="p">;</span>
+
+<span class="c1">-- First character wildcard</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">words</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">word</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;_ouse&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Mixed wildcards</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="k">data</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;A_C%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Performance</strong>:</p>
+<ul class="simple">
+<li><p><strong>How it works</strong>: Each <code class="docutils literal notranslate"><span class="pre">_</span></code> constrains exact length and positions</p></li>
+<li><p><strong>Key insight</strong>: <code class="docutils literal notranslate"><span class="pre">_</span></code> is NOT skipped - it’s a position constraint!</p></li>
+</ul>
+<p><strong>Important Distinction</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- These are DIFFERENT queries:</span>
+
+<span class="c1">-- Match any 8-character string</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">code</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;________&#39;</span><span class="w">  </span><span class="c1">-- Exact length filter</span>
+
+<span class="c1">-- Match any string with length &gt;= 0</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">code</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%%&#39;</span><span class="w">  </span><span class="c1">-- All non-null strings</span>
+
+<span class="c1">-- Match 5+ character strings starting with &quot;test&quot;</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">code</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;test_%&#39;</span><span class="w">  </span><span class="c1">-- Length &gt;= 5, prefix &quot;test&quot;</span>
+</pre></div>
+</div>
+<p><strong>Optimization Examples</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- ✅ FAST: Exact length known</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">code</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;____&#39;</span><span class="w">  </span><span class="c1">-- Exactly 4 characters</span>
+
+<span class="c1">-- ✅ FAST: Position constraints</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">sku</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;A___-___&#39;</span><span class="w">  </span><span class="c1">-- Specific format</span>
+
+<span class="c1">-- ⚠️ SLOWER: Many underscores without anchors</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%_____%&#39;</span><span class="w">  </span><span class="c1">-- 5+ chars substring</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="pure-wildcard-patterns-fastest-special-cases">
+<h2>Pure Wildcard Patterns (Fastest Special Cases)<a class="headerlink" href="#pure-wildcard-patterns-fastest-special-cases" title="Link to this heading"></a></h2>
+<p>Biscuit has special optimizations for patterns containing only wildcards:</p>
+<section id="empty-pattern">
+<h3>Empty Pattern<a class="headerlink" href="#empty-pattern" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="p">;</span>
+<span class="c1">-- Optimized to: length_bitmaps[0]</span>
+<span class="c1">-- Returns: Only empty strings</span>
+</pre></div>
+</div>
+</section>
+<section id="single-percent">
+<h3>Single Percent<a class="headerlink" href="#single-percent" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%&#39;</span><span class="p">;</span>
+<span class="c1">-- Optimized to: All non-tombstoned records</span>
+<span class="c1">-- Returns: Everything (except NULLs)</span>
+</pre></div>
+</div>
+</section>
+<section id="pure-underscores">
+<h3>Pure Underscores<a class="headerlink" href="#pure-underscores" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">codes</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">code</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;____&#39;</span><span class="p">;</span>
+<span class="c1">-- Optimized to: length_bitmaps[4]</span>
+<span class="c1">-- Returns: Exactly 4-character strings</span>
+</pre></div>
+</div>
+</section>
+<section id="mixed-pure-wildcards">
+<h3>Mixed Pure Wildcards<a class="headerlink" href="#mixed-pure-wildcards" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Pattern: &#39;%%%___%%&#39;</span>
+<span class="c1">-- Has: 5× &#39;%&#39; and 3× &#39;_&#39;</span>
+<span class="c1">-- Optimized to: length_ge_bitmaps[3]</span>
+<span class="c1">-- Returns: Strings with length &gt;= 3</span>
+
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="k">data</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%_%_%_%&#39;</span><span class="p">;</span>
+<span class="c1">-- Equivalent to: WHERE LENGTH(value) &gt;= 3</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="pattern-optimization-strategies">
+<h2>Pattern Optimization Strategies<a class="headerlink" href="#pattern-optimization-strategies" title="Link to this heading"></a></h2>
+<section id="strategy-1-maximize-concrete-characters">
+<h3>Strategy 1: Maximize Concrete Characters<a class="headerlink" href="#strategy-1-maximize-concrete-characters" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- ❌ SLOW: Too generic</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%a%&#39;</span>
+
+<span class="c1">-- ✅ FAST: More specific</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%wireless%&#39;</span>
+
+<span class="c1">-- ✅✅ FASTER: Very specific</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%wireless mouse pro%&#39;</span>
+</pre></div>
+</div>
+<p><strong>Rule</strong>: More concrete characters = better selectivity = faster query</p>
+</section>
+<hr class="docutils" />
+<section id="strategy-2-use-strong-anchors">
+<h3>Strategy 2: Use Strong Anchors<a class="headerlink" href="#strategy-2-use-strong-anchors" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- ❌ SLOWER: No anchors</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%mouse%&#39;</span>
+
+<span class="c1">-- ✅ FASTER: Prefix anchor</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Wireless%&#39;</span>
+
+<span class="c1">-- ✅✅ FASTEST: Both anchors</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Wireless%Mouse&#39;</span>
+</pre></div>
+</div>
+<p><strong>Anchor Strength</strong>:</p>
+<ol class="arabic simple">
+<li><p>Both prefix + suffix: ⭐⭐⭐⭐⭐</p></li>
+<li><p>Prefix only: ⭐⭐⭐⭐</p></li>
+<li><p>Suffix only: ⭐⭐⭐⭐</p></li>
+<li><p>No anchors: ⭐⭐</p></li>
+</ol>
+</section>
+<hr class="docutils" />
+<section id="strategy-3-minimize-partitions">
+<h3>Strategy 3: Minimize Partitions<a class="headerlink" href="#strategy-3-minimize-partitions" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- ❌ COMPLEX: 4 partitions</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">message</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%ERROR%failed%retry%timeout%&#39;</span>
+
+<span class="c1">-- ✅ SIMPLER: 2 partitions</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">message</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%ERROR%failed%&#39;</span>
+
+<span class="c1">-- ✅✅ SIMPLEST: 1 partition</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">message</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%ERROR failed%&#39;</span>
+</pre></div>
+</div>
+<p><strong>Rule</strong>: Fewer <code class="docutils literal notranslate"><span class="pre">%</span></code> separators = faster matching</p>
+</section>
+<hr class="docutils" />
+<section id="strategy-4-combine-with-other-indexes">
+<h3>Strategy 4: Combine with Other Indexes<a class="headerlink" href="#strategy-4-combine-with-other-indexes" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Use Biscuit with other filters</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">category</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;Electronics&#39;</span><span class="w">  </span><span class="c1">-- B-tree index</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%Mouse%&#39;</span><span class="p">;</span><span class="w">      </span><span class="c1">-- Biscuit index</span>
+
+<span class="c1">-- PostgreSQL combines both indexes efficiently</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="pattern-examples-by-use-case">
+<h2>Pattern Examples by Use Case<a class="headerlink" href="#pattern-examples-by-use-case" title="Link to this heading"></a></h2>
+<section id="email-filtering">
+<h3>Email Filtering<a class="headerlink" href="#email-filtering" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Domain-specific emails</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%@company.com&#39;</span><span class="w">      </span><span class="c1">-- Suffix (fast)</span>
+
+<span class="c1">-- Admin emails</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;admin%&#39;</span><span class="w">             </span><span class="c1">-- Prefix (fast)</span>
+
+<span class="c1">-- Specific pattern</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;admin%@company.com&#39;</span><span class="w"> </span><span class="c1">-- Infix (very fast)</span>
+</pre></div>
+</div>
+</section>
+<section id="sku-product-code-matching">
+<h3>SKU/Product Code Matching<a class="headerlink" href="#sku-product-code-matching" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Year-based SKUs</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">sku</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;PROD-2024%&#39;</span><span class="w">           </span><span class="c1">-- Prefix (fast)</span>
+
+<span class="c1">-- Category codes</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">sku</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%ELEC%&#39;</span><span class="w">               </span><span class="c1">-- Substring (moderate)</span>
+
+<span class="c1">-- Format matching</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">sku</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;____-____-____&#39;</span><span class="w">       </span><span class="c1">-- Underscores (fast)</span>
+</pre></div>
+</div>
+</section>
+<section id="log-searching">
+<h3>Log Searching<a class="headerlink" href="#log-searching" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Error messages</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">message</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;ERROR:%&#39;</span><span class="w">          </span><span class="c1">-- Prefix (fast)</span>
+
+<span class="c1">-- Specific errors</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">message</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%timeout%&#39;</span><span class="w">        </span><span class="c1">-- Substring (moderate)</span>
+
+<span class="c1">-- Complex patterns</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">message</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;ERROR%connection%timeout%&#39;</span><span class="w">  </span><span class="c1">-- Multi-part</span>
+</pre></div>
+</div>
+</section>
+<section id="url-path-matching">
+<h3>URL/Path Matching<a class="headerlink" href="#url-path-matching" title="Link to this heading"></a></h3>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- API routes</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">path</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;/api/%&#39;</span><span class="w">              </span><span class="c1">-- Prefix (fast)</span>
+
+<span class="c1">-- Specific endpoints</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">path</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;/api/%/users&#39;</span><span class="w">        </span><span class="c1">-- Infix (fast)</span>
+
+<span class="c1">-- File extensions</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">path</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%.jpg&#39;</span><span class="w">               </span><span class="c1">-- Suffix (fast)</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="case-sensitivity">
+<h2>Case Sensitivity<a class="headerlink" href="#case-sensitivity" title="Link to this heading"></a></h2>
+<p>LIKE is case-sensitive by default. For case-insensitive matching:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Create index on lowercase version</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name_lower</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="k">LOWER</span><span class="p">(</span><span class="n">name</span><span class="p">));</span>
+
+<span class="c1">-- Query with lowercase</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="k">LOWER</span><span class="p">(</span><span class="n">name</span><span class="p">)</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%wireless%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Alternative</strong>: Use ILIKE (but requires sequential scan):</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- No Biscuit optimization</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">ILIKE</span><span class="w"> </span><span class="s1">&#39;%wireless%&#39;</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="pattern-performance-hierarchy">
+<h2>Pattern Performance Hierarchy<a class="headerlink" href="#pattern-performance-hierarchy" title="Link to this heading"></a></h2>
+<p>From fastest to slowest:</p>
+<ol class="arabic simple">
+<li><p>⚡⚡⚡⚡⚡ Pure wildcards (length-based)</p></li>
+<li><p>⚡⚡⚡⚡⚡ Exact match</p></li>
+<li><p>⚡⚡⚡⚡ Prefix patterns</p></li>
+<li><p>⚡⚡⚡⚡ Suffix patterns</p></li>
+<li><p>⚡⚡⚡⚡ Infix patterns (both anchors)</p></li>
+<li><p>⚡⚡⚡⚡ Underscore patterns</p></li>
+<li><p>⚡⚡⚡ Substring patterns</p></li>
+<li><p>⚡⚡ Complex multi-part patterns</p></li>
+</ol>
+</section>
+<hr class="docutils" />
+<section id="next-steps">
+<h2>Next Steps<a class="headerlink" href="#next-steps" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>Learn about <a class="reference internal" href="multicolumn.html"><span class="std std-doc">Multi-Column Indexes</span></a></p></li>
+<li><p>Explore <a class="reference internal" href="performance.html"><span class="std std-doc">Performance Tuning</span></a></p></li>
+<li><p>Understand the <a class="reference internal" href="#architecture.md"><span class="xref myst">Architecture</span></a></p></li>
+<li><p>Check the <a class="reference internal" href="#faq.md"><span class="xref myst">FAQ</span></a></p></li>
+</ul>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="quickstart.html" class="btn btn-neutral float-left" title="Quick Start Tutorial" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="multicolumn.html" class="btn btn-neutral float-right" title="Multi-Column Indexes" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
