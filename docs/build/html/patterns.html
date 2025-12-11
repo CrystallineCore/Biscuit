@@ -22,7 +22,7 @@
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
     <link rel="next" title="Multi-Column Indexes" href="multicolumn.html" />
-    <link rel="prev" title="Quick Start Tutorial" href="quickstart.html" />
+    <link rel="prev" title="API Reference" href="api.html" />
      
 
     <!-- Google Search Console -->
@@ -201,7 +201,6 @@
 <li class="toctree-l3"><a class="reference internal" href="quickstart.html#delete">DELETE</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="quickstart.html#performance-comparison">Performance Comparison</a></li>
 <li class="toctree-l2"><a class="reference internal" href="quickstart.html#best-practices">Best Practices</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="quickstart.html#do">✅ DO:</a></li>
 <li class="toctree-l3"><a class="reference internal" href="quickstart.html#dont">❌ DON’T:</a></li>
@@ -211,12 +210,76 @@
 <li class="toctree-l2"><a class="reference internal" href="quickstart.html#common-questions">Common Questions</a></li>
 </ul>
 </li>
+<li class="toctree-l1"><a class="reference internal" href="api.html">API Reference</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="api.html#table-of-contents">Table of Contents</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#extension-management">Extension Management</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#create-extension">CREATE EXTENSION</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#drop-extension">DROP EXTENSION</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#index-operations">Index Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#create-index">CREATE INDEX</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#drop-index">DROP INDEX</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#reindex">REINDEX</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#query-operators">Query Operators</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#like-operator">LIKE Operator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#not-like-operator">NOT LIKE Operator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#ilike-operator">ILIKE Operator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#multi-column-queries">Multi-Column Queries</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#diagnostic-functions">Diagnostic Functions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-stats">biscuit_index_stats()</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#configuration-parameters">Configuration Parameters</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#server-parameters">Server Parameters</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api.html#shared-buffers">shared_buffers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="api.html#work-mem">work_mem</a></li>
+<li class="toctree-l4"><a class="reference internal" href="api.html#maintenance-work-mem">maintenance_work_mem</a></li>
+<li class="toctree-l4"><a class="reference internal" href="api.html#effective-cache-size">effective_cache_size</a></li>
+<li class="toctree-l4"><a class="reference internal" href="api.html#enable-seqscan">enable_seqscan</a></li>
+<li class="toctree-l4"><a class="reference internal" href="api.html#max-parallel-workers-per-gather">max_parallel_workers_per_gather</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#session-parameters">Session Parameters</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#data-types">Data Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#supported-input-types">Supported Input Types</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="api.html#text-types">Text Types</a></li>
+<li class="toctree-l4"><a class="reference internal" href="api.html#numeric-types">Numeric Types</a></li>
+<li class="toctree-l4"><a class="reference internal" href="api.html#date-time-types">Date/Time Types</a></li>
+<li class="toctree-l4"><a class="reference internal" href="api.html#boolean-type">Boolean Type</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#unsupported-types">Unsupported Types</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#system-views">System Views</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#pg-index">pg_index</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#pg-stat-user-indexes">pg_stat_user_indexes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#pg-indexes">pg_indexes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#error-messages">Error Messages</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#error-access-method-biscuit-does-not-exist">ERROR: access method “biscuit” does not exist</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#error-data-type-x-is-not-supported-for-biscuit-index">ERROR: data type X is not supported for biscuit index</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#error-could-not-open-relation-with-oid">ERROR: could not open relation with OID</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#warning-biscuit-index-cache-miss">WARNING: Biscuit: Index cache miss</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Pattern Syntax Guide</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="#wildcard-characters">Wildcard Characters</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#pattern-types">Pattern Types</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#exact-match-fastest">1. Exact Match (Fastest)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#prefix-match-very-fast">2. Prefix Match (Very Fast)</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#suffix-match-fast">3. Suffix Match (Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#suffix-match-very-fast">3. Suffix Match (Very Fast)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#substring-match-moderate-speed">4. Substring Match (Moderate Speed)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#infix-match-fast">5. Infix Match (Fast)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#complex-multi-part-patterns">6. Complex Multi-Part Patterns</a></li>
@@ -303,7 +366,6 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#migration-from-single-column">Migration from Single-Column</a></li>
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#next-steps">Next Steps</a></li>
-<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#examples-repository">Examples Repository</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="performance.html">Performance Tuning Guide</a><ul>
@@ -350,7 +412,6 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#benchmarking-your-setup">Benchmarking Your Setup</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#create-benchmark-suite">Create Benchmark Suite</a></li>
-<li class="toctree-l3"><a class="reference internal" href="performance.html#baseline-performance-targets">Baseline Performance Targets</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#troubleshooting-performance-issues">Troubleshooting Performance Issues</a><ul>
@@ -367,6 +428,96 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#performance-monitoring-dashboard">Performance Monitoring Dashboard</a></li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="benchmark_env.html">Benchmark Environment</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#system-overview">System Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#benchmark-configuration">Benchmark Configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#benchmark-methodology">Benchmark Methodology</a></li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#reproducibility-instructions">Reproducibility Instructions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#notes">Notes</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="faq.html">Frequently Asked Questions</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="faq.html#general-questions">General Questions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#what-is-biscuit">What is Biscuit?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#when-should-i-use-biscuit">When should I use Biscuit?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#is-biscuit-production-ready">Is Biscuit production-ready?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#how-much-memory-does-biscuit-use">How much memory does Biscuit use?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="faq.html#installation-setup">Installation &amp; Setup</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#how-do-i-install-biscuit">How do I install Biscuit?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#installation-fails-with-could-not-load-library">Installation fails with “could not load library”</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#extension-creation-fails-extension-does-not-exist">Extension creation fails: “extension does not exist”</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#should-i-install-with-croaring-support">Should I install with CRoaring support?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="faq.html#index-creation">Index Creation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#how-do-i-create-a-biscuit-index">How do I create a Biscuit index?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-on-non-text-columns">Can I use Biscuit on non-text columns?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#how-long-does-index-creation-take">How long does index creation take?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-create-partial-biscuit-indexes">Can I create partial Biscuit indexes?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#how-many-columns-can-i-index">How many columns can I index?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="faq.html#query-performance">Query Performance</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#why-is-my-query-not-using-the-index">Why is my query not using the index?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#how-can-i-measure-query-performance">How can I measure query performance?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#does-biscuit-support-case-insensitive-search">Does Biscuit support case-insensitive search?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-or-conditions-with-biscuit">Can I use OR conditions with Biscuit?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#does-biscuit-support-regular-expressions">Does Biscuit support regular expressions?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#does-biscuit-optimize-count-queries">Does Biscuit optimize COUNT(*) queries?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-limit-with-biscuit">Can I use LIMIT with Biscuit?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="faq.html#index-maintenance">Index Maintenance</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#do-i-need-to-manually-maintain-the-index">Do I need to manually maintain the index?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#what-are-tombstones">What are tombstones?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#when-should-i-rebuild-the-index">When should I rebuild the index?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#how-do-i-monitor-index-health">How do I monitor index health?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#does-biscuit-support-parallel-operations">Does Biscuit support parallel operations?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="faq.html#troubleshooting">Troubleshooting</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#queries-are-slower-than-expected">Queries are slower than expected</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#index-build-fails-with-out-of-memory">Index build fails with out of memory</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#crashes-or-unexpected-restarts">Crashes or unexpected restarts</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#index-is-not-valid-error">“Index is not valid” error</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#pattern-not-matching-expected-rows">Pattern not matching expected rows</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="faq.html#advanced-topics">Advanced Topics</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-with-partitioned-tables">Can I use Biscuit with partitioned tables?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#does-biscuit-work-with-replication">Does Biscuit work with replication?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-in-read-replicas">Can I use Biscuit in read replicas?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#how-does-biscuit-handle-null-values">How does Biscuit handle NULL values?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-with-json-columns">Can I use Biscuit with JSON columns?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#does-biscuit-support-multi-byte-characters-unicode">Does Biscuit support multi-byte characters (Unicode)?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="faq.html#migration-compatibility">Migration &amp; Compatibility</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#how-do-i-migrate-from-gin-trigram">How do I migrate from GIN trigram?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-have-both-b-tree-and-biscuit-on-same-column">Can I have both B-tree and Biscuit on same column?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#how-do-i-uninstall-biscuit">How do I uninstall Biscuit?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="faq.html#getting-help">Getting Help</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#where-can-i-get-support">Where can I get support?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#how-do-i-report-a-bug">How do I report a bug?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#how-can-i-contribute">How can I contribute?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#is-there-a-slack-discord-community">Is there a Slack/Discord community?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="faq.html#roadmap">Roadmap</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#what-features-are-being-considered">What features are being considered?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="faq.html#performance-comparisons">Performance Comparisons</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="faq.html#how-does-biscuit-compare-to-other-indexes">How does Biscuit compare to other indexes?</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="faq.html#still-have-questions">Still Have Questions?</a></li>
 </ul>
 </li>
 </ul>
@@ -474,8 +625,8 @@
 </div>
 </section>
 <hr class="docutils" />
-<section id="suffix-match-fast">
-<h3>3. Suffix Match (Fast)<a class="headerlink" href="#suffix-match-fast" title="Link to this heading"></a></h3>
+<section id="suffix-match-very-fast">
+<h3>3. Suffix Match (Very Fast)<a class="headerlink" href="#suffix-match-very-fast" title="Link to this heading"></a></h3>
 <p><strong>Pattern</strong>: <code class="docutils literal notranslate"><span class="pre">'%string'</span></code> - Ends with concrete characters, starts with <code class="docutils literal notranslate"><span class="pre">%</span></code></p>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Find files with specific extension</span>
 <span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">files</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">filename</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%.pdf&#39;</span><span class="p">;</span>
@@ -637,7 +788,7 @@
 <span class="k">WHERE</span><span class="w"> </span><span class="n">sku</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;A___-___&#39;</span><span class="w">  </span><span class="c1">-- Specific format</span>
 
 <span class="c1">-- ⚠️ SLOWER: Many underscores without anchors</span>
-<span class="k">WHERE</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%_____%&#39;</span><span class="w">  </span><span class="c1">-- 5+ chars substring</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%_ab%c_%&#39;</span><span class="w">  </span><span class="c1">-- 5+ chars substring</span>
 </pre></div>
 </div>
 </section>
@@ -846,7 +997,7 @@
 <li><p>Learn about <a class="reference internal" href="multicolumn.html"><span class="std std-doc">Multi-Column Indexes</span></a></p></li>
 <li><p>Explore <a class="reference internal" href="performance.html"><span class="std std-doc">Performance Tuning</span></a></p></li>
 <li><p>Understand the <a class="reference internal" href="#architecture.md"><span class="xref myst">Architecture</span></a></p></li>
-<li><p>Check the <a class="reference internal" href="#faq.md"><span class="xref myst">FAQ</span></a></p></li>
+<li><p>Check the <a class="reference internal" href="faq.html"><span class="std std-doc">FAQ</span></a></p></li>
 </ul>
 </section>
 </section>
@@ -855,7 +1006,7 @@
            </div>
           </div>
           <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
-        <a href="quickstart.html" class="btn btn-neutral float-left" title="Quick Start Tutorial" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="api.html" class="btn btn-neutral float-left" title="API Reference" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
         <a href="multicolumn.html" class="btn btn-neutral float-right" title="Multi-Column Indexes" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
     </div>
 

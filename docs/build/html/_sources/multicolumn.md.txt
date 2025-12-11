@@ -67,7 +67,7 @@ WHERE department LIKE '%engineering%'    -- Low selectivity
 -- 3. department LIKE '%engineering%'  (Priority 50 - substring, low)
 ```
 
-**Result**: Query runs 5-10x faster by filtering aggressively first!
+**Result**: Query runs faster by filtering aggressively first!
 
 ---
 
@@ -346,7 +346,7 @@ LIMIT 10;
 -- (2x buffer for safety)
 ```
 
-**Benefit**: 5-10x faster for small LIMIT values!
+**Benefit**: Faster for small LIMIT values!
 
 ---
 
@@ -410,7 +410,7 @@ USING biscuit (col1, col2, col3, col4, col5, col6, col7, col8);
 
 **Problem**: Larger index, slower builds, more memory
 
-**Solution**: Index only frequently-queried columns (3-5 max recommended)
+**Solution**: Index only frequently-queried columns 
 
 ---
 
@@ -476,14 +476,3 @@ DROP INDEX idx_category;
 -  Understand the [Architecture](architecture.md)
 -  Review [Pattern Syntax](patterns.md)
 -  Check the [FAQ](faq.md)
-
----
-
-## Examples Repository
-
-More examples at: `/examples/multicolumn/`
-
-- `user_search.sql` - User management queries
-- `product_catalog.sql` - E-commerce search
-- `log_analysis.sql` - Application log filtering
-- `document_search.sql` - Document management

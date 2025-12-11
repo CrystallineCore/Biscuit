@@ -3,11 +3,11 @@
 -- PostgreSQL 15+ compatible with full CRUD support and multi-column indexes
 --
 -- Features:
+-- - LIKE and ILIKE support (case-sensitive and case-insensitive)
 -- - O(1) lazy deletion with tombstones
 -- - Incremental insert/update
 -- - Automatic slot reuse
 -- - Full VACUUM integration
--- - Optimized pattern matching for LIKE queries
 -- - Multi-column index support
 -- - Mixed data type support
 
@@ -29,7 +29,7 @@ COMMENT ON FUNCTION biscuit_handler(internal) IS
 CREATE ACCESS METHOD biscuit TYPE INDEX HANDLER biscuit_handler;
 
 COMMENT ON ACCESS METHOD biscuit IS 
-'Biscuit index access method: High-performance pattern matching for LIKE queries with multi-column support';
+'Biscuit index access method: High-performance pattern matching for LIKE/ILIKE queries with multi-column support';
 
 -- ==================== OPERATOR SUPPORT ====================
 
@@ -40,7 +40,7 @@ AS 'MODULE_PATHNAME', 'biscuit_like_support'
 LANGUAGE C STRICT;
 
 COMMENT ON FUNCTION biscuit_like_support(internal) IS
-'Support function that tells the planner Biscuit can handle LIKE pattern matching';
+'Support function that tells the planner Biscuit can handle LIKE/ILIKE pattern matching';
 
 -- ==================== DIAGNOSTIC FUNCTIONS ====================
 
@@ -56,29 +56,23 @@ Usage: SELECT biscuit_index_stats(''index_name''::regclass::oid);';
 
 -- ==================== OPERATOR CLASSES ====================
 
--- Default operator class for text types (text, varchar, bpchar)
+-- CRITICAL FIX: Only create ONE operator class per type
+-- Each operator class registers operators ONCE in the operator family
+-- DO NOT create multiple classes for the same type (no separate varchar/bpchar classes)
+
+-- Default operator class for TEXT type
+-- Supports: LIKE (~~), NOT LIKE (!~~), ILIKE (~~*), NOT ILIKE (!~~*)
 CREATE OPERATOR CLASS biscuit_text_ops
 DEFAULT FOR TYPE text USING biscuit AS
-    OPERATOR 1 ~~ (text, text),          -- LIKE operator
-    OPERATOR 2 !~~ (text, text),     -- NOT LIKE operator
+    OPERATOR 1 ~~ (text, text),      -- LIKE
+    OPERATOR 2 !~~ (text, text),     -- NOT LIKE
+    OPERATOR 3 ~~* (text, text),     -- ILIKE (case-insensitive)
+    OPERATOR 4 !~~* (text, text),    -- NOT ILIKE (case-insensitive)
     FUNCTION 1 biscuit_like_support(internal);
 
 COMMENT ON OPERATOR CLASS biscuit_text_ops USING biscuit IS
-'Default operator class for Biscuit indexes on text columns - supports LIKE and ILIKE queries';
-
--- Operator class for VARCHAR
-CREATE OPERATOR CLASS biscuit_varchar_ops
-DEFAULT FOR TYPE varchar USING biscuit AS
-    OPERATOR 1 ~~ (text, text),
-    OPERATOR 2 ~~* (text, text),
-    FUNCTION 1 biscuit_like_support(internal);
-
--- Operator class for CHAR
-CREATE OPERATOR CLASS biscuit_bpchar_ops
-DEFAULT FOR TYPE bpchar USING biscuit AS
-    OPERATOR 1 ~~ (text, text),
-    OPERATOR 2 ~~* (text, text),
-    FUNCTION 1 biscuit_like_support(internal);
+'Operator class for text types - supports LIKE, NOT LIKE, ILIKE, NOT ILIKE. 
+VARCHAR and CHAR types will implicitly cast to text to use this class.';
 
 -- ==================== HELPER VIEWS ====================
 
@@ -111,7 +105,7 @@ ORDER BY
     n.nspname, c.relname;
 
 COMMENT ON VIEW biscuit_indexes IS
-'Shows all Biscuit indexes in the current database with their tables, columns, and sizes. Supports multi-column indexes.';
+'Shows all Biscuit indexes in the current database with their tables, columns, and sizes';
 
 -- Detailed multi-column index view
 CREATE VIEW biscuit_indexes_detailed AS
@@ -140,119 +134,32 @@ ORDER BY
     n.nspname, c.relname;
 
 COMMENT ON VIEW biscuit_indexes_detailed IS
-'Detailed view of Biscuit indexes showing all columns and their types for multi-column indexes';
+'Detailed view of Biscuit indexes showing all columns and their types';
 
--- ==================== USAGE EXAMPLES ====================
+-- Verification view for operators
+CREATE VIEW biscuit_operators AS
+SELECT
+    amopstrategy AS strategy,
+    oprname AS operator,
+    format_type(oprleft, NULL) AS left_type,
+    format_type(oprright, NULL) AS right_type,
+    CASE amopstrategy
+        WHEN 1 THEN 'LIKE'
+        WHEN 2 THEN 'NOT LIKE'
+        WHEN 3 THEN 'ILIKE'
+        WHEN 4 THEN 'NOT ILIKE'
+        ELSE 'UNKNOWN'
+    END AS description
+FROM pg_amop
+JOIN pg_operator ON pg_amop.amopopr = pg_operator.oid
+JOIN pg_opfamily ON pg_amop.amopfamily = pg_opfamily.oid
+WHERE pg_opfamily.opfname = 'biscuit_ops'
+ORDER BY amopstrategy;
 
--- Example queries (commented out - for documentation)
-/*
+COMMENT ON VIEW biscuit_operators IS
+'Shows which operators are registered for Biscuit indexes';
 
--- ==================== SINGLE-COLUMN EXAMPLES ====================
-
--- Basic index creation
-CREATE INDEX idx_username ON users USING biscuit(username);
-CREATE INDEX idx_email ON users USING biscuit(email);
-
--- Case-insensitive index (use LOWER())
-CREATE INDEX idx_username_lower ON users USING biscuit(LOWER(username));
-
--- Partial index (only active users)
-CREATE INDEX idx_active_users ON users USING biscuit(username)
-WHERE status = 'active';
-
--- Query examples that use the index
-SELECT * FROM users WHERE username LIKE 'john%';        -- Prefix
-SELECT * FROM users WHERE email LIKE '%@gmail.com';     -- Suffix
-SELECT * FROM users WHERE username LIKE '%admin%';      -- Contains
-SELECT * FROM users WHERE username LIKE 'user_1%5';     -- Complex
-
--- ==================== MULTI-COLUMN EXAMPLES ====================
-
--- Multi-column indexes (NEW in v1.0!)
-CREATE INDEX idx_name_email ON users USING biscuit(first_name, last_name);
-CREATE INDEX idx_full_contact ON users USING biscuit(first_name, last_name, email);
-
--- Mixed type multi-column index
-CREATE INDEX idx_user_profile ON user_profiles USING biscuit(username, age, city);
-
--- Query multi-column indexes
-SELECT * FROM users 
-WHERE first_name LIKE 'John%' AND last_name LIKE 'S%';
-
-SELECT * FROM user_profiles 
-WHERE username LIKE 'admin%' AND age::text LIKE '3%' AND city LIKE 'New%';
-
--- ==================== MAINTENANCE ====================
-
--- Get index statistics
-SELECT biscuit_index_stats('idx_username'::regclass::oid);
-
--- View all Biscuit indexes
-SELECT * FROM biscuit_indexes;
-
--- View detailed multi-column info
-SELECT * FROM biscuit_indexes_detailed;
-
--- List indexes on a specific table
-SELECT * FROM biscuit_indexes WHERE table_name = 'users';
-
--- Force index usage for testing
-SET enable_seqscan = off;
-EXPLAIN ANALYZE SELECT * FROM users WHERE username LIKE '%test%';
-SET enable_seqscan = on;
-
--- Maintenance
-VACUUM ANALYZE users;           -- Clean up tombstones
-REINDEX INDEX idx_username;     -- Rebuild if needed
-
--- ==================== TYPE CONVERSION EXAMPLES ====================
-
--- Biscuit automatically handles type conversion for common types:
--- - TEXT, VARCHAR, CHAR (native)
--- - INTEGER, BIGINT (converted to zero-padded sortable strings)
--- - FLOAT, DOUBLE PRECISION (converted to scientific notation)
--- - DATE, TIMESTAMP (converted to sortable integers)
--- - BOOLEAN (converted to 't'/'f')
-
--- Example: Mixed type index
-CREATE TABLE products (
-    id SERIAL,
-    name TEXT,
-    price NUMERIC,
-    created_date DATE
-);
-
-CREATE INDEX idx_product_search ON products USING biscuit(name, price, created_date);
-
--- Query will work seamlessly
-SELECT * FROM products 
-WHERE name LIKE 'Widget%' 
-  AND price::text LIKE '9%'
-  AND created_date::text LIKE '2024%';
-
-*/
-
--- ==================== GRANT PERMISSIONS ====================
-
--- Grant execute on functions to public (read-only diagnostic function)
-GRANT EXECUTE ON FUNCTION biscuit_index_stats(oid) TO PUBLIC;
-
--- ==================== VERSION INFO ====================
-
--- Store extension version information
-CREATE TABLE IF NOT EXISTS biscuit_version (
-    version text PRIMARY KEY,
-    installed_at timestamptz DEFAULT now(),
-    description text
-);
-
-INSERT INTO biscuit_version (version, description) VALUES
-    ('1.0', 'Initial release with full CRUD support, O(1) deletion, multi-column indexes, and mixed type support');
-
-COMMENT ON TABLE biscuit_version IS
-'Version history for the Biscuit IAM extension';
-
--- ==================== HELPFUL QUERIES ====================
+-- ==================== HELPER FUNCTIONS ====================
 
 -- Function to check multi-column capability
 CREATE FUNCTION biscuit_multicolumn_enabled()
@@ -261,4 +168,104 @@ RETURNS boolean AS $$
 $$ LANGUAGE SQL STABLE;
 
 COMMENT ON FUNCTION biscuit_multicolumn_enabled() IS
-'Returns true if multi-column indexing is enabled for Biscuit indexes';
+'Returns true if multi-column indexing is enabled';
+
+-- Function to verify ILIKE support
+CREATE FUNCTION biscuit_ilike_enabled()
+RETURNS boolean AS $$
+    SELECT EXISTS(
+        SELECT 1 FROM pg_amop
+        JOIN pg_operator ON pg_amop.amopopr = pg_operator.oid
+        JOIN pg_opfamily ON pg_amop.amopfamily = pg_opfamily.oid
+        WHERE pg_opfamily.opfname = 'biscuit_ops'
+        AND oprname = '~~*'
+        AND amopstrategy = 3
+    );
+$$ LANGUAGE SQL STABLE;
+
+COMMENT ON FUNCTION biscuit_ilike_enabled() IS
+'Returns true if ILIKE (case-insensitive) support is enabled';
+
+-- ==================== VERSION INFO ====================
+
+CREATE TABLE IF NOT EXISTS biscuit_version (
+    version text PRIMARY KEY,
+    installed_at timestamptz DEFAULT now(),
+    description text
+);
+
+INSERT INTO biscuit_version (version, description) VALUES
+    ('1.0', 'Initial release: LIKE/ILIKE support, multi-column indexes, full CRUD, type conversion');
+
+COMMENT ON TABLE biscuit_version IS
+'Version history for the Biscuit extension';
+
+-- ==================== GRANT PERMISSIONS ====================
+
+GRANT EXECUTE ON FUNCTION biscuit_index_stats(oid) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION biscuit_multicolumn_enabled() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION biscuit_ilike_enabled() TO PUBLIC;
+GRANT SELECT ON biscuit_indexes TO PUBLIC;
+GRANT SELECT ON biscuit_indexes_detailed TO PUBLIC;
+GRANT SELECT ON biscuit_operators TO PUBLIC;
+
+-- ==================== USAGE EXAMPLES (DOCUMENTATION) ====================
+
+COMMENT ON EXTENSION biscuit IS 
+'Biscuit Index Access Method v1.0
+
+FEATURES:
+- Fast LIKE pattern matching (prefix, suffix, contains)
+- Case-insensitive ILIKE support
+- Multi-column indexes
+- Full CRUD support with O(1) deletion
+- Automatic type conversion (int, date, timestamp, etc.)
+
+QUICK START:
+
+-- Single column index
+CREATE INDEX idx_users_name ON users USING biscuit(name);
+
+-- Multi-column index (NEW!)
+CREATE INDEX idx_users_multi ON users USING biscuit(first_name, last_name);
+
+-- Works on VARCHAR and CHAR too (implicit cast to text)
+CREATE INDEX idx_users_email ON users USING biscuit(email::varchar);
+
+QUERY EXAMPLES:
+
+-- LIKE queries (case-sensitive)
+SELECT * FROM users WHERE name LIKE ''John%'';        -- Prefix
+SELECT * FROM users WHERE name LIKE ''%Smith'';       -- Suffix  
+SELECT * FROM users WHERE name LIKE ''%admin%'';      -- Contains
+SELECT * FROM users WHERE name NOT LIKE ''test%'';    -- Negation
+
+-- ILIKE queries (case-insensitive) - NEW!
+SELECT * FROM users WHERE name ILIKE ''john%'';       -- Case-insensitive prefix
+SELECT * FROM users WHERE name ILIKE ''%SMITH'';      -- Case-insensitive suffix
+SELECT * FROM users WHERE name NOT ILIKE ''ADMIN%'';  -- Case-insensitive negation
+
+-- Multi-column queries
+SELECT * FROM users 
+WHERE first_name LIKE ''J%'' AND last_name LIKE ''S%'';
+
+DIAGNOSTICS:
+
+-- View all Biscuit indexes
+SELECT * FROM biscuit_indexes;
+
+-- Get detailed stats
+SELECT biscuit_index_stats(''idx_users_name''::regclass);
+
+-- Check features
+SELECT biscuit_ilike_enabled();        -- Should return true
+SELECT biscuit_multicolumn_enabled();  -- Should return true
+
+-- View supported operators
+SELECT * FROM biscuit_operators;
+
+MAINTENANCE:
+
+VACUUM ANALYZE users;        -- Cleanup tombstones
+REINDEX INDEX idx_users_name; -- Rebuild if needed
+';

@@ -59,9 +59,11 @@ typedef struct {
 #define BTGreaterEqualStrategyNumber 4
 #define BTGreaterStrategyNumber     5
 
-/* Biscuit LIKE strategies */
 #define BISCUIT_LIKE_STRATEGY       1
-#define BISCUIT_NOT_LIKE_STRATEGY   2  /* Add this */
+#define BISCUIT_NOT_LIKE_STRATEGY   2
+#define BISCUIT_ILIKE_STRATEGY      3  // NEW: Case-insensitive LIKE
+#define BISCUIT_NOT_ILIKE_STRATEGY  4  // NEW: Case-insensitive NOT LIKE
+
 
 /* Safe memory management macros */
 #define SAFE_PFREE(ptr) do { \
@@ -270,7 +272,7 @@ biscuit_cache_insert(Oid indexoid, BiscuitIndex *idx)
      }
  }
 
-/* Forward declare Roaring functions */
+/* ==================== NOW Forward Declarations ==================== */
 static inline RoaringBitmap* biscuit_roaring_create(void);
 static inline void biscuit_roaring_add(RoaringBitmap *rb, uint32_t value);
 static inline void biscuit_roaring_remove(RoaringBitmap *rb, uint32_t value);
@@ -283,22 +285,24 @@ static inline void biscuit_roaring_or_inplace(RoaringBitmap *a, const RoaringBit
 static inline void biscuit_roaring_andnot_inplace(RoaringBitmap *a, const RoaringBitmap *b);
 static inline uint32_t* biscuit_roaring_to_array(const RoaringBitmap *rb, uint64_t *count);
 
-/* Index metapage and page structures */
+/* ==================== NEW: ParsedPattern must be defined BEFORE forward declaration ==================== */
+typedef struct {
+    char **parts;
+    int *part_lens;
+    int part_count;
+    bool starts_percent;
+    bool ends_percent;
+} ParsedPattern;
+/* ==================== CRITICAL: Pattern parsing forward declarations ==================== */
+static ParsedPattern* biscuit_parse_pattern(const char *pattern);
+static void biscuit_free_parsed_pattern(ParsedPattern *parsed);
+
+/* Index metapage and page structures - ALREADY DEFINED ABOVE */
 #define BISCUIT_MAGIC 0x42495343  /* "BISC" */
 #define BISCUIT_VERSION 1
 #define BISCUIT_METAPAGE_BLKNO 0
-#define MAX_POSITIONS 256
 #define CHAR_RANGE 256
 #define TOMBSTONE_CLEANUP_THRESHOLD 1000
-
-typedef struct BiscuitMetaPageData {
-    uint32 magic;
-    uint32 version;
-    BlockNumber root;
-    uint32 num_records;
-} BiscuitMetaPageData;
-
-typedef BiscuitMetaPageData *BiscuitMetaPage;
 
 /* Position entry for character indices */
 typedef struct {
@@ -312,6 +316,17 @@ typedef struct {
     int capacity;
 } CharIndex;
 
+
+
+/* ==================== FIX: BiscuitMetaPageData typedef ==================== */
+typedef struct BiscuitMetaPageData {
+    uint32 magic;
+    uint32 version;
+    BlockNumber root;
+    uint32 num_records;
+} BiscuitMetaPageData;
+
+typedef BiscuitMetaPageData *BiscuitMetaPage;
 /*
  * CRITICAL FIX: Multi-Column Biscuit with Per-Column Bitmap Indices
  * 
@@ -323,12 +338,20 @@ typedef struct {
 
 typedef struct {
     /* Per-column Biscuit indices */
-    CharIndex pos_idx[CHAR_RANGE];      /* CHANGED: array not pointer */
-    CharIndex neg_idx[CHAR_RANGE];      /* CHANGED: array not pointer */
+    CharIndex pos_idx[CHAR_RANGE];
+    CharIndex neg_idx[CHAR_RANGE];
     RoaringBitmap *char_cache[CHAR_RANGE];
     RoaringBitmap **length_bitmaps;
     RoaringBitmap **length_ge_bitmaps;
-    int max_length;                     /* CHANGED: scalar not pointer */
+    int max_length;
+    
+    /* NEW: Add case-insensitive fields */
+    CharIndex pos_idx_lower[CHAR_RANGE];
+    CharIndex neg_idx_lower[CHAR_RANGE];
+    RoaringBitmap *char_cache_lower[CHAR_RANGE];
+    RoaringBitmap **length_bitmaps_lower;
+    RoaringBitmap **length_ge_bitmaps_lower;
+    int max_length_lower;
 } ColumnIndex;
 
 typedef struct BiscuitIndex {
@@ -348,6 +371,17 @@ typedef struct BiscuitIndex {
     RoaringBitmap **length_ge_bitmaps_legacy;
     int max_length_legacy;
     int max_len;
+
+    /* NEW: Case-insensitive index (for ILIKE) */
+    CharIndex pos_idx_lower[CHAR_RANGE];
+    CharIndex neg_idx_lower[CHAR_RANGE];
+    RoaringBitmap *char_cache_lower[CHAR_RANGE];
+    RoaringBitmap **length_bitmaps_lower;
+    RoaringBitmap **length_ge_bitmaps_lower;
+    int max_length_lower;
+    
+    /* NEW: Lowercase data cache */
+    char **data_cache_lower;
     
     ItemPointerData *tids;
     char **data_cache;
@@ -378,6 +412,45 @@ typedef struct {
     int limit_remaining;         /* Tracks LIMIT countdown, -1 = no limit */
 } BiscuitScanOpaque;
 
+
+/*
+ * Convert string to lowercase using PostgreSQL's locale-aware lower() function.
+ * Uses the database default collation (InvalidOid), which is stable and safe
+ * for index operations and does not require fcinfo.
+ */
+static char* 
+biscuit_str_tolower(const char *str, int len)
+{
+    char *result;
+    int i;
+    
+    /* Handle empty string */
+    if (len == 0) {
+        return pstrdup("");
+    }
+    
+    /* Allocate result buffer (same length as input + null terminator) */
+    result = (char *)palloc(len + 1);
+    
+    /* Convert each character to lowercase */
+    for (i = 0; i < len; i++) {
+        /*
+         * pg_tolower() is PostgreSQL's internal function that converts
+         * a single character to lowercase. It handles:
+         * - ASCII letters (A-Z → a-z)
+         * - Extended ASCII (128-255) based on ctype locale
+         * - Already lowercase characters (pass through unchanged)
+         * 
+         * Cast to unsigned char to handle extended ASCII properly
+         */
+        result[i] = pg_tolower((unsigned char)str[i]);
+    }
+    
+    /* Null-terminate the string */
+    result[len] = '\0';
+    
+    return result;
+}
 /* ==================== QUERY TYPE DETECTION ==================== */
 
 /*
@@ -1164,7 +1237,7 @@ biscuit_collect_tids_optimized(BiscuitIndex *idx,
      GenericXLogState *state;
      BiscuitMetaPageData *meta;
      
-     //elog(INFO, "Biscuit: Writing index metadata marker to disk");
+     //elog(DEBUG1, "Biscuit: Writing index metadata marker to disk");
      
      /* Extend relation by one block if needed */
      buf = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
@@ -1186,7 +1259,7 @@ biscuit_collect_tids_optimized(BiscuitIndex *idx,
      GenericXLogFinish(state);
      UnlockReleaseBuffer(buf);
      
-     //elog(INFO, "Biscuit: Metadata marker written (will rebuild bitmaps on load)");
+     //elog(DEBUG1, "Biscuit: Metadata marker written (will rebuild bitmaps on load)");
  }
  
  /*
@@ -1203,7 +1276,7 @@ biscuit_collect_tids_optimized(BiscuitIndex *idx,
      nblocks = RelationGetNumberOfBlocks(index);
      
      if (nblocks == 0) {
-         //elog(INFO, "Biscuit: No disk pages found, needs full rebuild");
+         //elog(DEBUG1, "Biscuit: No disk pages found, needs full rebuild");
          *num_records = 0;
          *num_columns = 0;
          *max_len = 0;
@@ -1218,7 +1291,7 @@ biscuit_collect_tids_optimized(BiscuitIndex *idx,
      /* Check if page is properly initialized */
      if (PageIsNew(page) || PageIsEmpty(page)) {
          UnlockReleaseBuffer(buf);
-         //elog(INFO, "Biscuit: Metadata page empty, needs rebuild");
+         //elog(DEBUG1, "Biscuit: Metadata page empty, needs rebuild");
          *num_records = 0;
          *num_columns = 0;
          *max_len = 0;
@@ -1243,7 +1316,7 @@ biscuit_collect_tids_optimized(BiscuitIndex *idx,
      
      UnlockReleaseBuffer(buf);
      
-     //elog(INFO, "Biscuit: Found valid metadata marker (%d records on disk)",*num_records);
+     //elog(DEBUG1, "Biscuit: Found valid metadata marker (%d records on disk)",*num_records);
      
      return true;
  }
@@ -1564,6 +1637,122 @@ static void biscuit_set_neg_bitmap(BiscuitIndex *idx, unsigned char ch, int neg_
     cidx->count++;
 }
 
+/*
+ * Mirror the existing bitmap accessor functions for lowercase index
+ */
+
+static inline RoaringBitmap* 
+biscuit_get_pos_bitmap_lower(BiscuitIndex *idx, unsigned char ch, int pos) {
+    CharIndex *cidx = &idx->pos_idx_lower[ch];
+    int left = 0, right = cidx->count - 1;
+    while (left <= right) {
+        int mid = (left + right) >> 1;
+        if (cidx->entries[mid].pos == pos)
+            return cidx->entries[mid].bitmap;
+        else if (cidx->entries[mid].pos < pos)
+            left = mid + 1;
+        else
+            right = mid - 1;
+    }
+    return NULL;
+}
+
+static inline RoaringBitmap* 
+biscuit_get_neg_bitmap_lower(BiscuitIndex *idx, unsigned char ch, int neg_offset) {
+    CharIndex *cidx = &idx->neg_idx_lower[ch];
+    int left = 0, right = cidx->count - 1;
+    while (left <= right) {
+        int mid = (left + right) >> 1;
+        if (cidx->entries[mid].pos == neg_offset)
+            return cidx->entries[mid].bitmap;
+        else if (cidx->entries[mid].pos < neg_offset)
+            left = mid + 1;
+        else
+            right = mid - 1;
+    }
+    return NULL;
+}
+
+static void 
+biscuit_set_pos_bitmap_lower(BiscuitIndex *idx, unsigned char ch, int pos, RoaringBitmap *bm) {
+    CharIndex *cidx = &idx->pos_idx_lower[ch];
+    int left = 0, right = cidx->count - 1, insert_pos = cidx->count;
+    int i;
+    
+    while (left <= right) {
+        int mid = (left + right) >> 1;
+        if (cidx->entries[mid].pos == pos) {
+            cidx->entries[mid].bitmap = bm;
+            return;
+        } else if (cidx->entries[mid].pos < pos)
+            left = mid + 1;
+        else {
+            insert_pos = mid;
+            right = mid - 1;
+        }
+    }
+    
+    if (cidx->count >= cidx->capacity) {
+        int new_cap = cidx->capacity * 2;
+        PosEntry *new_entries = (PosEntry *)palloc(new_cap * sizeof(PosEntry));
+        if (cidx->count > 0)
+            memcpy(new_entries, cidx->entries, cidx->count * sizeof(PosEntry));
+        pfree(cidx->entries);
+        cidx->entries = new_entries;
+        cidx->capacity = new_cap;
+    }
+    
+    for (i = cidx->count; i > insert_pos; i--)
+        cidx->entries[i] = cidx->entries[i - 1];
+    
+    cidx->entries[insert_pos].pos = pos;
+    cidx->entries[insert_pos].bitmap = bm;
+    cidx->count++;
+}
+
+static void 
+biscuit_set_neg_bitmap_lower(BiscuitIndex *idx, unsigned char ch, int neg_offset, RoaringBitmap *bm) {
+    CharIndex *cidx = &idx->neg_idx_lower[ch];
+    int left = 0, right = cidx->count - 1, insert_pos = cidx->count;
+    int i;
+    
+    while (left <= right) {
+        int mid = (left + right) >> 1;
+        if (cidx->entries[mid].pos == neg_offset) {
+            cidx->entries[mid].bitmap = bm;
+            return;
+        } else if (cidx->entries[mid].pos < neg_offset)
+            left = mid + 1;
+        else {
+            insert_pos = mid;
+            right = mid - 1;
+        }
+    }
+    
+    if (cidx->count >= cidx->capacity) {
+        int new_cap = cidx->capacity * 2;
+        PosEntry *new_entries = (PosEntry *)palloc(new_cap * sizeof(PosEntry));
+        if (cidx->count > 0)
+            memcpy(new_entries, cidx->entries, cidx->count * sizeof(PosEntry));
+        pfree(cidx->entries);
+        cidx->entries = new_entries;
+        cidx->capacity = new_cap;
+    }
+    
+    for (i = cidx->count; i > insert_pos; i--)
+        cidx->entries[i] = cidx->entries[i - 1];
+    
+    cidx->entries[insert_pos].pos = neg_offset;
+    cidx->entries[insert_pos].bitmap = bm;
+    cidx->count++;
+}
+
+static RoaringBitmap* 
+biscuit_get_length_ge_lower(BiscuitIndex *idx, int min_len) {
+    if (min_len >= idx->max_length_lower)
+        return biscuit_roaring_create();
+    return biscuit_roaring_copy(idx->length_ge_bitmaps_lower[min_len]);
+}
 /* ==================== PER-COLUMN BITMAP ACCESSORS ==================== */
 
 static RoaringBitmap* 
@@ -1725,6 +1914,154 @@ biscuit_get_col_length_ge(ColumnIndex *col_idx, int min_len) {
     
     return biscuit_roaring_copy(col_idx->length_ge_bitmaps[min_len]);
 }
+
+static inline RoaringBitmap* 
+biscuit_get_col_pos_bitmap_lower(ColumnIndex *col_idx, unsigned char ch, int pos) {
+    CharIndex *cidx;
+    int left = 0, right;
+    
+    if (!col_idx) {
+        return NULL;
+    }
+    
+    cidx = &col_idx->pos_idx_lower[ch];
+    
+    if (!cidx->entries) {
+        return NULL;
+    }
+    
+    right = cidx->count - 1;
+    
+    while (left <= right) {
+        int mid = (left + right) >> 1;
+        if (cidx->entries[mid].pos == pos)
+            return cidx->entries[mid].bitmap;
+        else if (cidx->entries[mid].pos < pos)
+            left = mid + 1;
+        else
+            right = mid - 1;
+    }
+    return NULL;
+}
+
+static inline RoaringBitmap* 
+biscuit_get_col_neg_bitmap_lower(ColumnIndex *col_idx, unsigned char ch, int neg_offset) {
+    CharIndex *cidx;
+    int left = 0, right;
+    
+    if (!col_idx) {
+        return NULL;
+    }
+    
+    cidx = &col_idx->neg_idx_lower[ch];
+    
+    if (!cidx->entries) {
+        return NULL;
+    }
+    
+    right = cidx->count - 1;
+    
+    while (left <= right) {
+        int mid = (left + right) >> 1;
+        if (cidx->entries[mid].pos == neg_offset)
+            return cidx->entries[mid].bitmap;
+        else if (cidx->entries[mid].pos < neg_offset)
+            left = mid + 1;
+        else
+            right = mid - 1;
+    }
+    return NULL;
+}
+
+static void 
+biscuit_set_col_pos_bitmap_lower(ColumnIndex *col_idx, unsigned char ch, int pos, RoaringBitmap *bm) {
+    CharIndex *cidx = &col_idx->pos_idx_lower[ch];
+    int left = 0, right = cidx->count - 1, insert_pos = cidx->count;
+    int i;
+    
+    while (left <= right) {
+        int mid = (left + right) >> 1;
+        if (cidx->entries[mid].pos == pos) {
+            cidx->entries[mid].bitmap = bm;
+            return;
+        } else if (cidx->entries[mid].pos < pos)
+            left = mid + 1;
+        else {
+            insert_pos = mid;
+            right = mid - 1;
+        }
+    }
+    
+    if (cidx->count >= cidx->capacity) {
+        int new_cap = cidx->capacity * 2;
+        PosEntry *new_entries = (PosEntry *)palloc(new_cap * sizeof(PosEntry));
+        if (cidx->count > 0)
+            memcpy(new_entries, cidx->entries, cidx->count * sizeof(PosEntry));
+        pfree(cidx->entries);
+        cidx->entries = new_entries;
+        cidx->capacity = new_cap;
+    }
+    
+    for (i = cidx->count; i > insert_pos; i--)
+        cidx->entries[i] = cidx->entries[i - 1];
+    
+    cidx->entries[insert_pos].pos = pos;
+    cidx->entries[insert_pos].bitmap = bm;
+    cidx->count++;
+}
+
+static void 
+biscuit_set_col_neg_bitmap_lower(ColumnIndex *col_idx, unsigned char ch, int neg_offset, RoaringBitmap *bm) {
+    CharIndex *cidx = &col_idx->neg_idx_lower[ch];
+    int left = 0, right = cidx->count - 1, insert_pos = cidx->count;
+    int i;
+    
+    while (left <= right) {
+        int mid = (left + right) >> 1;
+        if (cidx->entries[mid].pos == neg_offset) {
+            cidx->entries[mid].bitmap = bm;
+            return;
+        } else if (cidx->entries[mid].pos < neg_offset)
+            left = mid + 1;
+        else {
+            insert_pos = mid;
+            right = mid - 1;
+        }
+    }
+    
+    if (cidx->count >= cidx->capacity) {
+        int new_cap = cidx->capacity * 2;
+        PosEntry *new_entries = (PosEntry *)palloc(new_cap * sizeof(PosEntry));
+        if (cidx->count > 0)
+            memcpy(new_entries, cidx->entries, cidx->count * sizeof(PosEntry));
+        pfree(cidx->entries);
+        cidx->entries = new_entries;
+        cidx->capacity = new_cap;
+    }
+    
+    for (i = cidx->count; i > insert_pos; i--)
+        cidx->entries[i] = cidx->entries[i - 1];
+    
+    cidx->entries[insert_pos].pos = neg_offset;
+    cidx->entries[insert_pos].bitmap = bm;
+    cidx->count++;
+}
+
+static RoaringBitmap* 
+biscuit_get_col_length_ge_lower(ColumnIndex *col_idx, int min_len) {
+    if (!col_idx) {
+        return biscuit_roaring_create();
+    }
+    
+    if (!col_idx->length_ge_bitmaps_lower) {
+        return biscuit_roaring_create();
+    }
+    
+    if (min_len > col_idx->max_length_lower)
+        return biscuit_roaring_create();
+    
+    return biscuit_roaring_copy(col_idx->length_ge_bitmaps_lower[min_len]);
+}
 /* ==================== OPTIMIZED PATTERN MATCHING ==================== */
 
 static RoaringBitmap* biscuit_get_length_ge(BiscuitIndex *idx, int min_len) {
@@ -1833,13 +2170,454 @@ static RoaringBitmap* biscuit_match_part_at_end(BiscuitIndex *idx, const char *p
     return result;
 }
 
-typedef struct {
-    char **parts;
-    int *part_lens;
-    int part_count;
-    bool starts_percent;
-    bool ends_percent;
-} ParsedPattern;
+/* ==================== ILIKE PATTERN MATCHING ==================== */
+
+/*
+ * Match pattern part at position using lowercase index
+ */
+static RoaringBitmap* 
+biscuit_match_part_at_pos_ilike(BiscuitIndex *idx, const char *part, int part_len, int start_pos) {
+    RoaringBitmap *result = NULL;
+    RoaringBitmap *char_bm;
+    RoaringBitmap *len_filter;
+    int i, concrete_chars = 0;
+    int pos;
+    
+    /* Intersect all non-wildcard character constraints (lowercase) */
+    for (i = 0; i < part_len; i++) {
+        if (part[i] == '_') {
+            continue;
+        }
+        
+        concrete_chars++;
+        pos = start_pos + i;
+        char_bm = biscuit_get_pos_bitmap_lower(idx, (unsigned char)part[i], pos);
+        
+        if (!char_bm) {
+            if (result) biscuit_roaring_free(result);
+            return biscuit_roaring_create();
+        }
+        
+        if (!result) {
+            result = biscuit_roaring_copy(char_bm);
+        } else {
+            biscuit_roaring_and_inplace(result, char_bm);
+            if (biscuit_roaring_is_empty(result))
+                return result;
+        }
+    }
+    
+    /* All wildcards case */
+    if (concrete_chars == 0) {
+        result = biscuit_get_length_ge_lower(idx, start_pos + part_len);
+    } else {
+        len_filter = biscuit_get_length_ge_lower(idx, start_pos + part_len);
+        biscuit_roaring_and_inplace(result, len_filter);
+        biscuit_roaring_free(len_filter);
+    }
+    
+    return result;
+}
+
+/*
+ * Match pattern part at end using lowercase index
+ */
+static RoaringBitmap* 
+biscuit_match_part_at_end_ilike(BiscuitIndex *idx, const char *part, int part_len) {
+    RoaringBitmap *result = NULL;
+    RoaringBitmap *char_bm;
+    RoaringBitmap *len_filter;
+    int i, concrete_chars = 0;
+    int neg_pos;
+    
+    /* Intersect all non-wildcard character constraints (lowercase) */
+    for (i = 0; i < part_len; i++) {
+        if (part[i] == '_') {
+            continue;
+        }
+        
+        concrete_chars++;
+        neg_pos = -(part_len - i);
+        char_bm = biscuit_get_neg_bitmap_lower(idx, (unsigned char)part[i], neg_pos);
+        
+        if (!char_bm) {
+            if (result) biscuit_roaring_free(result);
+            return biscuit_roaring_create();
+        }
+        
+        if (!result) {
+            result = biscuit_roaring_copy(char_bm);
+        } else {
+            biscuit_roaring_and_inplace(result, char_bm);
+            if (biscuit_roaring_is_empty(result))
+                return result;
+        }
+    }
+    
+    /* All wildcards case */
+    if (concrete_chars == 0) {
+        result = biscuit_get_length_ge_lower(idx, part_len);
+    } else {
+        len_filter = biscuit_get_length_ge_lower(idx, part_len);
+        biscuit_roaring_and_inplace(result, len_filter);
+        biscuit_roaring_free(len_filter);
+    }
+    
+    return result;
+}
+
+/*
+ * Recursive windowed matching for ILIKE patterns
+ */
+static void 
+biscuit_recursive_windowed_match_ilike(
+    RoaringBitmap *result, BiscuitIndex *idx,
+    const char **parts, int *part_lens, int part_count,
+    bool ends_percent, int part_idx, int min_pos,
+    RoaringBitmap *current_candidates, int max_len)
+{
+    int remaining_len, max_pos, pos, i;
+    RoaringBitmap *end_match;
+    RoaringBitmap *length_constraint;
+    RoaringBitmap *part_match;
+    RoaringBitmap *next_candidates;
+    int min_required_length;
+    int next_min_pos;
+    
+    /* Base case */
+    if (part_idx >= part_count) {
+        biscuit_roaring_or_inplace(result, current_candidates);
+        return;
+    }
+    
+    /* Calculate minimum length for remaining parts */
+    remaining_len = 0;
+    for (i = part_idx + 1; i < part_count; i++)
+        remaining_len += part_lens[i];
+    
+    /* Last part without trailing % must match at end */
+    if (part_idx == part_count - 1 && !ends_percent) {
+        end_match = biscuit_match_part_at_end_ilike(idx, parts[part_idx], part_lens[part_idx]);
+        
+        if (!end_match) {
+            return;
+        }
+        
+        biscuit_roaring_and_inplace(end_match, current_candidates);
+        
+        min_required_length = min_pos + part_lens[part_idx];
+        length_constraint = biscuit_get_length_ge_lower(idx, min_required_length);
+        biscuit_roaring_and_inplace(end_match, length_constraint);
+        biscuit_roaring_free(length_constraint);
+        
+        biscuit_roaring_or_inplace(result, end_match);
+        biscuit_roaring_free(end_match);
+        return;
+    }
+    
+    /* Try all valid positions */
+    max_pos = max_len - part_lens[part_idx] - remaining_len;
+    if (min_pos > max_pos) {
+        return;
+    }
+    
+    for (pos = min_pos; pos <= max_pos; pos++) {
+        part_match = biscuit_match_part_at_pos_ilike(idx, parts[part_idx], part_lens[part_idx], pos);
+        
+        if (!part_match) {
+            continue;
+        }
+        
+        next_candidates = biscuit_roaring_copy(current_candidates);
+        biscuit_roaring_and_inplace(next_candidates, part_match);
+        biscuit_roaring_free(part_match);
+        
+        if (biscuit_roaring_is_empty(next_candidates)) {
+            biscuit_roaring_free(next_candidates);
+            continue;
+        }
+        
+        next_min_pos = pos + part_lens[part_idx];
+        
+        biscuit_recursive_windowed_match_ilike(
+            result, idx, parts, part_lens, part_count,
+            ends_percent, part_idx + 1, next_min_pos, 
+            next_candidates, max_len
+        );
+        
+        biscuit_roaring_free(next_candidates);
+    }
+}
+
+
+static void
+biscuit_free_parsed_pattern(ParsedPattern *parsed)
+{
+    int i;
+    
+    if (!parsed)
+        return;
+    
+    if (parsed->parts) {
+        for (i = 0; i < parsed->part_count; i++) {
+            if (parsed->parts[i]) {
+                pfree(parsed->parts[i]);
+                parsed->parts[i] = NULL;
+            }
+        }
+        pfree(parsed->parts);
+    }
+    
+    if (parsed->part_lens) {
+        pfree(parsed->part_lens);
+    }
+    
+    pfree(parsed);
+}
+
+
+/*
+ * Main ILIKE query function - routes to lowercase index
+ */
+
+
+static RoaringBitmap* 
+biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern) {
+    char *pattern_lower = NULL;
+    int plen = strlen(pattern);
+    ParsedPattern *parsed = NULL;
+    int min_len, i;
+    RoaringBitmap *result = NULL;
+    int wildcard_count = 0, percent_count = 0;
+    bool only_wildcards = true;
+    
+    /* CRITICAL FIX: Convert pattern to lowercase FIRST */
+    pattern_lower = biscuit_str_tolower(pattern, plen);
+    plen = strlen(pattern_lower);
+    
+    PG_TRY();
+    {
+        /* SAFETY CHECK: Ensure lowercase index is initialized */
+        if (idx->max_length_lower == 0 || !idx->length_ge_bitmaps_lower) {
+            elog(WARNING, "Biscuit: Lowercase index not initialized for ILIKE");
+            pfree(pattern_lower);
+            return biscuit_roaring_create();
+        }
+        
+        /* ========== FAST PATH 1: Empty pattern '' ========== */
+        if (plen == 0) {
+            if (idx->length_bitmaps_lower && idx->length_bitmaps_lower[0]) {
+                result = biscuit_roaring_copy(idx->length_bitmaps_lower[0]);
+            } else {
+                result = biscuit_roaring_create();
+            }
+            pfree(pattern_lower);
+            return result;
+        }
+        
+        /* ========== FAST PATH 2: Single '%' matches everything ========== */
+        if (plen == 1 && pattern_lower[0] == '%') {
+            result = biscuit_roaring_create();
+            for (i = 0; i < idx->num_records; i++) {
+                #ifdef HAVE_ROARING
+                if (!roaring_bitmap_contains(idx->tombstones, (uint32_t)i))
+                #else
+                uint32_t block = i >> 6;
+                uint32_t bit = i & 63;
+                bool tombstoned = (block < idx->tombstones->num_blocks &&
+                                  (idx->tombstones->blocks[block] & (1ULL << bit)));
+                if (!tombstoned)
+                #endif
+                    biscuit_roaring_add(result, i);
+            }
+            pfree(pattern_lower);
+            return result;
+        }
+        
+        /* ========== FAST PATH 3: Analyze for pure wildcards (% and _ only) ========== */
+        for (i = 0; i < plen; i++) {
+            if (pattern_lower[i] == '%') {
+                percent_count++;
+            } else if (pattern_lower[i] == '_') {
+                wildcard_count++;
+            } else {
+                only_wildcards = false;
+                break;
+            }
+        }
+        
+        /* ========== FAST PATH 4 & 5: Pure wildcard patterns ========== */
+        if (only_wildcards) {
+            if (percent_count > 0) {
+                /* FAST PATH 4: Has %, so length >= wildcard_count */
+                result = biscuit_get_length_ge_lower(idx, wildcard_count);
+            } else {
+                /* FAST PATH 5: Only underscores → EXACT length match */
+                if (wildcard_count < idx->max_length_lower && 
+                    idx->length_bitmaps_lower[wildcard_count]) {
+                    result = biscuit_roaring_copy(idx->length_bitmaps_lower[wildcard_count]);
+                } else {
+                    result = biscuit_roaring_create();
+                }
+            }
+            pfree(pattern_lower);
+            return result;
+        }
+        
+        /* ========== SLOW PATH: Pattern contains concrete characters ========== */
+        
+        /* Parse the LOWERCASE pattern */
+        parsed = biscuit_parse_pattern(pattern_lower);
+        
+        /* All percent signs (shouldn't happen, but handle gracefully) */
+        if (parsed->part_count == 0) {
+            result = biscuit_roaring_create();
+            for (i = 0; i < idx->num_records; i++) {
+                #ifdef HAVE_ROARING
+                if (!roaring_bitmap_contains(idx->tombstones, (uint32_t)i))
+                #else
+                uint32_t block = i >> 6;
+                uint32_t bit = i & 63;
+                bool tombstoned = (block < idx->tombstones->num_blocks &&
+                                  (idx->tombstones->blocks[block] & (1ULL << bit)));
+                if (!tombstoned)
+                #endif
+                    biscuit_roaring_add(result, i);
+            }
+            biscuit_free_parsed_pattern(parsed);
+            pfree(pattern_lower);
+            return result;
+        }
+        
+        /* Calculate minimum required length */
+        min_len = 0;
+        for (i = 0; i < parsed->part_count; i++)
+            min_len += parsed->part_lens[i];
+        
+        /* ==================== OPTIMIZED SINGLE PART PATTERNS ==================== */
+        if (parsed->part_count == 1) {
+            if (!parsed->starts_percent && !parsed->ends_percent) {
+                /* EXACT: 'abc' or 'a_c' - must match exactly at position 0 with exact length */
+                result = biscuit_match_part_at_pos_ilike(idx, parsed->parts[0], 
+                                                         parsed->part_lens[0], 0);
+                if (result && min_len < idx->max_length_lower && 
+                    idx->length_bitmaps_lower[min_len]) {
+                    biscuit_roaring_and_inplace(result, idx->length_bitmaps_lower[min_len]);
+                } else if (!result || min_len >= idx->max_length_lower) {
+                    if (result) biscuit_roaring_free(result);
+                    result = biscuit_roaring_create();
+                }
+            } else if (!parsed->starts_percent) {
+                /* PREFIX: 'abc%' - starts at position 0, any length >= min_len */
+                result = biscuit_match_part_at_pos_ilike(idx, parsed->parts[0], 
+                                                         parsed->part_lens[0], 0);
+                if (!result) result = biscuit_roaring_create();
+            } else if (!parsed->ends_percent) {
+                /* SUFFIX: '%abc' - ends at end, any length >= min_len */
+                result = biscuit_match_part_at_end_ilike(idx, parsed->parts[0], 
+                                                         parsed->part_lens[0]);
+                if (!result) result = biscuit_roaring_create();
+            } else {
+                /* SUBSTRING: '%abc%' - can match anywhere */
+                result = biscuit_roaring_create();
+                for (i = 0; i <= idx->max_length_lower - parsed->part_lens[0]; i++) {
+                    RoaringBitmap *part_match = biscuit_match_part_at_pos_ilike(
+                        idx, parsed->parts[0], parsed->part_lens[0], i);
+                    if (part_match) {
+                        biscuit_roaring_or_inplace(result, part_match);
+                        biscuit_roaring_free(part_match);
+                    }
+                }
+            }
+        }
+        /* ==================== OPTIMIZED TWO PART PATTERNS ==================== */
+        else if (parsed->part_count == 2 && !parsed->starts_percent && !parsed->ends_percent) {
+            /* INFIX: 'abc%def' - first at start, last at end */
+            RoaringBitmap *prefix_match;
+            RoaringBitmap *suffix_match;
+            RoaringBitmap *length_filter;
+            
+            prefix_match = biscuit_match_part_at_pos_ilike(idx, parsed->parts[0], 
+                                                           parsed->part_lens[0], 0);
+            suffix_match = biscuit_match_part_at_end_ilike(idx, parsed->parts[1], 
+                                                           parsed->part_lens[1]);
+            
+            if (!prefix_match || !suffix_match) {
+                if (prefix_match) biscuit_roaring_free(prefix_match);
+                if (suffix_match) biscuit_roaring_free(suffix_match);
+                result = biscuit_roaring_create();
+            } else {
+                biscuit_roaring_and_inplace(prefix_match, suffix_match);
+                biscuit_roaring_free(suffix_match);
+                
+                length_filter = biscuit_get_length_ge_lower(idx, min_len);
+                if (length_filter) {
+                    biscuit_roaring_and_inplace(prefix_match, length_filter);
+                    biscuit_roaring_free(length_filter);
+                }
+                
+                result = prefix_match;
+            }
+        }
+        /* ==================== COMPLEX MULTI-PART PATTERNS ==================== */
+        else {
+            RoaringBitmap *candidates;
+            
+            result = biscuit_roaring_create();
+            candidates = biscuit_get_length_ge_lower(idx, min_len);
+            
+            if (!candidates || biscuit_roaring_is_empty(candidates)) {
+                if (candidates) biscuit_roaring_free(candidates);
+            } else {
+                if (!parsed->starts_percent) {
+                    RoaringBitmap *first_part_match = biscuit_match_part_at_pos_ilike(
+                        idx, parsed->parts[0], parsed->part_lens[0], 0);
+                    
+                    if (first_part_match) {
+                        biscuit_roaring_and_inplace(first_part_match, candidates);
+                        biscuit_roaring_free(candidates);
+                        
+                        if (!biscuit_roaring_is_empty(first_part_match)) {
+                            biscuit_recursive_windowed_match_ilike(
+                                result, idx,
+                                (const char **)parsed->parts, parsed->part_lens,
+                                parsed->part_count, parsed->ends_percent,
+                                1, parsed->part_lens[0], first_part_match, 
+                                idx->max_length_lower
+                            );
+                        }
+                        biscuit_roaring_free(first_part_match);
+                    } else {
+                        biscuit_roaring_free(candidates);
+                    }
+                } else {
+                    biscuit_recursive_windowed_match_ilike(
+                        result, idx,
+                        (const char **)parsed->parts, parsed->part_lens,
+                        parsed->part_count, parsed->ends_percent,
+                        0, 0, candidates, idx->max_length_lower
+                    );
+                    biscuit_roaring_free(candidates);
+                }
+            }
+        }
+        
+        /* Cleanup */
+        biscuit_free_parsed_pattern(parsed);
+        pfree(pattern_lower);
+    }
+    PG_CATCH();
+    {
+        /* Emergency cleanup */
+        if (parsed) biscuit_free_parsed_pattern(parsed);
+        if (result) biscuit_roaring_free(result);
+        if (pattern_lower) pfree(pattern_lower);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    
+    return result ? result : biscuit_roaring_create();
+}
 
 static ParsedPattern* biscuit_parse_pattern(const char *pattern) {
     ParsedPattern *parsed;
@@ -2006,19 +2784,19 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
     
     /* ========== FAST PATH 1: Empty pattern '' ========== */
     if (plen == 0) {
-        //elog(INFO, "Biscuit FAST PATH: Empty pattern → length[0]");
+        //elog(DEBUG1, "Biscuit FAST PATH: Empty pattern → length[0]");
         if (idx->max_length_legacy > 0 && idx->length_bitmaps_legacy[0]) {
             uint64_t count = biscuit_roaring_count(idx->length_bitmaps_legacy[0]);
-            //elog(INFO, "  → Returning %llu records with length 0", (unsigned long long)count);
+            //elog(DEBUG1, "  → Returning %llu records with length 0", (unsigned long long)count);
             return biscuit_roaring_copy(idx->length_bitmaps_legacy[0]);
         }
-        //elog(INFO, "  → No zero-length strings in index");
+        //elog(DEBUG1, "  → No zero-length strings in index");
         return biscuit_roaring_create();
     }
     
     /* ========== FAST PATH 2: Single '%' matches everything ========== */
     if (plen == 1 && pattern[0] == '%') {
-        //elog(INFO, "Biscuit FAST PATH: Single '%%' → all non-tombstoned records");
+        //elog(DEBUG1, "Biscuit FAST PATH: Single '%%' → all non-tombstoned records");
         result = biscuit_roaring_create();
         for (i = 0; i < idx->num_records; i++) {
             #ifdef HAVE_ROARING
@@ -2033,7 +2811,7 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
                 biscuit_roaring_add(result, i);
         }
         uint64_t count = biscuit_roaring_count(result);
-        //elog(INFO, "  → Matched %llu of %d records", (unsigned long long)count, idx->num_records);
+        //elog(DEBUG1, "  → Matched %llu of %d records", (unsigned long long)count, idx->num_records);
         return result;
     }
     
@@ -2054,15 +2832,15 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
         if (percent_count > 0) {
             /* FAST PATH 4: Has %, so length >= wildcard_count */
             /* Examples: '%___', '___%%', '%_%_%', etc. */
-            //elog(INFO, "Biscuit FAST PATH: Pure wildcard pattern '%s'", pattern);
-            //elog(INFO, "  → Contains %d underscores and %d percents", wildcard_count, percent_count);
-            //elog(INFO, "  → Using length_ge_bitmaps[%d] (length >= %d)", wildcard_count, wildcard_count);
+            //elog(DEBUG1, "Biscuit FAST PATH: Pure wildcard pattern '%s'", pattern);
+            //elog(DEBUG1, "  → Contains %d underscores and %d percents", wildcard_count, percent_count);
+            //elog(DEBUG1, "  → Using length_ge_bitmaps[%d] (length >= %d)", wildcard_count, wildcard_count);
             
             result = biscuit_get_length_ge(idx, wildcard_count);
             
             if (result) {
                 uint64_t count = biscuit_roaring_count(result);
-                //elog(INFO, "  → Matched %llu records with length >= %d", (unsigned long long)count, wildcard_count);
+                //elog(DEBUG1, "  → Matched %llu records with length >= %d", (unsigned long long)count, wildcard_count);
             }
             
             return result;
@@ -2070,34 +2848,34 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
         } else {
             /* FAST PATH 5: Only underscores → EXACT length match */
             /* Examples: '____', '_', '________', etc. */
-            //elog(INFO, "Biscuit FAST PATH: Pure underscore pattern '%s'", pattern);
-            //elog(INFO, "  → Pattern length: %d underscores", wildcard_count);
-            //elog(INFO, "  → Using length_bitmaps[%d] (exact length)", wildcard_count);
+            //elog(DEBUG1, "Biscuit FAST PATH: Pure underscore pattern '%s'", pattern);
+            //elog(DEBUG1, "  → Pattern length: %d underscores", wildcard_count);
+            //elog(DEBUG1, "  → Using length_bitmaps[%d] (exact length)", wildcard_count);
             
             if (wildcard_count < idx->max_length_legacy && 
                 idx->length_bitmaps_legacy[wildcard_count]) {
                 
                 uint64_t count = biscuit_roaring_count(idx->length_bitmaps_legacy[wildcard_count]);
-                //elog(INFO, "  → Matched %llu records with exact length %d", (unsigned long long)count, wildcard_count);
+                //elog(DEBUG1, "  → Matched %llu records with exact length %d", (unsigned long long)count, wildcard_count);
                 
                 return biscuit_roaring_copy(idx->length_bitmaps_legacy[wildcard_count]);
             }
             
-            //elog(INFO, "  → Length bitmap[%d] is NULL or out of range (max: %d)",  wildcard_count, idx->max_length_legacy - 1);
+            //elog(DEBUG1, "  → Length bitmap[%d] is NULL or out of range (max: %d)",  wildcard_count, idx->max_length_legacy - 1);
             return biscuit_roaring_create();
         }
     }
     
     /* ========== SLOW PATH: Pattern contains concrete characters ========== */
-    //elog(INFO, "Biscuit SLOW PATH: Pattern '%s' contains concrete characters", pattern);
-    //elog(INFO, "  → Parsing pattern and using Biscuit matching engine");
+    //elog(DEBUG1, "Biscuit SLOW PATH: Pattern '%s' contains concrete characters", pattern);
+    //elog(DEBUG1, "  → Parsing pattern and using Biscuit matching engine");
     
     /* Parse pattern into parts separated by % */
     parsed = biscuit_parse_pattern(pattern);
 
     /* All percent signs (shouldn't happen, but handle gracefully) */
     if (parsed->part_count == 0) {
-        //elog(INFO, "  → Pattern parsed to 0 parts (all %%), matching all records");
+        //elog(DEBUG1, "  → Pattern parsed to 0 parts (all %%), matching all records");
         result = biscuit_roaring_create();
         for (i = 0; i < idx->num_records; i++) {
             #ifdef HAVE_ROARING
@@ -2122,15 +2900,15 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
     for (i = 0; i < parsed->part_count; i++)
         min_len += parsed->part_lens[i];
 
-    //elog(INFO, "  → Parsed into %d parts, minimum length: %d", parsed->part_count, min_len);
+    //elog(DEBUG1, "  → Parsed into %d parts, minimum length: %d", parsed->part_count, min_len);
 
     /* ==================== OPTIMIZED SINGLE PART PATTERNS ==================== */
     if (parsed->part_count == 1) {
-        //elog(INFO, "  → Single-part pattern optimization");
+        //elog(DEBUG1, "  → Single-part pattern optimization");
         
         if (!parsed->starts_percent && !parsed->ends_percent) {
             /* EXACT: 'abc' or 'a_c' - must match exactly at position 0 with exact length */
-            //elog(INFO, "    → EXACT match: must be at position 0 with length %d", min_len);
+            //elog(DEBUG1, "    → EXACT match: must be at position 0 with length %d", min_len);
             result = biscuit_match_part_at_pos(idx, parsed->parts[0], parsed->part_lens[0], 0);
             if (min_len < idx->max_length_legacy && idx->length_bitmaps_legacy[min_len]) {
                 biscuit_roaring_and_inplace(result, idx->length_bitmaps_legacy[min_len]);
@@ -2140,15 +2918,15 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
             }
         } else if (!parsed->starts_percent) {
             /* PREFIX: 'abc%' - starts at position 0, any length >= min_len */
-            //elog(INFO, "    → PREFIX match: starts at position 0, length >= %d", min_len);
+            //elog(DEBUG1, "    → PREFIX match: starts at position 0, length >= %d", min_len);
             result = biscuit_match_part_at_pos(idx, parsed->parts[0], parsed->part_lens[0], 0);
         } else if (!parsed->ends_percent) {
             /* SUFFIX: '%abc' - ends at end, any length >= min_len */
-            //elog(INFO, "    → SUFFIX match: ends at string end, length >= %d", min_len);
+            //elog(DEBUG1, "    → SUFFIX match: ends at string end, length >= %d", min_len);
             result = biscuit_match_part_at_end(idx, parsed->parts[0], parsed->part_lens[0]);
         } else {
             /* WEDGED: '%abc%' - can match anywhere */
-            //elog(INFO, "    → SUBSTRING match: can appear anywhere");
+            //elog(DEBUG1, "    → SUBSTRING match: can appear anywhere");
             result = biscuit_roaring_create();
             for (i = 0; i <= idx->max_len - parsed->part_lens[0]; i++) {
                 RoaringBitmap *part_match = biscuit_match_part_at_pos(
@@ -2165,7 +2943,7 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
         RoaringBitmap *suffix_match;
         RoaringBitmap *length_filter;
         
-        //elog(INFO, "  → Two-part INFIX optimization: prefix + suffix");
+        //elog(DEBUG1, "  → Two-part INFIX optimization: prefix + suffix");
         
         /* Match prefix at position 0 */
         prefix_match = biscuit_match_part_at_pos(idx, parsed->parts[0], parsed->part_lens[0], 0);
@@ -2189,7 +2967,7 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
         /* Use recursive windowed matching for complex patterns */
         RoaringBitmap *candidates;
         
-        //elog(INFO, "  → Complex multi-part pattern: using recursive matching");
+        //elog(DEBUG1, "  → Complex multi-part pattern: using recursive matching");
         
         result = biscuit_roaring_create();
         
@@ -2239,13 +3017,14 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
     
     if (result) {
         uint64_t final_count = biscuit_roaring_count(result);
-        //elog(INFO, "  → Final result: %llu matches", (unsigned long long)final_count);
+        //elog(DEBUG1, "  → Final result: %llu matches", (unsigned long long)final_count);
     }
 
     return result;
 }
 
-/* ==================== MODIFY YOUR BUILD FUNCTION ==================== */
+
+/* ==================== UPDATED: biscuit_build_multicolumn WITH ILIKE SUPPORT ==================== */
 
 static IndexBuildResult *
 biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
@@ -2257,7 +3036,7 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
     int natts;
     int ch, rec_idx, col;
     MemoryContext oldcontext;
-    MemoryContext buildContext;  /* ✅ RENAMED for clarity */
+    MemoryContext buildContext;
     Oid typoutput;
     bool typIsVarlena;
     bool isnull;
@@ -2276,12 +3055,14 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
         ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                 errmsg("biscuit index requires at least one column")));
     
-    /* ✅ CRITICAL FIX: Build EVERYTHING in CacheMemoryContext */
+    elog(DEBUG1, "Biscuit: Building multi-column index with ILIKE support (%d columns)", natts);
+    
+    /* Build in CacheMemoryContext */
     buildContext = CacheMemoryContext;
     oldcontext = MemoryContextSwitchTo(buildContext);
     
-    PG_TRY();{
-        
+    PG_TRY();
+    {
         /* Initialize in-memory index */
         idx = (BiscuitIndex *)palloc0(sizeof(BiscuitIndex));
         idx->capacity = 1024;
@@ -2307,12 +3088,13 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
                 (char **)palloc(idx->capacity * sizeof(char *));
         }
         
-        /* Initialize per-column indices */
+        /* Initialize per-column indices WITH ILIKE support */
         idx->column_indices = (ColumnIndex *)palloc0(natts * sizeof(ColumnIndex));
 
         for (col = 0; col < natts; col++) {
             ColumnIndex *cidx = &idx->column_indices[col];
             
+            /* Case-sensitive index */
             for (ch = 0; ch < CHAR_RANGE; ch++) {
                 cidx->pos_idx[ch].entries = (PosEntry *)palloc(64 * sizeof(PosEntry));
                 cidx->pos_idx[ch].count = 0;
@@ -2322,27 +3104,34 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
                 cidx->neg_idx[ch].capacity = 64;
                 cidx->char_cache[ch] = NULL;
             }
+            
+            /* NEW: Case-insensitive index */
+            for (ch = 0; ch < CHAR_RANGE; ch++) {
+                cidx->pos_idx_lower[ch].entries = (PosEntry *)palloc(64 * sizeof(PosEntry));
+                cidx->pos_idx_lower[ch].count = 0;
+                cidx->pos_idx_lower[ch].capacity = 64;
+                cidx->neg_idx_lower[ch].entries = (PosEntry *)palloc(64 * sizeof(PosEntry));
+                cidx->neg_idx_lower[ch].count = 0;
+                cidx->neg_idx_lower[ch].capacity = 64;
+                cidx->char_cache_lower[ch] = NULL;
+            }
+            
             cidx->max_length = 0;
+            cidx->max_length_lower = 0;
             cidx->length_bitmaps = NULL;
             cidx->length_ge_bitmaps = NULL;
+            cidx->length_bitmaps_lower = NULL;
+            cidx->length_ge_bitmaps_lower = NULL;
         }
         
         biscuit_init_crud_structures(idx);
         
-        /* ✅ STAY in buildContext - don't switch back */
-        /* Old buggy code: MemoryContextSwitchTo(oldcontext); */
-        
-        /* Scan heap and build index */
+        /* Scan heap and build BOTH case-sensitive and case-insensitive indices */
         slot = table_slot_create(heap, NULL);
         scan = table_beginscan(heap, SnapshotAny, 0, NULL);
         
-        //elog(INFO, "Biscuit: Building %d-column index on %s", natts, RelationGetRelationName(heap));
-        
         while (table_scan_getnextslot(scan, ForwardScanDirection, slot)) {
             slot_getallattrs(slot);
-            
-            /* ✅ REMOVED: No context switching during build */
-            /* Old buggy code: oldcontext = MemoryContextSwitchTo(indexContext); */
             
             if (idx->num_records >= idx->capacity) {
                 int c;
@@ -2358,7 +3147,7 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
             
             ItemPointerCopy(&slot->tts_tid, &idx->tids[idx->num_records]);
             
-            /* Index each column separately */
+            /* Index each column separately with BOTH case-sensitive and case-insensitive */
             for (col = 0; col < natts; col++) {
                 AttrNumber col_attnum = indexInfo->ii_IndexAttrNumbers[col];
                 value = slot_getattr(slot, col_attnum, &isnull);
@@ -2380,11 +3169,10 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
                 ColumnIndex *cidx = &idx->column_indices[col];
                 int col_len = text_len;
                 
-                if (col_len > MAX_POSITIONS) col_len = MAX_POSITIONS;
                 if (col_len > cidx->max_length) cidx->max_length = col_len;
                 if (col_len > idx->max_len) idx->max_len = col_len;
                 
-                /* Build per-column Biscuit indices */
+                /* Build case-sensitive Biscuit index */
                 for (pos = 0; pos < col_len; pos++) {
                     uch = (unsigned char)text_val[pos];
                     
@@ -2407,86 +3195,123 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
                         cidx->char_cache[uch] = biscuit_roaring_create();
                     biscuit_roaring_add(cidx->char_cache[uch], idx->num_records);
                 }
+                
+                /* NEW: Build case-insensitive Biscuit index */
+                char *text_val_lower = biscuit_str_tolower(text_val, text_len);
+                int col_len_lower = strlen(text_val_lower);
+                
+                if (col_len_lower > cidx->max_length_lower) {
+                    cidx->max_length_lower = col_len_lower;
+                }
+                
+                for (pos = 0; pos < col_len_lower; pos++) {
+                    unsigned char uch_lower = (unsigned char)text_val_lower[pos];
+                    
+                    bm = biscuit_get_col_pos_bitmap_lower(cidx, uch_lower, pos);
+                    if (!bm) {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_col_pos_bitmap_lower(cidx, uch_lower, pos, bm);
+                    }
+                    biscuit_roaring_add(bm, idx->num_records);
+                    
+                    neg_offset = -(col_len_lower - pos);
+                    bm = biscuit_get_col_neg_bitmap_lower(cidx, uch_lower, neg_offset);
+                    if (!bm) {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_col_neg_bitmap_lower(cidx, uch_lower, neg_offset, bm);
+                    }
+                    biscuit_roaring_add(bm, idx->num_records);
+                    
+                    if (!cidx->char_cache_lower[uch_lower])
+                        cidx->char_cache_lower[uch_lower] = biscuit_roaring_create();
+                    biscuit_roaring_add(cidx->char_cache_lower[uch_lower], idx->num_records);
+                }
+                
+                pfree(text_val_lower);
             }
             
             idx->num_records++;
-            
-            /* ✅ REMOVED: No context switching */
-            /* Old buggy code: MemoryContextSwitchTo(oldcontext); */
         }
         
         table_endscan(scan);
         ExecDropSingleTupleTableSlot(slot);
         
-        //elog(INFO, "Biscuit: Indexed %d records across %d columns", idx->num_records, natts);
+        elog(DEBUG1, "Biscuit: Multi-column scan complete - %d records", idx->num_records);
         
-        /* Build length bitmaps - still in buildContext */
-        /* ✅ REMOVED: oldcontext = MemoryContextSwitchTo(indexContext); */
-        
+        /* Build length bitmaps for BOTH case-sensitive and case-insensitive */
         for (col = 0; col < natts; col++) {
             ColumnIndex *cidx = &idx->column_indices[col];
             
-            /* Allocate for [0..max_length] inclusive */
+            elog(DEBUG1, "Biscuit: Building length bitmaps for column %d (cs_max=%d, ci_max=%d)", 
+                 col, cidx->max_length, cidx->max_length_lower);
+            
+            /* Case-sensitive bitmaps */
             cidx->length_bitmaps = (RoaringBitmap **)palloc0((cidx->max_length + 1) * sizeof(RoaringBitmap *));
             cidx->length_ge_bitmaps = (RoaringBitmap **)palloc0((cidx->max_length + 1) * sizeof(RoaringBitmap *));
             
-            /* Initialize all length_ge bitmaps [0..max_length] */
             for (i = 0; i <= cidx->max_length; i++) {
                 cidx->length_ge_bitmaps[i] = biscuit_roaring_create();
             }
             
-            //elog(INFO, "Biscuit: Column %d: allocated length bitmaps [0..%d]", col, cidx->max_length);
+            /* NEW: Case-insensitive bitmaps */
+            cidx->length_bitmaps_lower = (RoaringBitmap **)palloc0((cidx->max_length_lower + 1) * sizeof(RoaringBitmap *));
+            cidx->length_ge_bitmaps_lower = (RoaringBitmap **)palloc0((cidx->max_length_lower + 1) * sizeof(RoaringBitmap *));
+            
+            for (i = 0; i <= cidx->max_length_lower; i++) {
+                cidx->length_ge_bitmaps_lower[i] = biscuit_roaring_create();
+            }
         }
         
-        //elog(INFO, "Biscuit: Building length bitmaps from cached data");
-        
+        /* Populate length bitmaps */
         for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++) {
             for (col = 0; col < natts; col++) {
                 char *col_str = idx->column_data_cache[col][rec_idx];
                 int col_len = strlen(col_str);
                 ColumnIndex *cidx = &idx->column_indices[col];
                 
-                if (col_len > MAX_POSITIONS) col_len = MAX_POSITIONS;
-                
-                /* Use <= to include max_length */
+                /* Case-sensitive lengths */
                 if (col_len <= cidx->max_length) {
                     if (!cidx->length_bitmaps[col_len])
                         cidx->length_bitmaps[col_len] = biscuit_roaring_create();
                     biscuit_roaring_add(cidx->length_bitmaps[col_len], rec_idx);
                 }
                 
-                /* Add to all length_ge bitmaps for lengths <= this record's length */
                 for (i = 0; i <= col_len && i <= cidx->max_length; i++) {
                     biscuit_roaring_add(cidx->length_ge_bitmaps[i], rec_idx);
                 }
+                
+                /* NEW: Case-insensitive lengths */
+                char *col_str_lower = biscuit_str_tolower(col_str, col_len);
+                int col_len_lower = strlen(col_str_lower);
+                
+                if (col_len_lower <= cidx->max_length_lower) {
+                    if (!cidx->length_bitmaps_lower[col_len_lower])
+                        cidx->length_bitmaps_lower[col_len_lower] = biscuit_roaring_create();
+                    biscuit_roaring_add(cidx->length_bitmaps_lower[col_len_lower], rec_idx);
+                }
+                
+                for (i = 0; i <= col_len_lower && i <= cidx->max_length_lower; i++) {
+                    biscuit_roaring_add(cidx->length_ge_bitmaps_lower[i], rec_idx);
+                }
+                
+                pfree(col_str_lower);
             }
         }
         
-        /* VERIFICATION: Log length bitmap stats */
+        /* Verify ILIKE indices were built */
         for (col = 0; col < natts; col++) {
             ColumnIndex *cidx = &idx->column_indices[col];
-            int total_in_length_bitmaps = 0;
+            int total_lower_records = 0;
             
-            //elog(INFO, "Biscuit: Column %d length bitmap verification:", col);
-            
-            for (i = 0; i <= cidx->max_length; i++) {
-                if (cidx->length_bitmaps[i]) {
-                    uint64_t count = biscuit_roaring_count(cidx->length_bitmaps[i]);
-                    if (count > 0) {
-                        //elog(INFO, "  Length %d: %llu records", i, (unsigned long long)count);
-                        total_in_length_bitmaps += count;
-                    }
+            for (i = 0; i <= cidx->max_length_lower; i++) {
+                if (cidx->length_bitmaps_lower[i]) {
+                    uint64_t count = biscuit_roaring_count(cidx->length_bitmaps_lower[i]);
+                    total_lower_records += count;
                 }
             }
             
-            //elog(INFO, "  Total in length bitmaps: %d (expected: %d)", total_in_length_bitmaps, idx->num_records);
-            
-            /* Verify length_ge[0] contains all records */
-            uint64_t length_ge_0_count = biscuit_roaring_count(cidx->length_ge_bitmaps[0]);
-            //elog(INFO, "  length_ge[0] count: %llu (should equal %d)", (unsigned long long)length_ge_0_count, idx->num_records);
+            elog(DEBUG1, "Biscuit: Column %d ILIKE index built - %d records", col, total_lower_records);
         }
-        
-        //elog(INFO, "Biscuit: Length bitmaps built successfully");
         
         /* Write metadata to disk */
         biscuit_write_metadata_to_disk(index, idx);
@@ -2495,17 +3320,15 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
         biscuit_register_callback();
         biscuit_cache_insert(RelationGetRelid(index), idx);
         
-        /* ✅ Set rd_amcache - safe because idx is in CacheMemoryContext */
         index->rd_amcache = idx;
         
-        /* ✅ NOW switch back to old context for result allocation */
         MemoryContextSwitchTo(oldcontext);
-        
-        //elog(INFO, "Biscuit: Multi-column index build complete, cached, and ready");
         
         result = (IndexBuildResult *)palloc(sizeof(IndexBuildResult));
         result->heap_tuples = idx->num_records;
         result->index_tuples = idx->num_records;
+        
+        elog(DEBUG1, "Biscuit: Multi-column build complete with ILIKE support");
         
         return result;
     }
@@ -2515,10 +3338,11 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
         PG_RE_THROW();
     }
     PG_END_TRY();
-}    /* ==================== IAM CALLBACK FUNCTIONS ==================== */
+}
+/* ==================== IAM CALLBACK FUNCTIONS ==================== */
+/* ==================== FIXED: biscuit_build - SINGLE COLUMN WITH ILIKE ==================== */
 
-
- static IndexBuildResult *
+static IndexBuildResult *
 biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
 {
     IndexBuildResult *result;
@@ -2527,7 +3351,7 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
     TupleTableSlot *slot;
     int ch;
     MemoryContext oldcontext;
-    MemoryContext buildContext;  // ← NEW: Dedicated build context
+    MemoryContext buildContext;
     
     int natts = indexInfo->ii_NumIndexAttrs;
     
@@ -2536,13 +3360,13 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
         return biscuit_build_multicolumn(heap, index, indexInfo);
     }
     
-    /* ✅ CRITICAL FIX: Build in CacheMemoryContext so it survives */
+    /* Build in CacheMemoryContext */
     buildContext = CacheMemoryContext;
     oldcontext = MemoryContextSwitchTo(buildContext);
-    /* Initialize in-memory index */
     
-    PG_TRY();{
-        
+    PG_TRY();
+    {
+        /* Initialize in-memory index */
         idx = (BiscuitIndex *)palloc0(sizeof(BiscuitIndex));
         idx->capacity = 1024;
         idx->num_records = 0;
@@ -2557,7 +3381,7 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
         idx->column_data_cache = NULL;
         idx->column_indices = NULL;
         
-        /* Initialize _legacy fields for single-column */
+        /* Initialize case-sensitive index (_legacy) */
         for (ch = 0; ch < CHAR_RANGE; ch++) {
             idx->pos_idx_legacy[ch].entries = (PosEntry *)palloc(64 * sizeof(PosEntry));
             idx->pos_idx_legacy[ch].count = 0;
@@ -2568,23 +3392,43 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
             idx->char_cache_legacy[ch] = NULL;
         }
         
+        /* NEW: Initialize case-insensitive index (_lower) */
+        for (ch = 0; ch < CHAR_RANGE; ch++) {
+            idx->pos_idx_lower[ch].entries = (PosEntry *)palloc(64 * sizeof(PosEntry));
+            idx->pos_idx_lower[ch].count = 0;
+            idx->pos_idx_lower[ch].capacity = 64;
+            idx->neg_idx_lower[ch].entries = (PosEntry *)palloc(64 * sizeof(PosEntry));
+            idx->neg_idx_lower[ch].count = 0;
+            idx->neg_idx_lower[ch].capacity = 64;
+            idx->char_cache_lower[ch] = NULL;
+        }
+        
+        /* CRITICAL: Initialize max_length_lower to 0 */
+        idx->max_length_lower = 0;
+        
+        /* Allocate lowercase data cache */
+        idx->data_cache_lower = (char **)palloc(idx->capacity * sizeof(char *));
+        
+        /* CRITICAL: Initialize length bitmap pointers to NULL */
+        idx->length_bitmaps_lower = NULL;
+        idx->length_ge_bitmaps_lower = NULL;
+        
         /* Initialize CRUD structures */
         biscuit_init_crud_structures(idx);
         
-        /* ✅ Stay in CacheMemoryContext for entire build */
-        /* Don't switch back to oldcontext during heap scan */
-        
-        /* Scan heap and build index */
+        /* Scan heap and build BOTH indices */
         slot = table_slot_create(heap, NULL);
         scan = table_beginscan(heap, SnapshotAny, 0, NULL);
         
-        //elog(INFO, "Biscuit: Starting index build on relation %s", RelationGetRelationName(heap));
+        elog(DEBUG1, "Biscuit: Building single-column index with LIKE and ILIKE support");
         
         while (table_scan_getnextslot(scan, ForwardScanDirection, slot)) {
             int pos;
             text *txt;
             char *str;
             int len;
+            char *str_lower;
+            int len_lower;
             Datum values[1];
             bool isnull[1];
             bool should_free;
@@ -2599,10 +3443,7 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
                 len = VARSIZE_ANY_EXHDR(txt);
                 should_free = (txt != DatumGetTextPP(values[0]));
                 
-                if (len > MAX_POSITIONS) len = MAX_POSITIONS;
                 if (len > idx->max_len) idx->max_len = len;
-                
-                /* ✅ All allocations already in CacheMemoryContext */
                 
                 if (idx->num_records >= idx->capacity) {
                     idx->capacity *= 2;
@@ -2610,11 +3451,26 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
                         idx->capacity * sizeof(ItemPointerData));
                     idx->data_cache = (char **)repalloc(idx->data_cache, 
                         idx->capacity * sizeof(char *));
+                    idx->data_cache_lower = (char **)repalloc(idx->data_cache_lower,
+                        idx->capacity * sizeof(char *));
                 }
                 
                 ItemPointerCopy(&slot->tts_tid, &idx->tids[idx->num_records]);
+                
+                /* Store original text (for LIKE) */
                 idx->data_cache[idx->num_records] = pnstrdup(str, len);
                 
+                /* CRITICAL FIX: Convert to lowercase and store (for ILIKE) */
+                str_lower = biscuit_str_tolower(str, len);
+                len_lower = strlen(str_lower);
+                idx->data_cache_lower[idx->num_records] = str_lower;
+                
+                /* CRITICAL: Track max lowercase length */
+                if (len_lower > idx->max_length_lower) {
+                    idx->max_length_lower = len_lower;
+                }
+                
+                /* Build case-sensitive index */
                 for (pos = 0; pos < len; pos++) {
                     unsigned char uch = (unsigned char)str[pos];
                     RoaringBitmap *bm;
@@ -2640,6 +3496,32 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
                     biscuit_roaring_add(idx->char_cache_legacy[uch], idx->num_records);
                 }
                 
+                /* Build case-insensitive index (lowercase) */
+                for (pos = 0; pos < len_lower; pos++) {
+                    unsigned char uch_lower = (unsigned char)str_lower[pos];
+                    RoaringBitmap *bm;
+                    int neg_offset;
+                    
+                    bm = biscuit_get_pos_bitmap_lower(idx, uch_lower, pos);
+                    if (!bm) {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_pos_bitmap_lower(idx, uch_lower, pos, bm);
+                    }
+                    biscuit_roaring_add(bm, idx->num_records);
+                    
+                    neg_offset = -(len_lower - pos);
+                    bm = biscuit_get_neg_bitmap_lower(idx, uch_lower, neg_offset);
+                    if (!bm) {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_neg_bitmap_lower(idx, uch_lower, neg_offset, bm);
+                    }
+                    biscuit_roaring_add(bm, idx->num_records);
+                    
+                    if (!idx->char_cache_lower[uch_lower])
+                        idx->char_cache_lower[uch_lower] = biscuit_roaring_create();
+                    biscuit_roaring_add(idx->char_cache_lower[uch_lower], idx->num_records);
+                }
+                
                 idx->num_records++;
                 
                 if (should_free)
@@ -2650,35 +3532,53 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
         table_endscan(scan);
         ExecDropSingleTupleTableSlot(slot);
         
-        //elog(INFO, "Biscuit: Indexed %d records, max_len=%d", idx->num_records, idx->max_len);
+        elog(DEBUG1, "Biscuit: Scanned %d records, max_len=%d, max_length_lower=%d", 
+             idx->num_records, idx->max_len, idx->max_length_lower);
         
-        /* ==================== BUILD LENGTH BITMAPS ==================== */
-        /* Still in CacheMemoryContext */
-        
+        /* Build length bitmaps for BOTH indices */
         int rec_idx, i;
         
-        idx->max_length_legacy = idx->max_len + 1;
+        /* CRITICAL FIX: Add 1 to max lengths for proper array allocation */
+        int case_sensitive_max = idx->max_len + 1;
+        int case_insensitive_max = idx->max_length_lower + 1;
+        
+        elog(DEBUG1, "Biscuit: Allocating case-sensitive length arrays [0..%d]", case_sensitive_max - 1);
+        elog(DEBUG1, "Biscuit: Allocating case-insensitive length arrays [0..%d]", case_insensitive_max - 1);
+        
+        /* Case-sensitive length bitmaps */
+        idx->max_length_legacy = case_sensitive_max;
         idx->length_bitmaps_legacy = (RoaringBitmap **)palloc0(
             idx->max_length_legacy * sizeof(RoaringBitmap *));
         idx->length_ge_bitmaps_legacy = (RoaringBitmap **)palloc0(
-            (idx->max_length_legacy + 1) * sizeof(RoaringBitmap *));
+            idx->max_length_legacy * sizeof(RoaringBitmap *));
         
-        for (ch = 0; ch <= idx->max_length_legacy; ch++) {
+        for (ch = 0; ch < idx->max_length_legacy; ch++) {
             idx->length_ge_bitmaps_legacy[ch] = biscuit_roaring_create();
         }
         
-        //elog(INFO, "Biscuit: Building length bitmaps from cached data");
+        /* Case-insensitive length bitmaps - CRITICAL FIX */
+        idx->max_length_lower = case_insensitive_max;
+        idx->length_bitmaps_lower = (RoaringBitmap **)palloc0(
+            idx->max_length_lower * sizeof(RoaringBitmap *));
+        idx->length_ge_bitmaps_lower = (RoaringBitmap **)palloc0(
+            idx->max_length_lower * sizeof(RoaringBitmap *));
         
+        for (ch = 0; ch < idx->max_length_lower; ch++) {
+            idx->length_ge_bitmaps_lower[ch] = biscuit_roaring_create();
+        }
+        
+        elog(DEBUG1, "Biscuit: Populating length bitmaps from %d records", idx->num_records);
+        
+        /* Populate both length bitmap sets */
         for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++) {
-            int len;
+            int len, len_lower;
             
             if (!idx->data_cache[rec_idx]) {
-                //elog(WARNING, "Biscuit: NULL data_cache at index %d", rec_idx);
                 continue;
             }
             
+            /* Case-sensitive lengths */
             len = strlen(idx->data_cache[rec_idx]);
-            if (len > MAX_POSITIONS) len = MAX_POSITIONS;
             
             if (len < idx->max_length_legacy) {
                 if (!idx->length_bitmaps_legacy[len])
@@ -2686,52 +3586,66 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
                 biscuit_roaring_add(idx->length_bitmaps_legacy[len], rec_idx);
             }
             
-            for (i = 0; i <= len && i <= idx->max_length_legacy; i++)
+            for (i = 0; i <= len && i < idx->max_length_legacy; i++)
                 biscuit_roaring_add(idx->length_ge_bitmaps_legacy[i], rec_idx);
+            
+            /* Case-insensitive lengths */
+            if (idx->data_cache_lower[rec_idx]) {
+                len_lower = strlen(idx->data_cache_lower[rec_idx]);
+                
+                if (len_lower < idx->max_length_lower) {
+                    if (!idx->length_bitmaps_lower[len_lower])
+                        idx->length_bitmaps_lower[len_lower] = biscuit_roaring_create();
+                    biscuit_roaring_add(idx->length_bitmaps_lower[len_lower], rec_idx);
+                }
+                
+                for (i = 0; i <= len_lower && i < idx->max_length_lower; i++)
+                    biscuit_roaring_add(idx->length_ge_bitmaps_lower[i], rec_idx);
+            }
         }
         
-        /* Verification */
-        //elog(INFO, "Biscuit: === LENGTH BITMAP VERIFICATION (BUILD) ===");
-        int total_in_length_bitmaps = 0;
-        for (ch = 0; ch < idx->max_length_legacy; ch++) {
-            if (idx->length_bitmaps_legacy[ch]) {
-                uint64_t count = biscuit_roaring_count(idx->length_bitmaps_legacy[ch]);
+        /* Verify ILIKE index was built */
+        int total_lower_records = 0;
+        for (i = 0; i < idx->max_length_lower; i++) {
+            if (idx->length_bitmaps_lower[i]) {
+                uint64_t count = biscuit_roaring_count(idx->length_bitmaps_lower[i]);
                 if (count > 0) {
-                    //elog(INFO, "  Length bitmap[%d] has %llu records", ch, (unsigned long long)count);
-                    total_in_length_bitmaps += count;
+                    total_lower_records += count;
+                    elog(DEBUG1, "Biscuit: Lower length[%d] = %llu records", 
+                         i, (unsigned long long)count);
                 }
             }
         }
-        //elog(INFO, "  Total records in length bitmaps: %d (expected: %d)",  total_in_length_bitmaps, idx->num_records);
         
-        if (idx->length_ge_bitmaps_legacy[0]) {
-            uint64_t count = biscuit_roaring_count(idx->length_ge_bitmaps_legacy[0]);
-            //elog(INFO, "  length_ge[0] has %llu records (should equal %d)", (unsigned long long)count, idx->num_records);
+        elog(DEBUG1, "Biscuit: ILIKE index built - %d total records indexed", total_lower_records);
+        
+        /* Verify length_ge[0] contains all records */
+        if (idx->length_ge_bitmaps_lower && idx->length_ge_bitmaps_lower[0]) {
+            uint64_t length_ge_0_count = biscuit_roaring_count(idx->length_ge_bitmaps_lower[0]);
+            elog(DEBUG1, "Biscuit: length_ge_lower[0] = %llu records (should be %d)",
+                 (unsigned long long)length_ge_0_count, idx->num_records);
         }
-        
-        //elog(INFO, "Biscuit: Length bitmaps built successfully");
         
         /* Write metadata to disk */
         biscuit_write_metadata_to_disk(index, idx);
         
-        /* ✅ Register in static cache */
+        /* Register callback and cache */
         biscuit_register_callback();
         biscuit_cache_insert(RelationGetRelid(index), idx);
         
-        /* ✅ Set rd_amcache to the cached version (safe because in CacheMemoryContext) */
+        /* Set rd_amcache */
         index->rd_amcache = idx;
         
-        /* NOW switch back to old context for result allocation */
+        /* Switch back to old context for result allocation */
         MemoryContextSwitchTo(oldcontext);
-        
-        //elog(INFO, "Biscuit: Index build complete, cached, and ready for immediate use");
         
         result = (IndexBuildResult *)palloc(sizeof(IndexBuildResult));
         result->heap_tuples = idx->num_records;
         result->index_tuples = idx->num_records;
         
+        elog(DEBUG1, "Biscuit: Build complete - LIKE and ILIKE ready");
+        
         return result;
-
     }
     PG_CATCH();
     {
@@ -2739,7 +3653,9 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
         PG_RE_THROW();
     }
     PG_END_TRY();
-} /* ==================== UPDATED: biscuit_load_index - CRITICAL FIX ==================== */
+}
+
+/* ==================== UPDATED: biscuit_load_index - MULTI-COLUMN SECTION WITH ILIKE ==================== */
 
 static BiscuitIndex* biscuit_load_index(Relation index)
 {
@@ -2762,9 +3678,9 @@ static BiscuitIndex* biscuit_load_index(Relation index)
                                                          &stored_columns, &stored_maxlen);
     
     if (has_disk_metadata) {
-        //elog(INFO, "Biscuit: Found disk metadata, rebuilding bitmaps from heap");
+        elog(DEBUG1, "Biscuit: Found disk metadata, rebuilding bitmaps from heap");
     } else {
-        //elog(INFO, "Biscuit: No disk metadata, performing full index build from heap");
+        elog(DEBUG1, "Biscuit: No disk metadata, performing full index build from heap");
     }
     
     heap = table_open(index->rd_index->indrelid, AccessShareLock);
@@ -2787,8 +3703,8 @@ static BiscuitIndex* biscuit_load_index(Relation index)
     idx->num_columns = natts;
     
     if (natts > 1) {
-        /* ==================== MULTI-COLUMN INITIALIZATION ==================== */
-        //elog(INFO, "Biscuit: Loading %d-column index", natts);
+        /* ==================== MULTI-COLUMN INITIALIZATION WITH ILIKE ==================== */
+        elog(DEBUG1, "Biscuit: Loading %d-column index with ILIKE support", natts);
         
         idx->column_types = (Oid *)palloc(natts * sizeof(Oid));
         idx->output_funcs = (FmgrInfo *)palloc(natts * sizeof(FmgrInfo));
@@ -2805,6 +3721,7 @@ static BiscuitIndex* biscuit_load_index(Relation index)
             fmgr_info(typoutput, &idx->output_funcs[col]);
             idx->column_data_cache[col] = (char **)palloc(idx->capacity * sizeof(char *));
             
+            /* Case-sensitive index */
             for (ch = 0; ch < CHAR_RANGE; ch++) {
                 cidx->pos_idx[ch].entries = (PosEntry *)palloc(64 * sizeof(PosEntry));
                 cidx->pos_idx[ch].count = 0;
@@ -2815,19 +3732,32 @@ static BiscuitIndex* biscuit_load_index(Relation index)
                 cidx->char_cache[ch] = NULL;
             }
             
-            /* Initialize max_length to 0 - will be determined during scan */
-            cidx->max_length = 0;
+            /* NEW: Case-insensitive index */
+            for (ch = 0; ch < CHAR_RANGE; ch++) {
+                cidx->pos_idx_lower[ch].entries = (PosEntry *)palloc(64 * sizeof(PosEntry));
+                cidx->pos_idx_lower[ch].count = 0;
+                cidx->pos_idx_lower[ch].capacity = 64;
+                cidx->neg_idx_lower[ch].entries = (PosEntry *)palloc(64 * sizeof(PosEntry));
+                cidx->neg_idx_lower[ch].count = 0;
+                cidx->neg_idx_lower[ch].capacity = 64;
+                cidx->char_cache_lower[ch] = NULL;
+            }
             
-            /* Don't pre-allocate length bitmaps yet */
+            cidx->max_length = 0;
+            cidx->max_length_lower = 0;
             cidx->length_bitmaps = NULL;
             cidx->length_ge_bitmaps = NULL;
+            cidx->length_bitmaps_lower = NULL;
+            cidx->length_ge_bitmaps_lower = NULL;
         }
         idx->data_cache = NULL;
+        idx->data_cache_lower = NULL;
         
     } else {
         /* ==================== SINGLE-COLUMN INITIALIZATION ==================== */
-        //elog(INFO, "Biscuit: Loading single-column index");
+        elog(DEBUG1, "Biscuit: Loading single-column index with ILIKE support");
         idx->data_cache = (char **)palloc(idx->capacity * sizeof(char *));
+        idx->data_cache_lower = (char **)palloc(idx->capacity * sizeof(char *));
         idx->column_types = NULL;
         idx->output_funcs = NULL;
         idx->column_data_cache = NULL;
@@ -2843,6 +3773,21 @@ static BiscuitIndex* biscuit_load_index(Relation index)
             idx->neg_idx_legacy[ch].capacity = 64;
             idx->char_cache_legacy[ch] = NULL;
         }
+        
+        /* Initialize lowercase index structures */
+        for (ch = 0; ch < CHAR_RANGE; ch++) {
+            idx->pos_idx_lower[ch].entries = (PosEntry *)palloc(64 * sizeof(PosEntry));
+            idx->pos_idx_lower[ch].count = 0;
+            idx->pos_idx_lower[ch].capacity = 64;
+            idx->neg_idx_lower[ch].entries = (PosEntry *)palloc(64 * sizeof(PosEntry));
+            idx->neg_idx_lower[ch].count = 0;
+            idx->neg_idx_lower[ch].capacity = 64;
+            idx->char_cache_lower[ch] = NULL;
+        }
+        
+        idx->max_length_lower = 0;
+        idx->length_bitmaps_lower = NULL;
+        idx->length_ge_bitmaps_lower = NULL;
     }
     
     biscuit_init_crud_structures(idx);
@@ -2859,7 +3804,7 @@ static BiscuitIndex* biscuit_load_index(Relation index)
         slot_getallattrs(slot);
         
         if (natts > 1) {
-            /* ==================== MULTI-COLUMN SCAN ==================== */
+            /* ==================== MULTI-COLUMN SCAN WITH ILIKE ==================== */
             oldcontext = MemoryContextSwitchTo(indexContext);
             
             if (idx->num_records >= idx->capacity) {
@@ -2899,12 +3844,12 @@ static BiscuitIndex* biscuit_load_index(Relation index)
                 col_str = text_val;
                 col_len = text_len;
                 
-                if (col_len > MAX_POSITIONS) col_len = MAX_POSITIONS;
                 if (col_len > cidx->max_length) cidx->max_length = col_len;
                 if (col_len > idx->max_len) idx->max_len = col_len;
                 
                 idx->column_data_cache[col][idx->num_records] = text_val;
-                
+                                
+                /* Build case-sensitive index */
                 for (pos = 0; pos < col_len; pos++) {
                     unsigned char uch = (unsigned char)col_str[pos];
                     RoaringBitmap *bm;
@@ -2929,6 +3874,43 @@ static BiscuitIndex* biscuit_load_index(Relation index)
                         cidx->char_cache[uch] = biscuit_roaring_create();
                     biscuit_roaring_add(cidx->char_cache[uch], idx->num_records);
                 }
+
+                /* NEW: Build case-insensitive index */
+                char *text_val_lower = biscuit_str_tolower(text_val, text_len);
+                int col_len_lower = strlen(text_val_lower);
+
+                /* Track max lowercase length */
+                if (col_len_lower > cidx->max_length_lower) {
+                    cidx->max_length_lower = col_len_lower;
+                }
+
+                /* Build case-insensitive indices */
+                for (pos = 0; pos < col_len_lower; pos++) {
+                    unsigned char uch_lower = (unsigned char)text_val_lower[pos];
+                    RoaringBitmap *bm;
+                    int neg_offset;
+                    
+                    bm = biscuit_get_col_pos_bitmap_lower(cidx, uch_lower, pos);
+                    if (!bm) {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_col_pos_bitmap_lower(cidx, uch_lower, pos, bm);
+                    }
+                    biscuit_roaring_add(bm, idx->num_records);
+                    
+                    neg_offset = -(col_len_lower - pos);
+                    bm = biscuit_get_col_neg_bitmap_lower(cidx, uch_lower, neg_offset);
+                    if (!bm) {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_col_neg_bitmap_lower(cidx, uch_lower, neg_offset, bm);
+                    }
+                    biscuit_roaring_add(bm, idx->num_records);
+                    
+                    if (!cidx->char_cache_lower[uch_lower])
+                        cidx->char_cache_lower[uch_lower] = biscuit_roaring_create();
+                    biscuit_roaring_add(cidx->char_cache_lower[uch_lower], idx->num_records);
+                }
+                
+                pfree(text_val_lower);
                 
                 MemoryContextSwitchTo(oldcontext);
             }
@@ -2936,12 +3918,14 @@ static BiscuitIndex* biscuit_load_index(Relation index)
             idx->num_records++;
             
         } else {
-            /* ==================== SINGLE-COLUMN SCAN ==================== */
+            /* ==================== SINGLE-COLUMN SCAN WITH ILIKE SUPPORT ==================== */
             AttrNumber col_attnum = index->rd_index->indkey.values[0];
             Datum value = slot_getattr(slot, col_attnum, &isnull);
             text *txt;
             char *str;
             int len;
+            char *str_lower;
+            int len_lower;
             bool should_free;
             
             if (isnull) continue;
@@ -2951,7 +3935,6 @@ static BiscuitIndex* biscuit_load_index(Relation index)
             len = VARSIZE_ANY_EXHDR(txt);
             should_free = (txt != DatumGetTextPP(value));
             
-            if (len > MAX_POSITIONS) len = MAX_POSITIONS;
             if (len > idx->max_len) idx->max_len = len;
             
             oldcontext = MemoryContextSwitchTo(indexContext);
@@ -2962,11 +3945,26 @@ static BiscuitIndex* biscuit_load_index(Relation index)
                                                         idx->capacity * sizeof(ItemPointerData));
                 idx->data_cache = (char **)repalloc(idx->data_cache, 
                                                     idx->capacity * sizeof(char *));
+                idx->data_cache_lower = (char **)repalloc(idx->data_cache_lower,
+                                                         idx->capacity * sizeof(char *));
             }
             
             ItemPointerCopy(&slot->tts_tid, &idx->tids[idx->num_records]);
+            
+            /* Store original text */
             idx->data_cache[idx->num_records] = pnstrdup(str, len);
             
+            /* Store lowercase text */
+            str_lower = biscuit_str_tolower(str, len);
+            len_lower = strlen(str_lower);
+            idx->data_cache_lower[idx->num_records] = str_lower;
+            
+            /* Track max lowercase length */
+            if (len_lower > idx->max_length_lower) {
+                idx->max_length_lower = len_lower;
+            }
+            
+            /* Build case-sensitive index */
             for (pos = 0; pos < len; pos++) {
                 unsigned char uch = (unsigned char)str[pos];
                 RoaringBitmap *bm;
@@ -2992,6 +3990,32 @@ static BiscuitIndex* biscuit_load_index(Relation index)
                 biscuit_roaring_add(idx->char_cache_legacy[uch], idx->num_records);
             }
             
+            /* Build case-insensitive index */
+            for (pos = 0; pos < len_lower; pos++) {
+                unsigned char uch_lower = (unsigned char)str_lower[pos];
+                RoaringBitmap *bm;
+                int neg_offset;
+                
+                bm = biscuit_get_pos_bitmap_lower(idx, uch_lower, pos);
+                if (!bm) {
+                    bm = biscuit_roaring_create();
+                    biscuit_set_pos_bitmap_lower(idx, uch_lower, pos, bm);
+                }
+                biscuit_roaring_add(bm, idx->num_records);
+                
+                neg_offset = -(len_lower - pos);
+                bm = biscuit_get_neg_bitmap_lower(idx, uch_lower, neg_offset);
+                if (!bm) {
+                    bm = biscuit_roaring_create();
+                    biscuit_set_neg_bitmap_lower(idx, uch_lower, neg_offset, bm);
+                }
+                biscuit_roaring_add(bm, idx->num_records);
+                
+                if (!idx->char_cache_lower[uch_lower])
+                    idx->char_cache_lower[uch_lower] = biscuit_roaring_create();
+                biscuit_roaring_add(idx->char_cache_lower[uch_lower], idx->num_records);
+            }
+            
             idx->num_records++;
             MemoryContextSwitchTo(oldcontext);
             
@@ -3002,10 +4026,11 @@ static BiscuitIndex* biscuit_load_index(Relation index)
     table_endscan(scan);
     ExecDropSingleTupleTableSlot(slot);
     
-    //elog(INFO, "Biscuit: Loaded %d records from heap, max_len=%d", idx->num_records, idx->max_len);
+    elog(DEBUG1, "Biscuit: Loaded %d records from heap, max_len=%d, max_length_lower=%d", 
+         idx->num_records, idx->max_len, idx->max_length_lower);
     
     if (idx->num_records == 0) {
-        //elog(WARNING, "Biscuit: No records loaded from heap - index is empty!");
+        elog(WARNING, "Biscuit: No records loaded from heap - index is empty!");
         table_close(heap, AccessShareLock);
         return idx;
     }
@@ -3014,35 +4039,38 @@ static BiscuitIndex* biscuit_load_index(Relation index)
     oldcontext = MemoryContextSwitchTo(indexContext);
     
     if (natts > 1) {
-        /* ==================== MULTI-COLUMN LENGTH BITMAPS ==================== */
-        /* CRITICAL FIX: Match single-column allocation pattern exactly */
-        
-        //elog(INFO, "Biscuit: Building multi-column length bitmaps");
+        /* ==================== MULTI-COLUMN LENGTH BITMAPS WITH ILIKE ==================== */
+        elog(DEBUG1, "Biscuit: Building multi-column length bitmaps with ILIKE");
         
         for (col = 0; col < natts; col++) {
             ColumnIndex *cidx = &idx->column_indices[col];
             int i;
             
-            /* CRITICAL FIX: Allocate [0..max_length] inclusive */
-            /* This matches single-column: max_length_legacy = max_len + 1 */
-            /* Allocate one extra for length_ge_bitmaps */
-            
+            /* Case-sensitive bitmaps */
             cidx->length_bitmaps = (RoaringBitmap **)palloc0((cidx->max_length + 1) * sizeof(RoaringBitmap *));
             cidx->length_ge_bitmaps = (RoaringBitmap **)palloc0((cidx->max_length + 1) * sizeof(RoaringBitmap *));
             
-            /* Initialize ALL length_ge bitmaps [0..max_length] */
             for (i = 0; i <= cidx->max_length; i++) {
                 cidx->length_ge_bitmaps[i] = biscuit_roaring_create();
             }
             
-            //elog(INFO, "Biscuit: Column %d: allocated length bitmaps [0..%d]", col, cidx->max_length);
+            /* NEW: Case-insensitive bitmaps */
+            cidx->length_bitmaps_lower = (RoaringBitmap **)palloc0((cidx->max_length_lower + 1) * sizeof(RoaringBitmap *));
+            cidx->length_ge_bitmaps_lower = (RoaringBitmap **)palloc0((cidx->max_length_lower + 1) * sizeof(RoaringBitmap *));
+            
+            for (i = 0; i <= cidx->max_length_lower; i++) {
+                cidx->length_ge_bitmaps_lower[i] = biscuit_roaring_create();
+            }
+            
+            elog(DEBUG1, "Biscuit: Column %d: allocated length bitmaps cs[0..%d] ci[0..%d]", 
+                 col, cidx->max_length, cidx->max_length_lower);
         }
         
         MemoryContextSwitchTo(oldcontext);
         
-        /* Populate length bitmaps from cached data */
-        //elog(INFO, "Biscuit: Populating multi-column length bitmaps from %d records", idx->num_records);
+        elog(DEBUG1, "Biscuit: Populating multi-column length bitmaps from %d records", idx->num_records);
         
+        /* Populate both length bitmap sets */
         for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++) {
             for (col = 0; col < natts; col++) {
                 ColumnIndex *cidx = &idx->column_indices[col];
@@ -3050,116 +4078,160 @@ static BiscuitIndex* biscuit_load_index(Relation index)
                 int len = strlen(cached_str);
                 int i;
                 
-                if (len > MAX_POSITIONS) len = MAX_POSITIONS;
-                
                 oldcontext = MemoryContextSwitchTo(indexContext);
                 
-                /* CRITICAL FIX: Use <= instead of < to match single-column */
-                /* Add to exact length bitmap if within bounds */
+                /* Case-sensitive lengths */
                 if (len <= cidx->max_length) {
                     if (!cidx->length_bitmaps[len])
                         cidx->length_bitmaps[len] = biscuit_roaring_create();
                     biscuit_roaring_add(cidx->length_bitmaps[len], rec_idx);
                 }
                 
-                /* Add to all length_ge bitmaps for lengths <= this record's length */
                 for (i = 0; i <= len && i <= cidx->max_length; i++) {
                     biscuit_roaring_add(cidx->length_ge_bitmaps[i], rec_idx);
                 }
+                
+                /* NEW: Case-insensitive lengths */
+                char *cached_str_lower = biscuit_str_tolower(cached_str, len);
+                int len_lower = strlen(cached_str_lower);
+                
+                if (len_lower <= cidx->max_length_lower) {
+                    if (!cidx->length_bitmaps_lower[len_lower])
+                        cidx->length_bitmaps_lower[len_lower] = biscuit_roaring_create();
+                    biscuit_roaring_add(cidx->length_bitmaps_lower[len_lower], rec_idx);
+                }
+                
+                for (i = 0; i <= len_lower && i <= cidx->max_length_lower; i++) {
+                    biscuit_roaring_add(cidx->length_ge_bitmaps_lower[i], rec_idx);
+                }
+                
+                pfree(cached_str_lower);
                 
                 MemoryContextSwitchTo(oldcontext);
             }
         }
         
-        /* VERIFICATION: Log length bitmap stats */
+        /* Verify ILIKE indices */
         for (col = 0; col < natts; col++) {
             ColumnIndex *cidx = &idx->column_indices[col];
             int total_in_length_bitmaps = 0;
             int i;
             
-            //elog(INFO, "Biscuit: Column %d length bitmap verification:", col);
-            
             for (i = 0; i <= cidx->max_length; i++) {
                 if (cidx->length_bitmaps[i]) {
                     uint64_t count = biscuit_roaring_count(cidx->length_bitmaps[i]);
                     if (count > 0) {
-                        //elog(INFO, "  Length %d: %llu records", i, (unsigned long long)count);
                         total_in_length_bitmaps += count;
                     }
                 }
             }
             
-            //elog(INFO, "  Total in length bitmaps: %d (expected: %d)", total_in_length_bitmaps, idx->num_records);
-            
-            /* Verify length_ge[0] contains all records */
             uint64_t length_ge_0_count = biscuit_roaring_count(cidx->length_ge_bitmaps[0]);
-            //elog(INFO, "  length_ge[0] count: %llu (should equal %d)", (unsigned long long)length_ge_0_count, idx->num_records);
+            elog(DEBUG1, "Biscuit: Column %d LIKE - length_ge[0] count: %llu (expected %d)", 
+                 col, (unsigned long long)length_ge_0_count, idx->num_records);
+            
+            /* NEW: Verify ILIKE */
+            int total_lower_records = 0;
+            for (i = 0; i <= cidx->max_length_lower; i++) {
+                if (cidx->length_bitmaps_lower[i]) {
+                    uint64_t count = biscuit_roaring_count(cidx->length_bitmaps_lower[i]);
+                    total_lower_records += count;
+                }
+            }
+            
+            uint64_t length_ge_0_lower = biscuit_roaring_count(cidx->length_ge_bitmaps_lower[0]);
+            elog(DEBUG1, "Biscuit: Column %d ILIKE - length_ge_lower[0] count: %llu (expected %d)", 
+                 col, (unsigned long long)length_ge_0_lower, idx->num_records);
         }
         
     } else {
         /* ==================== SINGLE-COLUMN LENGTH BITMAPS ==================== */
+        int i;
         
-        /* CRITICAL: This is the reference implementation */
         idx->max_length_legacy = idx->max_len + 1;
         idx->length_bitmaps_legacy = (RoaringBitmap **)palloc0(idx->max_length_legacy * sizeof(RoaringBitmap *));
-        idx->length_ge_bitmaps_legacy = (RoaringBitmap **)palloc0((idx->max_length_legacy + 1) * sizeof(RoaringBitmap *));
+        idx->length_ge_bitmaps_legacy = (RoaringBitmap **)palloc0(idx->max_length_legacy * sizeof(RoaringBitmap *));
         
-        /* Initialize all length_ge bitmaps */
-        for (ch = 0; ch <= idx->max_length_legacy; ch++)
+        for (ch = 0; ch < idx->max_length_legacy; ch++)
             idx->length_ge_bitmaps_legacy[ch] = biscuit_roaring_create();
+        
+        /* Allocate lowercase length bitmaps */
+        idx->max_length_lower = idx->max_length_lower + 1;
+        idx->length_bitmaps_lower = (RoaringBitmap **)palloc0(idx->max_length_lower * sizeof(RoaringBitmap *));
+        idx->length_ge_bitmaps_lower = (RoaringBitmap **)palloc0(idx->max_length_lower * sizeof(RoaringBitmap *));
+        
+        for (ch = 0; ch < idx->max_length_lower; ch++)
+            idx->length_ge_bitmaps_lower[ch] = biscuit_roaring_create();
         
         MemoryContextSwitchTo(oldcontext);
         
-        //elog(INFO, "Biscuit: Building length bitmaps from %d cached records", idx->num_records);
+        elog(DEBUG1, "Biscuit: Building length bitmaps from %d cached records", idx->num_records);
+        elog(DEBUG1, "Biscuit: Case-sensitive max=%d, Case-insensitive max=%d", 
+             idx->max_length_legacy - 1, idx->max_length_lower - 1);
         
         for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++) {
-            int len;
-            int i;
+            int len, len_lower;
             char *cached_str = idx->data_cache[rec_idx];
+            char *cached_str_lower = idx->data_cache_lower[rec_idx];
             
             if (!cached_str) {
-                //elog(WARNING, "Biscuit: Record %d has NULL data_cache entry!", rec_idx);
                 continue;
             }
             
             len = strlen(cached_str);
-            if (len > MAX_POSITIONS) len = MAX_POSITIONS;
             
             oldcontext = MemoryContextSwitchTo(indexContext);
             
-            /* Add to exact length bitmap */
+            /* Case-sensitive */
             if (len < idx->max_length_legacy) {
                 if (!idx->length_bitmaps_legacy[len])
                     idx->length_bitmaps_legacy[len] = biscuit_roaring_create();
                 biscuit_roaring_add(idx->length_bitmaps_legacy[len], rec_idx);
             }
             
-            /* Add to all length_ge bitmaps for lengths <= this record's length */
             for (i = 0; i <= len && i < idx->max_length_legacy; i++)
                 biscuit_roaring_add(idx->length_ge_bitmaps_legacy[i], rec_idx);
+            
+            /* Case-insensitive */
+            if (cached_str_lower) {
+                len_lower = strlen(cached_str_lower);
+                
+                if (len_lower < idx->max_length_lower) {
+                    if (!idx->length_bitmaps_lower[len_lower])
+                        idx->length_bitmaps_lower[len_lower] = biscuit_roaring_create();
+                    biscuit_roaring_add(idx->length_bitmaps_lower[len_lower], rec_idx);
+                }
+                
+                for (i = 0; i <= len_lower && i < idx->max_length_lower; i++)
+                    biscuit_roaring_add(idx->length_ge_bitmaps_lower[i], rec_idx);
+            }
             
             MemoryContextSwitchTo(oldcontext);
         }
         
-        //elog(INFO, "Biscuit: Length bitmaps built successfully");
-        
-        /* VERIFICATION */
-        int total_in_length_bitmaps = 0;
-        for (ch = 0; ch < idx->max_length_legacy; ch++) {
-            if (idx->length_bitmaps_legacy[ch]) {
-                uint64_t count = biscuit_roaring_count(idx->length_bitmaps_legacy[ch]);
+        /* Verify */
+        int total_lower_records = 0;
+        for (i = 0; i < idx->max_length_lower; i++) {
+            if (idx->length_bitmaps_lower[i]) {
+                uint64_t count = biscuit_roaring_count(idx->length_bitmaps_lower[i]);
                 if (count > 0) {
-                    //elog(INFO, "  Length %d: %llu records", ch, (unsigned long long)count);
-                    total_in_length_bitmaps += count;
+                    total_lower_records += count;
                 }
             }
         }
-        //elog(INFO, "Biscuit: Total records in length bitmaps: %d", total_in_length_bitmaps);
+        
+        elog(DEBUG1, "Biscuit: ILIKE index loaded - %d total records", total_lower_records);
+        
+        if (idx->length_ge_bitmaps_lower && idx->length_ge_bitmaps_lower[0]) {
+            uint64_t length_ge_0_count = biscuit_roaring_count(idx->length_ge_bitmaps_lower[0]);
+            elog(DEBUG1, "Biscuit: length_ge_lower[0] = %llu records (expected %d)",
+                 (unsigned long long)length_ge_0_count, idx->num_records);
+        }
     }
     
     table_close(heap, AccessShareLock);
     
-    //elog(INFO, "Biscuit: Index load complete");
+    elog(DEBUG1, "Biscuit: Index load complete with full ILIKE support");
     
     return idx;
 }
@@ -3210,7 +4282,6 @@ biscuit_insert(Relation index, Datum *values, bool *isnull,
     str = VARDATA_ANY(txt);
     len = VARSIZE_ANY_EXHDR(txt);
     
-    if (len > MAX_POSITIONS) len = MAX_POSITIONS;
     
     if (biscuit_pop_free_slot(idx, &rec_idx)) {
         biscuit_roaring_remove(idx->tombstones, rec_idx);
@@ -3548,7 +4619,7 @@ biscuit_adjustmembers(Oid opfamilyoid, Oid opclassoid,
              //elog(DEBUG1, "Biscuit: Found index in static cache");
              index->rd_amcache = so->index;
          } else {
-             //elog(INFO, "Biscuit: Loading index for first time");
+             //elog(DEBUG1, "Biscuit: Loading index for first time");
              so->index = biscuit_load_index(index);
              index->rd_amcache = so->index;
              
@@ -3865,8 +4936,8 @@ log_query_plan(QueryPlan *plan)
 {
     int i;
     
-    //elog(INFO, "=== BISCUIT QUERY EXECUTION PLAN ===");
-    //elog(INFO, "Total predicates: %d", plan->count);
+    //elog(DEBUG1, "=== BISCUIT QUERY EXECUTION PLAN ===");
+    //elog(DEBUG1, "Total predicates: %d", plan->count);
     
     for (i = 0; i < plan->count; i++) {
         QueryPredicate *pred = &plan->predicates[i];
@@ -3883,7 +4954,7 @@ log_query_plan(QueryPlan *plan)
         else
             type = "COMPLEX";
         
-        //elog(INFO, "[%d] Col=%d Pattern='%s' Type=%s Priority=%d Selectivity=%.3f "
+        //elog(DEBUG1, "[%d] Col=%d Pattern='%s' Type=%s Priority=%d Selectivity=%.3f "
             // "Concrete=%d Under=%d Parts=%d Anchor=%d",
             // i, pred->column_index, pred->pattern, type, 
             // pred->priority, pred->selectivity_score,
@@ -3891,7 +4962,7 @@ log_query_plan(QueryPlan *plan)
             // pred->partition_count, pred->anchor_strength);
     }
     
-    //elog(INFO, "====================================");
+    //elog(DEBUG1, "====================================");
 }
 
 /* ==================== PER-COLUMN PATTERN MATCHING ==================== */
@@ -3990,6 +5061,99 @@ biscuit_match_col_part_at_end(ColumnIndex *col, const char *part, int part_len) 
 }
 
 
+static RoaringBitmap* 
+biscuit_match_col_part_at_pos_ilike(ColumnIndex *col, const char *part, 
+                                    int part_len, int start_pos) {
+    RoaringBitmap *result = NULL;
+    RoaringBitmap *char_bm;
+    RoaringBitmap *len_filter;
+    int i, concrete_chars = 0;
+    int pos;
+    
+    /* Intersect all non-wildcard character constraints (lowercase) */
+    for (i = 0; i < part_len; i++) {
+        if (part[i] == '_') {
+            continue;
+        }
+        
+        concrete_chars++;
+        pos = start_pos + i;
+        char_bm = biscuit_get_col_pos_bitmap_lower(col, (unsigned char)part[i], pos);
+        
+        if (!char_bm) {
+            if (result) biscuit_roaring_free(result);
+            return biscuit_roaring_create();
+        }
+        
+        if (!result) {
+            result = biscuit_roaring_copy(char_bm);
+        } else {
+            biscuit_roaring_and_inplace(result, char_bm);
+            if (biscuit_roaring_is_empty(result))
+                return result;
+        }
+    }
+    
+    /* All wildcards case */
+    if (concrete_chars == 0) {
+        result = biscuit_get_col_length_ge_lower(col, start_pos + part_len);
+    } else {
+        len_filter = biscuit_get_col_length_ge_lower(col, start_pos + part_len);
+        if (len_filter) {
+            biscuit_roaring_and_inplace(result, len_filter);
+            biscuit_roaring_free(len_filter);
+        }
+    }
+    
+    return result;
+}
+
+static RoaringBitmap* 
+biscuit_match_col_part_at_end_ilike(ColumnIndex *col, const char *part, int part_len) {
+    RoaringBitmap *result = NULL;
+    RoaringBitmap *char_bm;
+    RoaringBitmap *len_filter;
+    int i, concrete_chars = 0;
+    int neg_pos;
+    
+    /* Intersect all non-wildcard character constraints (lowercase) */
+    for (i = 0; i < part_len; i++) {
+        if (part[i] == '_') {
+            continue;
+        }
+        
+        concrete_chars++;
+        neg_pos = -(part_len - i);
+        char_bm = biscuit_get_col_neg_bitmap_lower(col, (unsigned char)part[i], neg_pos);
+        
+        if (!char_bm) {
+            if (result) biscuit_roaring_free(result);
+            return biscuit_roaring_create();
+        }
+        
+        if (!result) {
+            result = biscuit_roaring_copy(char_bm);
+        } else {
+            biscuit_roaring_and_inplace(result, char_bm);
+            if (biscuit_roaring_is_empty(result))
+                return result;
+        }
+    }
+    
+    /* All wildcards case */
+    if (concrete_chars == 0) {
+        result = biscuit_get_col_length_ge_lower(col, part_len);
+    } else {
+        len_filter = biscuit_get_col_length_ge_lower(col, part_len);
+        if (len_filter) {
+            biscuit_roaring_and_inplace(result, len_filter);
+            biscuit_roaring_free(len_filter);
+        }
+    }
+    
+    return result;
+}
+
 static void 
 biscuit_recursive_windowed_match_col(
     RoaringBitmap *result, ColumnIndex *col,
@@ -4082,95 +5246,137 @@ biscuit_recursive_windowed_match_col(
     }
 }
 
-static void
-biscuit_free_parsed_pattern(ParsedPattern *parsed)
+static void 
+biscuit_recursive_windowed_match_col_ilike(
+    RoaringBitmap *result, ColumnIndex *col,
+    const char **parts, int *part_lens, int part_count,
+    bool ends_percent, int part_idx, int min_pos,
+    RoaringBitmap *current_candidates, int max_len)
 {
-    int i;
+    int remaining_len, max_pos, pos, i;
+    RoaringBitmap *end_match;
+    RoaringBitmap *length_constraint;
+    RoaringBitmap *part_match;
+    RoaringBitmap *next_candidates;
+    int min_required_length;
+    int next_min_pos;
     
-    if (!parsed)
+    /* Base case */
+    if (part_idx >= part_count) {
+        biscuit_roaring_or_inplace(result, current_candidates);
         return;
+    }
     
-    if (parsed->parts) {
-        for (i = 0; i < parsed->part_count; i++) {
-            if (parsed->parts[i]) {
-                pfree(parsed->parts[i]);
-                parsed->parts[i] = NULL;
-            }
+    /* Calculate minimum length for remaining parts */
+    remaining_len = 0;
+    for (i = part_idx + 1; i < part_count; i++)
+        remaining_len += part_lens[i];
+    
+    /* Last part without trailing % must match at end */
+    if (part_idx == part_count - 1 && !ends_percent) {
+        end_match = biscuit_match_col_part_at_end_ilike(col, parts[part_idx], part_lens[part_idx]);
+        
+        if (!end_match) {
+            return;
         }
-        pfree(parsed->parts);
+        
+        biscuit_roaring_and_inplace(end_match, current_candidates);
+        
+        min_required_length = min_pos + part_lens[part_idx];
+        length_constraint = biscuit_get_col_length_ge_lower(col, min_required_length);
+        if (length_constraint) {
+            biscuit_roaring_and_inplace(end_match, length_constraint);
+            biscuit_roaring_free(length_constraint);
+        }
+        
+        biscuit_roaring_or_inplace(result, end_match);
+        biscuit_roaring_free(end_match);
+        return;
     }
     
-    if (parsed->part_lens) {
-        pfree(parsed->part_lens);
+    /* Try all valid positions */
+    max_pos = max_len - part_lens[part_idx] - remaining_len;
+    if (min_pos > max_pos) {
+        return;
     }
     
-    pfree(parsed);
+    for (pos = min_pos; pos <= max_pos; pos++) {
+        part_match = biscuit_match_col_part_at_pos_ilike(col, parts[part_idx], part_lens[part_idx], pos);
+        
+        if (!part_match) {
+            continue;
+        }
+        
+        next_candidates = biscuit_roaring_copy(current_candidates);
+        biscuit_roaring_and_inplace(next_candidates, part_match);
+        biscuit_roaring_free(part_match);
+        
+        if (biscuit_roaring_is_empty(next_candidates)) {
+            biscuit_roaring_free(next_candidates);
+            continue;
+        }
+        
+        next_min_pos = pos + part_lens[part_idx];
+        
+        biscuit_recursive_windowed_match_col_ilike(
+            result, col, parts, part_lens, part_count,
+            ends_percent, part_idx + 1, next_min_pos, 
+            next_candidates, max_len
+        );
+        
+        biscuit_roaring_free(next_candidates);
+    }
 }
+
+/* ==================== FIXED: Per-column pattern matching ==================== */
 
 static RoaringBitmap* 
 biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern) {
     ColumnIndex *col;
     int plen = strlen(pattern);
-    ParsedPattern *parsed = NULL;  // ✅ Initialize to NULL
+    ParsedPattern *parsed = NULL;
     int min_len, i;
-    RoaringBitmap *result = NULL;  // ✅ Initialize to NULL
+    RoaringBitmap *result = NULL;
     int wildcard_count = 0, percent_count = 0;
     bool only_wildcards = true;
     
     /* ========== SAFETY CHECKS ========== */
     if (!idx) {
-        //elog(ERROR, "Biscuit: NULL index in query_column_pattern");
         return biscuit_roaring_create();
     }
     
     if (col_idx < 0 || col_idx >= idx->num_columns) {
-        //elog(ERROR, "Biscuit: Invalid column index %d (max %d)", col_idx, idx->num_columns - 1);
         return biscuit_roaring_create();
     }
     
     if (!idx->column_indices) {
-        //elog(ERROR, "Biscuit: column_indices is NULL");
         return biscuit_roaring_create();
     }
     
     col = &idx->column_indices[col_idx];
     
     if (col->length_bitmaps == NULL || col->length_ge_bitmaps == NULL) {
-        //elog(ERROR, "Biscuit: Column %d length bitmaps not initialized", col_idx);
+        return biscuit_roaring_create();
+    }
+    
+    if (col->max_length <= 0) {
         return biscuit_roaring_create();
     }
     
     /* ========== FAST PATH 1: Empty pattern '' ========== */
     if (plen == 0) {
-        //elog(INFO, "Biscuit FAST PATH (Col %d): Empty pattern → length[0]", col_idx);
-        if (col->max_length > 0 && col->length_bitmaps[0]) {
-            uint64_t count = biscuit_roaring_count(col->length_bitmaps[0]);
-            //elog(INFO, "  → Returning %llu records with length 0", (unsigned long long)count);
+        if (col->length_bitmaps && col->length_bitmaps[0]) {
             return biscuit_roaring_copy(col->length_bitmaps[0]);
         }
-        //elog(INFO, "  → No zero-length strings in column");
         return biscuit_roaring_create();
     }
     
     /* ========== FAST PATH 2: Single '%' matches everything ========== */
     if (plen == 1 && pattern[0] == '%') {
-        //elog(INFO, "Biscuit FAST PATH (Col %d): Single '%%' → all records", col_idx);
-        result = biscuit_roaring_create();
-        for (i = 0; i < idx->num_records; i++) {
-            #ifdef HAVE_ROARING
-            if (!roaring_bitmap_contains(idx->tombstones, (uint32_t)i))
-            #else
-            uint32_t block = i >> 6;
-            uint32_t bit = i & 63;
-            bool tombstoned = (block < idx->tombstones->num_blocks &&
-                              (idx->tombstones->blocks[block] & (1ULL << bit)));
-            if (!tombstoned)
-            #endif
-                biscuit_roaring_add(result, i);
+        if (col->length_ge_bitmaps && col->length_ge_bitmaps[0]) {
+            return biscuit_roaring_copy(col->length_ge_bitmaps[0]);
         }
-        uint64_t count = biscuit_roaring_count(result);
-        //elog(INFO, "  → Matched %llu of %d records", (unsigned long long)count, idx->num_records);
-        return result;
+        return biscuit_roaring_create();
     }
     
     /* ========== FAST PATH 3: Analyze for pure wildcards ========== */
@@ -4189,66 +5395,33 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
     if (only_wildcards) {
         if (percent_count > 0) {
             /* FAST PATH 4: Has %, so length >= wildcard_count */
-            //elog(INFO, "Biscuit FAST PATH (Col %d): Pure wildcard pattern '%s'", col_idx, pattern);
-            //elog(INFO, "  → Contains %d underscores and %d percents", wildcard_count, percent_count);
-            //elog(INFO, "  → Using length_ge_bitmaps[%d] (length >= %d)", wildcard_count, wildcard_count);
-            
-            result = biscuit_get_col_length_ge(col, wildcard_count);
-            
-            if (result) {
-                uint64_t count = biscuit_roaring_count(result);
-                //elog(INFO, "  → Matched %llu records with length >= %d", unsigned long long)count, wildcard_count);
+            if (wildcard_count <= col->max_length && col->length_ge_bitmaps[wildcard_count]) {
+                return biscuit_roaring_copy(col->length_ge_bitmaps[wildcard_count]);
             }
-            
-            return result;
-            
+            return biscuit_roaring_create();
         } else {
             /* FAST PATH 5: Only underscores → EXACT length match */
-            //elog(INFO, "Biscuit FAST PATH (Col %d): Pure underscore pattern '%s'", col_idx, pattern);
-            //elog(INFO, "  → Pattern length: %d underscores", wildcard_count);
-            //elog(INFO, "  → Using length_bitmaps[%d] (exact length)", wildcard_count);
-            
             if (wildcard_count <= col->max_length && col->length_bitmaps[wildcard_count]) {
-                uint64_t count = biscuit_roaring_count(col->length_bitmaps[wildcard_count]);
-                //elog(INFO, "  → Matched %llu records with exact length %d", (unsigned long long)count, wildcard_count);
                 return biscuit_roaring_copy(col->length_bitmaps[wildcard_count]);
             }
-            
-            //elog(INFO, "  → Length bitmap[%d] is NULL or out of range (max: %d)", wildcard_count, col->max_length);
             return biscuit_roaring_create();
         }
     }
     
+    /* ========== SLOW PATH: Pattern contains concrete characters ========== */
     
-     /* Parse pattern */
-     PG_TRY();
-     {
-         parsed = biscuit_parse_pattern(pattern);
-         
-         /* ========== SLOW PATH: Pattern contains concrete characters ========== */
-        //elog(INFO, "Biscuit SLOW PATH (Col %d): Pattern '%s' contains concrete characters",  col_idx, pattern);
-        
-        /* Parse pattern into parts separated by % */
+    PG_TRY();
+    {
         parsed = biscuit_parse_pattern(pattern);
         
         /* All percent signs */
         if (parsed->part_count == 0) {
-            result = biscuit_roaring_create();
-            for (i = 0; i < idx->num_records; i++) {
-                #ifdef HAVE_ROARING
-                if (!roaring_bitmap_contains(idx->tombstones, (uint32_t)i))
-                #else
-                uint32_t block = i >> 6;
-                uint32_t bit = i & 63;
-                bool tombstoned = (block < idx->tombstones->num_blocks &&
-                                (idx->tombstones->blocks[block] & (1ULL << bit)));
-                if (!tombstoned)
-                #endif
-                    biscuit_roaring_add(result, i);
+            if (col->length_ge_bitmaps && col->length_ge_bitmaps[0]) {
+                result = biscuit_roaring_copy(col->length_ge_bitmaps[0]);
+            } else {
+                result = biscuit_roaring_create();
             }
-            if (parsed->parts) pfree(parsed->parts);
-            if (parsed->part_lens) pfree(parsed->part_lens);
-            pfree(parsed);
+            biscuit_free_parsed_pattern(parsed);
             return result;
         }
         
@@ -4256,8 +5429,6 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
         min_len = 0;
         for (i = 0; i < parsed->part_count; i++)
             min_len += parsed->part_lens[i];
-        
-        //elog(INFO, "  → Parsed into %d parts, minimum length: %d", parsed->part_count, min_len);
         
         /* ==================== OPTIMIZED SINGLE PART PATTERNS ==================== */
         if (parsed->part_count == 1) {
@@ -4286,7 +5457,7 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
             } else {
                 /* SUBSTRING match */
                 result = biscuit_roaring_create();
-                int max_len = (col->max_length > MAX_POSITIONS) ? MAX_POSITIONS : col->max_length;
+                int max_len = col->max_length;
                 for (i = 0; i <= max_len - parsed->part_lens[0]; i++) {
                     RoaringBitmap *part_match = biscuit_match_col_part_at_pos(
                         col, parsed->parts[0], parsed->part_lens[0], i);
@@ -4333,8 +5504,8 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
             result = biscuit_roaring_create();
             candidates = biscuit_get_col_length_ge(col, min_len);
             
-            if (biscuit_roaring_is_empty(candidates)) {
-                biscuit_roaring_free(candidates);
+            if (!candidates || biscuit_roaring_is_empty(candidates)) {
+                if (candidates) biscuit_roaring_free(candidates);
             } else {
                 if (!parsed->starts_percent) {
                     RoaringBitmap *first_part_match = biscuit_match_col_part_at_pos(
@@ -4367,21 +5538,262 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
                 }
             }
         }
-             
-         /* Normal cleanup */
-         biscuit_free_parsed_pattern(parsed);
-         parsed = NULL;
-     }
-     PG_CATCH();
-     {
-         /* Emergency cleanup */
-         if (parsed)
-             biscuit_free_parsed_pattern(parsed);
-         if (result)
-             biscuit_roaring_free(result);
-         PG_RE_THROW();
-     }
-     PG_END_TRY();
+        
+        /* Normal cleanup */
+        biscuit_free_parsed_pattern(parsed);
+        parsed = NULL;
+    }
+    PG_CATCH();
+    {
+        /* Emergency cleanup */
+        if (parsed)
+            biscuit_free_parsed_pattern(parsed);
+        if (result)
+            biscuit_roaring_free(result);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    
+    return result ? result : biscuit_roaring_create();
+}
+
+/* ==================== FIXED: Per-column ILIKE pattern matching ==================== */
+
+static RoaringBitmap* 
+biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *pattern) {
+    ColumnIndex *col;
+    char *pattern_lower = NULL;
+    int plen = strlen(pattern);
+    ParsedPattern *parsed = NULL;
+    int min_len, i;
+    RoaringBitmap *result = NULL;
+    int wildcard_count = 0, percent_count = 0;
+    bool only_wildcards = true;
+    
+    /* Safety checks */
+    if (!idx || col_idx < 0 || col_idx >= idx->num_columns || !idx->column_indices) {
+        return biscuit_roaring_create();
+    }
+    
+    col = &idx->column_indices[col_idx];
+    
+    /* CRITICAL: Check if lowercase index exists for this column */
+    if (col->length_bitmaps_lower == NULL || col->length_ge_bitmaps_lower == NULL) {
+        elog(WARNING, "Biscuit: Column %d lowercase index not initialized - ILIKE not supported", col_idx);
+        return biscuit_roaring_create();
+    }
+    
+    if (col->max_length_lower <= 0) {
+        elog(WARNING, "Biscuit: Column %d has invalid max_length_lower=%d", col_idx, col->max_length_lower);
+        return biscuit_roaring_create();
+    }
+    
+    /* Convert pattern to lowercase FIRST */
+    pattern_lower = biscuit_str_tolower(pattern, plen);
+    plen = strlen(pattern_lower);
+    
+    PG_TRY();
+    {
+        /* ========== FAST PATH 1: Empty pattern '' ========== */
+        if (plen == 0) {
+            if (col->length_bitmaps_lower && col->length_bitmaps_lower[0]) {
+                result = biscuit_roaring_copy(col->length_bitmaps_lower[0]);
+            } else {
+                result = biscuit_roaring_create();
+            }
+            pfree(pattern_lower);
+            return result;
+        }
+        
+        /* ========== FAST PATH 2: Single '%' matches everything ========== */
+        if (plen == 1 && pattern_lower[0] == '%') {
+            if (col->length_ge_bitmaps_lower && col->length_ge_bitmaps_lower[0]) {
+                result = biscuit_roaring_copy(col->length_ge_bitmaps_lower[0]);
+            } else {
+                result = biscuit_roaring_create();
+            }
+            pfree(pattern_lower);
+            return result;
+        }
+        
+        /* ========== FAST PATH 3: Analyze for pure wildcards ========== */
+        for (i = 0; i < plen; i++) {
+            if (pattern_lower[i] == '%') {
+                percent_count++;
+            } else if (pattern_lower[i] == '_') {
+                wildcard_count++;
+            } else {
+                only_wildcards = false;
+                break;
+            }
+        }
+        
+        /* ========== FAST PATH 4 & 5: Pure wildcard patterns ========== */
+        if (only_wildcards) {
+            if (percent_count > 0) {
+                /* FAST PATH 4: Has %, so length >= wildcard_count */
+                if (wildcard_count <= col->max_length_lower && 
+                    col->length_ge_bitmaps_lower[wildcard_count]) {
+                    result = biscuit_roaring_copy(col->length_ge_bitmaps_lower[wildcard_count]);
+                } else {
+                    result = biscuit_roaring_create();
+                }
+            } else {
+                /* FAST PATH 5: Only underscores → EXACT length match */
+                if (wildcard_count <= col->max_length_lower && 
+                    col->length_bitmaps_lower[wildcard_count]) {
+                    result = biscuit_roaring_copy(col->length_bitmaps_lower[wildcard_count]);
+                } else {
+                    result = biscuit_roaring_create();
+                }
+            }
+            pfree(pattern_lower);
+            return result;
+        }
+        
+        /* ========== SLOW PATH: Pattern contains concrete characters ========== */
+        
+        /* Parse the LOWERCASE pattern */
+        parsed = biscuit_parse_pattern(pattern_lower);
+        
+        /* All percent signs */
+        if (parsed->part_count == 0) {
+            if (col->length_ge_bitmaps_lower && col->length_ge_bitmaps_lower[0]) {
+                result = biscuit_roaring_copy(col->length_ge_bitmaps_lower[0]);
+            } else {
+                result = biscuit_roaring_create();
+            }
+            biscuit_free_parsed_pattern(parsed);
+            pfree(pattern_lower);
+            return result;
+        }
+        
+        /* Calculate minimum required length */
+        min_len = 0;
+        for (i = 0; i < parsed->part_count; i++)
+            min_len += parsed->part_lens[i];
+        
+        /* ==================== OPTIMIZED SINGLE PART PATTERNS ==================== */
+        if (parsed->part_count == 1) {
+            if (!parsed->starts_percent && !parsed->ends_percent) {
+                /* EXACT: 'abc' or 'a_c' */
+                result = biscuit_match_col_part_at_pos_ilike(col, parsed->parts[0], 
+                                                             parsed->part_lens[0], 0);
+                if (result && min_len <= col->max_length_lower && 
+                    col->length_bitmaps_lower[min_len]) {
+                    biscuit_roaring_and_inplace(result, col->length_bitmaps_lower[min_len]);
+                } else if (!result || min_len > col->max_length_lower) {
+                    if (result) biscuit_roaring_free(result);
+                    result = biscuit_roaring_create();
+                }
+            } else if (!parsed->starts_percent) {
+                /* PREFIX: 'abc%' */
+                result = biscuit_match_col_part_at_pos_ilike(col, parsed->parts[0], 
+                                                             parsed->part_lens[0], 0);
+                if (!result) result = biscuit_roaring_create();
+            } else if (!parsed->ends_percent) {
+                /* SUFFIX: '%abc' */
+                result = biscuit_match_col_part_at_end_ilike(col, parsed->parts[0], 
+                                                             parsed->part_lens[0]);
+                if (!result) result = biscuit_roaring_create();
+            } else {
+                /* SUBSTRING: '%abc%' */
+                result = biscuit_roaring_create();
+                for (i = 0; i <= col->max_length_lower - parsed->part_lens[0]; i++) {
+                    RoaringBitmap *part_match = biscuit_match_col_part_at_pos_ilike(
+                        col, parsed->parts[0], parsed->part_lens[0], i);
+                    if (part_match) {
+                        biscuit_roaring_or_inplace(result, part_match);
+                        biscuit_roaring_free(part_match);
+                    }
+                }
+            }
+        }
+        /* ==================== OPTIMIZED TWO PART PATTERNS ==================== */
+        else if (parsed->part_count == 2 && !parsed->starts_percent && !parsed->ends_percent) {
+            /* INFIX: 'abc%def' */
+            RoaringBitmap *prefix_match;
+            RoaringBitmap *suffix_match;
+            RoaringBitmap *length_filter;
+            
+            prefix_match = biscuit_match_col_part_at_pos_ilike(col, parsed->parts[0], 
+                                                               parsed->part_lens[0], 0);
+            suffix_match = biscuit_match_col_part_at_end_ilike(col, parsed->parts[1], 
+                                                               parsed->part_lens[1]);
+            
+            if (!prefix_match || !suffix_match) {
+                if (prefix_match) biscuit_roaring_free(prefix_match);
+                if (suffix_match) biscuit_roaring_free(suffix_match);
+                result = biscuit_roaring_create();
+            } else {
+                biscuit_roaring_and_inplace(prefix_match, suffix_match);
+                biscuit_roaring_free(suffix_match);
+                
+                length_filter = biscuit_get_col_length_ge_lower(col, min_len);
+                if (length_filter) {
+                    biscuit_roaring_and_inplace(prefix_match, length_filter);
+                    biscuit_roaring_free(length_filter);
+                }
+                
+                result = prefix_match;
+            }
+        }
+        /* ==================== COMPLEX MULTI-PART PATTERNS ==================== */
+        else {
+            RoaringBitmap *candidates;
+            
+            result = biscuit_roaring_create();
+            candidates = biscuit_get_col_length_ge_lower(col, min_len);
+            
+            if (!candidates || biscuit_roaring_is_empty(candidates)) {
+                if (candidates) biscuit_roaring_free(candidates);
+            } else {
+                if (!parsed->starts_percent) {
+                    RoaringBitmap *first_part_match = biscuit_match_col_part_at_pos_ilike(
+                        col, parsed->parts[0], parsed->part_lens[0], 0);
+                    
+                    if (first_part_match) {
+                        biscuit_roaring_and_inplace(first_part_match, candidates);
+                        biscuit_roaring_free(candidates);
+                        
+                        if (!biscuit_roaring_is_empty(first_part_match)) {
+                            biscuit_recursive_windowed_match_col_ilike(
+                                result, col,
+                                (const char **)parsed->parts, parsed->part_lens,
+                                parsed->part_count, parsed->ends_percent,
+                                1, parsed->part_lens[0], first_part_match, 
+                                col->max_length_lower
+                            );
+                        }
+                        biscuit_roaring_free(first_part_match);
+                    } else {
+                        biscuit_roaring_free(candidates);
+                    }
+                } else {
+                    biscuit_recursive_windowed_match_col_ilike(
+                        result, col,
+                        (const char **)parsed->parts, parsed->part_lens,
+                        parsed->part_count, parsed->ends_percent,
+                        0, 0, candidates, col->max_length_lower
+                    );
+                    biscuit_roaring_free(candidates);
+                }
+            }
+        }
+        
+        /* Cleanup */
+        biscuit_free_parsed_pattern(parsed);
+        pfree(pattern_lower);
+    }
+    PG_CATCH();
+    {
+        /* Emergency cleanup */
+        if (parsed) biscuit_free_parsed_pattern(parsed);
+        if (result) biscuit_roaring_free(result);
+        if (pattern_lower) pfree(pattern_lower);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
     
     return result ? result : biscuit_roaring_create();
 }
@@ -4408,19 +5820,15 @@ biscuit_rescan_multicolumn(IndexScanDesc scan, ScanKey keys, int nkeys,
     so->num_results = 0;
     so->current = 0;
     
-    /* Early exit checks */
     if (nkeys == 0 || !so->index || so->index->num_records == 0) {
-        //elog(INFO, "Biscuit Multi-column: No keys or empty index");
         return;
     }
     
-    /* ==================== OPTIMIZATION DETECTION ==================== */
+    /* REMOVED: ILIKE error check - we now support it! */
     
-    /* OPTIMIZATION 1: Detect if this is an aggregate query (COUNT, EXISTS) */
+    /* Detect optimizations */
     is_aggregate = biscuit_is_aggregate_query(scan);
     needs_sorting = !is_aggregate;
-    
-    /* OPTIMIZATION 2: Try to detect LIMIT hint */
     limit_hint = biscuit_estimate_limit_hint(scan);
     
     /* Update scan state */
@@ -4428,68 +5836,53 @@ biscuit_rescan_multicolumn(IndexScanDesc scan, ScanKey keys, int nkeys,
     so->needs_sorted_access = needs_sorting;
     so->limit_remaining = limit_hint;
     
-    //elog(INFO, "=== Biscuit Multi-column Query ===");
-    //elog(INFO, "Columns: %d, Keys: %d", so->index->num_columns, nkeys);
-    //elog(INFO, "Query type: %s", is_aggregate ? "AGGREGATE (COUNT/EXISTS)" : "REGULAR");
-    //elog(INFO, "TID sorting: %s", needs_sorting ? "ENABLED (sequential I/O)" : "DISABLED (bitmap scan)");
-    //elog(INFO, "LIMIT hint: %d", limit_hint > 0 ? limit_hint : -1);
-    
-    /* ==================== SAFETY CHECKS ==================== */
-    
     if (!so->index->column_indices) {
-        //elog(ERROR, "Biscuit: Multi-column index not properly initialized");
+        elog(ERROR, "Biscuit: Multi-column index not properly initialized");
         return;
     }
     
-    /* ==================== QUERY PLANNING ==================== */
-    
-    /* Create optimized query plan - reorders predicates for best performance */
+    /* Create optimized query plan */
     plan = create_query_plan(keys, nkeys);
     
     if (plan->count == 0) {
-        //elog(INFO, "Biscuit: No valid predicates after planning");
         pfree(plan->predicates);
         pfree(plan);
         return;
     }
     
-    /* Log the execution plan */
     log_query_plan(plan);
     
-    /* ==================== EXECUTE FIRST PREDICATE ==================== */
-    
+    /* Execute first predicate */
     QueryPredicate *first_pred = &plan->predicates[0];
-    bool is_not_like = (first_pred->scan_key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY);
+    int first_strategy = first_pred->scan_key->sk_strategy;
+    bool is_not_like = (first_strategy == BISCUIT_NOT_LIKE_STRATEGY || 
+                        first_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
+    bool is_ilike = (first_strategy == BISCUIT_ILIKE_STRATEGY || 
+                     first_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
     
-    //elog(INFO, "[Step 1/%d] Initial query: Col=%d Pattern='%s' Strategy=%s (Priority=%d, Selectivity=%.3f)", 
-    //     plan->count, first_pred->column_index, first_pred->pattern,
-    //     is_not_like ? "NOT LIKE" : "LIKE",
-    //     first_pred->priority, first_pred->selectivity_score);
-    
-    /* SAFETY: Verify column index */
     if (first_pred->column_index < 0 || 
         first_pred->column_index >= so->index->num_columns) {
-        //elog(ERROR, "Biscuit: Invalid column index %d (index has %d columns)", 
-        //     first_pred->column_index, so->index->num_columns);
+        elog(ERROR, "Biscuit: Invalid column index %d", first_pred->column_index);
         goto cleanup;
     }
     
-    /* Query the first column pattern */
-    candidates = biscuit_query_column_pattern(
-        so->index, first_pred->column_index, first_pred->pattern);
+    /* Route to appropriate query function based on strategy */
+    if (is_ilike) {
+        candidates = biscuit_query_column_pattern_ilike(
+            so->index, first_pred->column_index, first_pred->pattern);
+    } else {
+        candidates = biscuit_query_column_pattern(
+            so->index, first_pred->column_index, first_pred->pattern);
+    }
     
     if (!candidates) {
-        //elog(WARNING, "Biscuit: First query returned NULL bitmap");
         candidates = biscuit_roaring_create();
     }
 
-    /* ✅ PER-PREDICATE INVERSION: Handle NOT LIKE for first predicate */
+    /* Handle NOT LIKE/NOT ILIKE for first predicate */
     if (is_not_like) {
         RoaringBitmap *all_records = biscuit_roaring_create();
         int j;
-        
-        //elog(INFO, "  → Inverting bitmap for NOT LIKE (before: %llu matches)", 
-        //     (unsigned long long)biscuit_roaring_count(candidates));
         
         #ifdef HAVE_ROARING
         roaring_bitmap_add_range(all_records, 0, so->index->num_records);
@@ -4499,72 +5892,53 @@ biscuit_rescan_multicolumn(IndexScanDesc scan, ScanKey keys, int nkeys,
         }
         #endif
         
-        /* Invert: all_records = all_records - candidates */
         biscuit_roaring_andnot_inplace(all_records, candidates);
         biscuit_roaring_free(candidates);
         candidates = all_records;
-        
-        //elog(INFO, "  → After inversion: %llu matches", 
-        //     (unsigned long long)biscuit_roaring_count(candidates));
     }
     
-    /* Filter tombstones immediately */
+    /* Filter tombstones */
     if (so->index->tombstone_count > 0) {
         biscuit_roaring_andnot_inplace(candidates, so->index->tombstones);
     }
     
-    uint64_t initial_count = biscuit_roaring_count(candidates);
-    //elog(INFO, "  → Initial result: %llu candidates", (unsigned long long)initial_count);
-    
-    /* OPTIMIZATION: Early exit if first predicate returns nothing */
-    if (initial_count == 0) {
-        //elog(INFO, "=== Query complete: first predicate matched nothing ===");
+    if (biscuit_roaring_count(candidates) == 0) {
         biscuit_roaring_free(candidates);
         goto cleanup;
     }
     
-    /* ==================== EXECUTE REMAINING PREDICATES ==================== */
-    
+    /* Execute remaining predicates */
     for (i = 1; i < plan->count; i++) {
         QueryPredicate *pred = &plan->predicates[i];
-        uint64_t before_count = biscuit_roaring_count(candidates);
         RoaringBitmap *col_result;
-        uint64_t after_count;
-        double reduction;
-        bool pred_is_not_like = (pred->scan_key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY);
+        int pred_strategy = pred->scan_key->sk_strategy;
+        bool pred_is_not_like = (pred_strategy == BISCUIT_NOT_LIKE_STRATEGY ||
+                                  pred_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
+        bool pred_is_ilike = (pred_strategy == BISCUIT_ILIKE_STRATEGY ||
+                              pred_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
         
-        /* SAFETY: Verify column index */
         if (pred->column_index < 0 || 
             pred->column_index >= so->index->num_columns) {
-            //elog(WARNING, "Biscuit: Skipping invalid column index %d", pred->column_index);
             continue;
         }
         
-        //elog(INFO, "[Step %d/%d] Applying Col=%d Pattern='%s' Strategy=%s on %llu candidates", 
-        //     i + 1, plan->count, pred->column_index, pred->pattern,
-        //     pred_is_not_like ? "NOT LIKE" : "LIKE",
-        //     (unsigned long long)before_count);
-        //elog(INFO, "  → (Priority=%d, Selectivity=%.3f, Type=%s)", 
-        //     pred->priority, pred->selectivity_score,
-        //     pred->is_exact ? "EXACT" : pred->is_prefix ? "PREFIX" : 
-        //     pred->is_suffix ? "SUFFIX" : pred->is_substring ? "SUBSTRING" : "COMPLEX");
-        
-        /* Query this column pattern */
-        col_result = biscuit_query_column_pattern(
-            so->index, pred->column_index, pred->pattern);
+        /* Route to appropriate query function */
+        if (pred_is_ilike) {
+            col_result = biscuit_query_column_pattern_ilike(
+                so->index, pred->column_index, pred->pattern);
+        } else {
+            col_result = biscuit_query_column_pattern(
+                so->index, pred->column_index, pred->pattern);
+        }
         
         if (!col_result) {
-            //elog(WARNING, "Biscuit: Query returned NULL, using empty bitmap");
             col_result = biscuit_roaring_create();
         }
         
-        /* ✅ PER-PREDICATE INVERSION: Handle NOT LIKE for this predicate */
+        /* Handle NOT LIKE/NOT ILIKE */
         if (pred_is_not_like) {
             RoaringBitmap *all_records = biscuit_roaring_create();
             int j;
-            
-            //elog(INFO, "  → Inverting bitmap for NOT LIKE (before: %llu matches)", 
-            //     (unsigned long long)biscuit_roaring_count(col_result));
             
             #ifdef HAVE_ROARING
             roaring_bitmap_add_range(all_records, 0, so->index->num_records);
@@ -4574,103 +5948,32 @@ biscuit_rescan_multicolumn(IndexScanDesc scan, ScanKey keys, int nkeys,
             }
             #endif
             
-            /* Invert: all_records = all_records - col_result */
             biscuit_roaring_andnot_inplace(all_records, col_result);
             biscuit_roaring_free(col_result);
             col_result = all_records;
-            
-            //elog(INFO, "  → After inversion: %llu matches", 
-            //     (unsigned long long)biscuit_roaring_count(col_result));
         }
         
-        /* Intersect with existing candidates (AND logic) */
+        /* Intersect with candidates */
         biscuit_roaring_and_inplace(candidates, col_result);
         biscuit_roaring_free(col_result);
         
-        after_count = biscuit_roaring_count(candidates);
-        reduction = (before_count > 0) ? 
-            100.0 * (before_count - after_count) / before_count : 0.0;
-        
-        //elog(INFO, "  → Result: %llu → %llu records (%.1f%% filtered)", 
-        //     (unsigned long long)before_count, (unsigned long long)after_count, reduction);
-        
-        /* OPTIMIZATION: Early exit if no candidates remain */
-        if (after_count == 0) {
-            //elog(INFO, "=== Query complete: no matches after step %d/%d ===", 
-            //     i + 1, plan->count);
+        if (biscuit_roaring_count(candidates) == 0) {
             break;
         }
-        
-        /* OPTIMIZATION: Early exit if LIMIT reached and more predicates won't help */
-        if (limit_hint > 0 && after_count <= (uint64_t)limit_hint && 
-            i < plan->count - 1) {
-            /* Check if remaining predicates are likely to filter further */
-            bool remaining_are_selective = true;
-            int j;
-            for (j = i + 1; j < plan->count; j++) {
-                if (plan->predicates[j].selectivity_score > 0.5) {
-                    remaining_are_selective = false;
-                    break;
-                }
-            }
-            
-            if (!remaining_are_selective) {
-                //elog(INFO, "=== LIMIT optimization: %llu ≤ %d and remaining predicates not selective ===",
-                //     (unsigned long long)after_count, limit_hint);
-                //elog(INFO, "=== Stopping early at step %d/%d ===", i + 1, plan->count);
-                break;
-            }
-        }
     }
     
-    /* ==================== COLLECT RESULTS WITH OPTIMIZATIONS ==================== */
-    
-    uint64_t final_count = biscuit_roaring_count(candidates);
-    double overall_reduction = (initial_count > 0) ?
-        100.0 * (initial_count - final_count) / initial_count : 0.0;
-    
-    //elog(INFO, "=== Predicate Filtering Complete ===");
-    //elog(INFO, "Total: %llu → %llu candidates (%.1f%% filtered)",
-    //     (unsigned long long)initial_count, (unsigned long long)final_count, overall_reduction);
-    
-    if (final_count == 0) {
-        //elog(INFO, "=== Query complete: no final matches ===");
-        biscuit_roaring_free(candidates);
-        goto cleanup;
-    }
-    
-    /* Convert final candidates to TID array with optimizations */
-    //elog(INFO, "Converting %llu candidates to TID array...", (unsigned long long)final_count);
-    
+    /* Collect results */
     biscuit_collect_tids_optimized(so->index, candidates, 
                                     &so->results, &so->num_results,
                                     needs_sorting, limit_hint);
-    
-    //elog(INFO, "=== QUERY COMPLETE ===");
-    //elog(INFO, "Final matches: %d TIDs", so->num_results);
-    //elog(INFO, "Optimizations applied:");
-    //elog(INFO, "  - Query reordering: %d predicates sorted by selectivity", plan->count);
-    //elog(INFO, "  - Aggregate optimization: %s", is_aggregate ? "YES (no sorting)" : "NO");
-    //elog(INFO, "  - LIMIT optimization: %s", limit_hint > 0 ? "YES (early termination)" : "NO");
-    //elog(INFO, "  - Overall selectivity: %.1f%% reduction", overall_reduction);
     
     biscuit_roaring_free(candidates);
     
 cleanup:
     biscuit_free_query_plan(plan);
 }
-/*
-  * ALSO UPDATE: Main rescan to properly route multi-column queries
-  */
- /*
-  * Main rescan function - routes to appropriate handler based on index structure
-  */
-/*
- * biscuit_rescan - FIXED VERSION with proper multi-key support
- * 
- * Handles multiple LIKE predicates on single column correctly
- * Example: name LIKE '%a%' AND name LIKE '%3%'
- */
+
+
 static void
 biscuit_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
                ScanKey orderbys, int norderbys)
@@ -4698,8 +6001,7 @@ biscuit_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
         return;
     }
     
-    /* ==================== DETECT OPTIMIZATIONS ==================== */
-    
+    /* Detect optimizations */
     is_aggregate = biscuit_is_aggregate_query(scan);
     needs_sorting = !is_aggregate;
     limit_hint = biscuit_estimate_limit_hint(scan);
@@ -4715,14 +6017,13 @@ biscuit_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
         return;
     }
     
-    /* ==================== SINGLE-COLUMN MULTI-KEY RESCAN ==================== */
-    
     /* Process ALL keys and intersect results (AND logic) */
     for (i = 0; i < nkeys; i++) {
         ScanKey key = &keys[i];
         text *pattern_text;
         char *pattern;
         RoaringBitmap *key_result;
+        bool is_not;
         
         if (key->sk_flags & SK_ISNULL) {
             continue;
@@ -4731,8 +6032,38 @@ biscuit_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
         pattern_text = DatumGetTextPP(key->sk_argument);
         pattern = text_to_cstring(pattern_text);
         
-        /* Query using Biscuit engine */
-        key_result = biscuit_query_pattern(so->index, pattern);
+        /* Route based on strategy */
+        switch (key->sk_strategy) {
+            case BISCUIT_LIKE_STRATEGY:
+                /* Case-sensitive query - use original index */
+                key_result = biscuit_query_pattern(so->index, pattern);
+                is_not = false;
+                break;
+                
+            case BISCUIT_NOT_LIKE_STRATEGY:
+                /* Case-sensitive negation - use original index */
+                key_result = biscuit_query_pattern(so->index, pattern);
+                is_not = true;
+                break;
+                
+            case BISCUIT_ILIKE_STRATEGY:
+                /* NEW: Case-insensitive query - use lowercase index */
+                key_result = biscuit_query_pattern_ilike(so->index, pattern);
+                is_not = false;
+                break;
+                
+            case BISCUIT_NOT_ILIKE_STRATEGY:
+                /* NEW: Case-insensitive negation - use lowercase index */
+                key_result = biscuit_query_pattern_ilike(so->index, pattern);
+                is_not = true;
+                break;
+                
+            default:
+                elog(ERROR, "Unsupported scan strategy: %d", key->sk_strategy);
+                pfree(pattern);
+                continue;
+        }
+        
         pfree(pattern);
         
         if (!key_result) {
@@ -4740,8 +6071,8 @@ biscuit_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
             return;
         }
         
-        /* Handle NOT LIKE by inverting the bitmap */
-        if (key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY) {
+        /* Handle NOT variants by inverting bitmap */
+        if (is_not) {
             RoaringBitmap *all_records = biscuit_roaring_create();
             int j;
             
@@ -4758,16 +6089,13 @@ biscuit_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
             key_result = all_records;
         }
         
-        /* Intersect with previous results (AND logic for multiple predicates) */
+        /* Intersect with previous results (AND logic) */
         if (result == NULL) {
-            /* First predicate - just use its result */
             result = key_result;
         } else {
-            /* Subsequent predicates - intersect with accumulated result */
             biscuit_roaring_and_inplace(result, key_result);
             biscuit_roaring_free(key_result);
             
-            /* Early exit optimization if no matches remain */
             if (biscuit_roaring_is_empty(result)) {
                 biscuit_roaring_free(result);
                 result = NULL;
@@ -4780,13 +6108,12 @@ biscuit_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
         return;
     }
     
-    /* Filter out tombstones (deleted records) */
+    /* Filter out tombstones */
     if (so->index->tombstone_count > 0) {
         biscuit_roaring_andnot_inplace(result, so->index->tombstones);
     }
     
-    /* ==================== COLLECT RESULTS WITH OPTIMIZATIONS ==================== */
-    
+    /* Collect results with optimizations */
     biscuit_collect_tids_optimized(so->index, result, 
                                     &so->results, &so->num_results, 
                                     needs_sorting, limit_hint);
@@ -4864,7 +6191,7 @@ biscuit_getbitmap(IndexScanDesc scan, TIDBitmap *tbm)
             ntids = so->num_results;
         }
         
-        //elog(INFO, "Biscuit: Bitmap scan complete, added %lld TIDs", (long long)ntids);
+        //elog(DEBUG1, "Biscuit: Bitmap scan complete, added %lld TIDs", (long long)ntids);
     }
     
     return ntids;
@@ -4898,8 +6225,8 @@ biscuit_handler(PG_FUNCTION_ARGS)
 {
     IndexAmRoutine *amroutine = makeNode(IndexAmRoutine);
     
-    amroutine->amstrategies = 2;
-    amroutine->amsupport = 1;
+    amroutine->amstrategies = 4;
+    amroutine->amsupport = 2;
     amroutine->amoptsprocnum = 0;
     amroutine->amcanorder = false;
     amroutine->amcanorderbyop = false;

@@ -21,7 +21,7 @@
     <script src="_static/js/theme.js"></script>
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
-    <link rel="prev" title="Performance Tuning Guide" href="performance.html" />
+    <link rel="prev" title="Benchmark Environment" href="benchmark_env.html" />
      
 
     <!-- Google Search Console -->
@@ -278,7 +278,7 @@
 <li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-types">Pattern Types</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="patterns.html#exact-match-fastest">1. Exact Match (Fastest)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="patterns.html#prefix-match-very-fast">2. Prefix Match (Very Fast)</a></li>
-<li class="toctree-l3"><a class="reference internal" href="patterns.html#suffix-match-fast">3. Suffix Match (Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#suffix-match-very-fast">3. Suffix Match (Very Fast)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="patterns.html#substring-match-moderate-speed">4. Substring Match (Moderate Speed)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="patterns.html#infix-match-fast">5. Infix Match (Fast)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="patterns.html#complex-multi-part-patterns">6. Complex Multi-Part Patterns</a></li>
@@ -365,7 +365,6 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#migration-from-single-column">Migration from Single-Column</a></li>
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#next-steps">Next Steps</a></li>
-<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#examples-repository">Examples Repository</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="performance.html">Performance Tuning Guide</a><ul>
@@ -428,6 +427,14 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#performance-monitoring-dashboard">Performance Monitoring Dashboard</a></li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="benchmark_env.html">Benchmark Environment</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#system-overview">System Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#benchmark-configuration">Benchmark Configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#benchmark-methodology">Benchmark Methodology</a></li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#reproducibility-instructions">Reproducibility Instructions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#notes">Notes</a></li>
 </ul>
 </li>
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Frequently Asked Questions</a><ul>
@@ -726,7 +733,6 @@ sudo<span class="w"> </span>make<span class="w"> </span>install
 <li><p>Number of columns</p></li>
 <li><p>Average string length</p></li>
 <li><p>Available memory</p></li>
-<li><p>Disk I/O speed</p></li>
 <li><p>System load</p></li>
 </ul>
 <p><strong>Benchmark with your data</strong> to determine actual build times.</p>
@@ -846,15 +852,6 @@ sudo<span class="w"> </span>make<span class="w"> </span>install
 <span class="c1">-- Query with lowercase</span>
 <span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
 <span class="k">WHERE</span><span class="w"> </span><span class="k">LOWER</span><span class="p">(</span><span class="n">name</span><span class="p">)</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%wireless%&#39;</span><span class="p">;</span>
-</pre></div>
-</div>
-<p><strong>Alternative</strong>: Create both indexes:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Case-sensitive</span>
-<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">);</span>
-
-<span class="c1">-- Case-insensitive</span>
-<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name_lower</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
-<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="k">LOWER</span><span class="p">(</span><span class="n">name</span><span class="p">));</span>
 </pre></div>
 </div>
 </section>
@@ -1287,7 +1284,7 @@ sudo<span class="w"> </span>rm<span class="w"> </span><span class="k">$(</span>p
 <li><p><strong>Documentation</strong>: <a class="reference external" href="https://biscuit.readthedocs.io">ReadTheDocs</a></p></li>
 <li><p><strong>Discussions</strong>: <a class="reference external" href="https://github.com/crystallinecore/biscuit/discussions">GitHub Discussions</a></p></li>
 <li><p><strong>Bug Reports</strong>: <a class="reference external" href="https://github.com/crystallinecore/biscuit/issues">GitHub Issues</a></p></li>
-<li><p><strong>Email</strong>: <a class="reference external" href="mailto:sivaprasad&#46;off&#37;&#52;&#48;gmail&#46;com">sivaprasad<span>&#46;</span>off<span>&#64;</span>gmail<span>&#46;</span>com</a></p></li>
+<li><p><strong>Email</strong>: sivaprasad.off&#64;gmail.com</p></li>
 </ul>
 </section>
 <hr class="docutils" />
@@ -1330,9 +1327,9 @@ sudo<span class="w"> </span>rm<span class="w"> </span><span class="k">$(</span>p
 <p>Future development may include:</p>
 <ul class="simple">
 <li><p>Enhanced parallel index builds</p></li>
+<li><p>Case-insensitive indexing support</p></li>
 <li><p>Additional compression options</p></li>
 <li><p>Extended monitoring capabilities</p></li>
-<li><p>Performance dashboard tools</p></li>
 </ul>
 <p><strong>Long-term possibilities</strong>:</p>
 <ul class="simple">
@@ -1394,11 +1391,10 @@ sudo<span class="w"> </span>rm<span class="w"> </span><span class="k">$(</span>p
 <li><p>Check the <a class="reference internal" href="installation.html"><span class="std std-doc">Installation Guide</span></a></p></li>
 <li><p>Read the <a class="reference internal" href="quickstart.html"><span class="std std-doc">Quick Start</span></a></p></li>
 <li><p>Browse <a class="reference internal" href="performance.html"><span class="std std-doc">Performance Tuning</span></a></p></li>
-<li><p>Contact us: <a class="reference external" href="mailto:sivaprasad&#46;off&#37;&#52;&#48;gmail&#46;com">sivaprasad<span>&#46;</span>off<span>&#64;</span>gmail<span>&#46;</span>com</a></p></li>
+<li><p>Contact us: sivaprasad.off&#64;gmail.com</p></li>
 </ul>
 <hr class="docutils" />
 <p><strong>Happy pattern matching! 🚀</strong></p>
-<hr class="docutils" />
 </section>
 </section>
 
@@ -1406,7 +1402,7 @@ sudo<span class="w"> </span>rm<span class="w"> </span><span class="k">$(</span>p
            </div>
           </div>
           <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
-        <a href="performance.html" class="btn btn-neutral float-left" title="Performance Tuning Guide" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="benchmark_env.html" class="btn btn-neutral float-left" title="Benchmark Environment" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
     </div>
 
   <hr/>

@@ -69,7 +69,7 @@ WHERE name LIKE 'Wireless Mouse%'
 
 ---
 
-### 3. Suffix Match (Fast)
+### 3. Suffix Match (Very Fast)
 
 **Pattern**: `'%string'` - Ends with concrete characters, starts with `%`
 
@@ -243,7 +243,7 @@ WHERE code LIKE '____'  -- Exactly 4 characters
 WHERE sku LIKE 'A___-___'  -- Specific format
 
 -- ⚠️ SLOWER: Many underscores without anchors
-WHERE value LIKE '%_____%'  -- 5+ chars substring
+WHERE value LIKE '%_ab%c_%'  -- 5+ chars substring
 ```
 
 ---

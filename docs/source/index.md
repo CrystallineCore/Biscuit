@@ -13,6 +13,7 @@ api
 patterns
 multicolumn
 performance
+benchmark_env
 faq
 ```
 
@@ -101,5 +102,3 @@ Biscuit is open-source software released under the PostgreSQL License.
 **Ready to accelerate your pattern matching queries?** 
 
 👉 [Start with the Installation Guide](installation.md)
-
----

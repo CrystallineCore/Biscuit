@@ -1,5 +1,45 @@
 # Biscuit Index Extension - Changelog
 
+
+## Version 2.1.0 (2025-12-11)
+
+### ✨ New Features
+
+#### ILIKE Operator Support (Case-Insensitive Matching)
+
+Biscuit now provides **full support for the `ILIKE` operator**, enabling efficient case-insensitive wildcard searches directly through the index.
+
+**Capabilities:**
+
+* Optimized execution path for `ILIKE` and `NOT ILIKE`
+* Works seamlessly in mixed predicate chains alongside `LIKE` / `NOT LIKE`
+* Fully compatible with multi-column Biscuit indexes
+
+**Examples:**
+
+```sql
+-- Case-insensitive suffix search
+SELECT * FROM users WHERE name ILIKE '%son';
+
+-- Combination queries
+SELECT * FROM users
+WHERE name ILIKE 'a%' AND email NOT ILIKE '%test%';
+```
+
+##
+
+#### Removed Length Constraint for Indexing
+
+The previous hardcoded **256-character indexing limit** has been removed.
+Biscuit now indexes values of **any length**, including very long strings.
+
+**Impact:**
+
+* All text values—short or arbitrarily long—are now included in bitmap generation
+* More consistent query coverage for fields like descriptions, logs, and message bodies
+
+---
+
 ## Version 2.0.1 (2024-12-06)
 
 ### 🐞 Bug Fixes

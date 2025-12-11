@@ -3,19 +3,43 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PostgreSQL: 12+](https://img.shields.io/badge/PostgreSQL-16%2B-blue.svg)](https://www.postgresql.org/)
 
-**Biscuit** is a specialized PostgreSQL index access method (IAM) designed for blazing-fast pattern matching on `LIKE`  queries, with native support for multi-column searches. It eliminates the recheck overhead of trigram indexes while delivering significant performance improvements on wildcard-heavy queries. It stands for _Bitmap Indexed Searching with Comprehensive Union and Intersection Techniques_.
+**Biscuit** is a specialized PostgreSQL index access method (IAM) designed for blazing-fast pattern matching on `LIKE` and `ILIKE` queries, with native support for multi-column searches. It eliminates the recheck overhead of trigram indexes while delivering significant performance improvements on wildcard-heavy queries. It stands for _Bitmap Indexed Searching with Comprehensive Union and Intersection Techniques_.
 
 ---
 
-**What's new?**
+### What's new?
 
-**v2.0.1 (2024-12-06)**
+**1) ILIKE Operator Support (Case-Insensitive Matching)**
 
-* **Fixed incorrect results** when using multiple `LIKE` / `NOT LIKE` predicates on the same column.
-* Root cause: global (not per-predicate) bitmap inversion.
-* Fix: correct per-predicate bitmap handling; all multi-filter patterns now return accurate results.
-* Added full, efficient support for the `NOT LIKE` operator.
-* Backward-compatible; recommended to update and re-verify critical queries.
+Biscuit now provides **full support for the `ILIKE` operator**, enabling efficient case-insensitive wildcard searches directly through the index.
+
+**Capabilities:**
+
+* Optimized execution path for `ILIKE` and `NOT ILIKE`
+* Works seamlessly in mixed predicate chains alongside `LIKE` / `NOT LIKE`
+* Fully compatible with multi-column Biscuit indexes
+
+**Examples:**
+
+```sql
+-- Case-insensitive suffix search
+SELECT * FROM users WHERE name ILIKE '%son';
+
+-- Combination queries
+SELECT * FROM users
+WHERE name ILIKE 'a%' AND email NOT ILIKE '%test%';
+```
+
+**2) Removed Length Constraint for Indexing**
+
+The previous hardcoded **256-character indexing limit** has been removed.
+Biscuit now indexes values of **any length**, including very long strings.
+
+**Impact:**
+
+* All text values—short or arbitrarily long—are now included in bitmap generation
+* More consistent query coverage for fields like descriptions, logs, and message bodies
+
 
 ---
 
@@ -522,9 +546,8 @@ Currently, Biscuit doesn't expose tunable options. All optimizations are automat
 ### **What Biscuit Does NOT Support**
 
 1. **Regular expressions** - Only `LIKE` / `ILIKE` patterns with `%` and `_`
-2. **Case-insensitive by default** - Use  PostgreSQL's `ILIKE`  for case-insensitive
-3. **Locale-specific collations** - String comparisons are byte-based
-4. **Amcanorder = false** - Cannot provide ordered scans directly (but see below)
+2. **Locale-specific collations** - String comparisons are byte-based
+3. **Amcanorder = false** - Cannot provide ordered scans directly (but see below)
 
 ### **ORDER BY + LIMIT Behavior**
 
@@ -563,19 +586,20 @@ Biscuit stores bitmaps in memory:
 
 ##  **Comparison with pg_trgm**
 
-| Feature                  | Biscuit               | pg_trgm (GIN)        |
-|--------------------------|-----------------------|----------------------|
-| **Wildcard patterns**    | ✔ Native, exact       | ✔ Approximate       |
-| **Recheck overhead**     | ✔ None (deterministic)  | ✗ Always required   |
-| **Multi-column**         | ✔ Optimized           | ⚠️ Via btree_gist    |
-| **Aggregate queries**    | ✔ Optimized           | ✗ Same cost         |
-| **ORDER BY + LIMIT**     | ✔ Works well          | ✔ Ordered scans     |
-| **Memory usage**         | ⚠️ Higher              | ✔ Lower             |
-| **Regex support**        | ✗ No                  | ✔ Yes               |
-| **Similarity search**    | ✗ No                  | ✔ Yes               |
+| Feature                  | Biscuit                     | pg_trgm (GIN)        |
+|--------------------------|------------------------------|----------------------|
+| **Wildcard patterns**    | ✔ Native, exact              | ✔ Approximate        |
+| **Recheck overhead**     | ✔ None (deterministic)       | ✗ Always required    |
+| **Multi-column**         | ✔ Optimized                  | ⚠️ Via btree_gist     |
+| **Aggregate queries**    | ✔ Optimized                  | ✗ Same cost          |
+| **ORDER BY + LIMIT**     | ✔ Works well                 | ✔ Ordered scans       |
+| **Regex support**        | ✗ No                         | ✔ Yes                |
+| **Similarity search**    | ✗ No                         | ✔ Yes                |
+| **ILIKE support**        | ✔ Full (as of v2.1.0)         | ✔ Native             |
+
 
 **When to use Biscuit:**
-- ✔ Wildcard-heavy `LIKE` queries (`%`, `_`)
+- ✔ Wildcard-heavy `LIKE` / `ILIKE` queries (`%`, `_`)
 - ✔ Multi-column pattern matching
 - ✔ Need exact results (no false positives)
 - ✔ `COUNT(*)` / aggregate queries
@@ -660,6 +684,15 @@ BiscuitIndex
 │   ├── char_cache[256]: RoaringBitmap  // Character existence
 │   ├── length_bitmaps[]: RoaringBitmap[]  // Exact lengths
 │   └── length_ge_bitmaps[]: RoaringBitmap[]  // Min lengths
+├── insensitive_column_indices[]: ColumnIndex[]
+│   ├── insensitive_pos_idx[256]: CharIndex    // Forward position bitmaps
+│   │   └── entries[]: PosEntry[]
+│   │       ├── pos: int
+│   │       └── bitmap: RoaringBitmap
+│   ├── insensitive_neg_idx[256]: CharIndex    // Backward position bitmaps
+│   ├── insensitive_char_cache[256]: RoaringBitmap  // Character existence
+│   ├── insensitive_length_bitmaps[]: RoaringBitmap[]  // Exact lengths
+│   └── insensitive_length_ge_bitmaps[]: RoaringBitmap[]  // Min lengths
 ├── tids[]: ItemPointerData[]      // Record TIDs
 ├── column_data_cache[][]: char**  // Cached string data
 └── tombstones: RoaringBitmap      // Deleted records

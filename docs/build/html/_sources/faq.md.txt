@@ -199,7 +199,6 @@ Build time varies significantly based on:
 - Number of columns
 - Average string length
 - Available memory
-- Disk I/O speed
 - System load
 
 **Benchmark with your data** to determine actual build times.
@@ -326,16 +325,6 @@ USING biscuit (LOWER(name));
 -- Query with lowercase
 SELECT * FROM products 
 WHERE LOWER(name) LIKE '%wireless%';
-```
-
-**Alternative**: Create both indexes:
-```sql
--- Case-sensitive
-CREATE INDEX idx_name ON products USING biscuit (name);
-
--- Case-insensitive
-CREATE INDEX idx_name_lower ON products 
-USING biscuit (LOWER(name));
 ```
 
 ---
@@ -850,9 +839,9 @@ We welcome contributions!
 
 Future development may include:
 - Enhanced parallel index builds
+- Case-insensitive indexing support
 - Additional compression options
 - Extended monitoring capabilities
-- Performance dashboard tools
 
 **Long-term possibilities**:
 - Persistent bitmap storage options
@@ -914,4 +903,3 @@ Can't find your answer?
 
 **Happy pattern matching! 🚀**
 
----

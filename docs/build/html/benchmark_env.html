@@ -6,13 +6,13 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Installation Guide &mdash; BISCUIT 2.0.0 Documentation</title>
+  <title>Benchmark Environment &mdash; BISCUIT 2.0.0 Documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
 
   
     <link rel="shortcut icon" href="_static/favicon.ico"/>
-    <link rel="canonical" href="https://biscuit.readthedocs.io/installation.html" />
+    <link rel="canonical" href="https://biscuit.readthedocs.io/benchmark_env.html" />
       <script src="_static/jquery.js?v=5d32c60e"></script>
       <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
       <script src="_static/documentation_options.js?v=51b770b3"></script>
@@ -21,8 +21,8 @@
     <script src="_static/js/theme.js"></script>
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
-    <link rel="next" title="Quick Start Tutorial" href="quickstart.html" />
-    <link rel="prev" title="Biscuit Documentation" href="index.html" />
+    <link rel="next" title="Frequently Asked Questions" href="faq.html" />
+    <link rel="prev" title="Performance Tuning Guide" href="performance.html" />
      
 
     <!-- Google Search Console -->
@@ -90,8 +90,8 @@
     },{
         "@type": "ListItem",
         "position": 2,
-        "name": "Installation Guide",
-        "item": "https://biscuit.readthedocs.io/installation.html"
+        "name": "Benchmark Environment",
+        "item": "https://biscuit.readthedocs.io/benchmark_env.html"
     }]
     }
     </script>
@@ -136,47 +136,47 @@
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
               <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
 <ul class="current">
-<li class="toctree-l1 current"><a class="current reference internal" href="#">Installation Guide</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="#prerequisites">Prerequisites</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#check-postgresql-version">Check PostgreSQL Version</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#prerequisites">Prerequisites</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#check-postgresql-version">Check PostgreSQL Version</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="#installation-methods">Installation Methods</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#method-1-from-source-recommended">Method 1: From Source (Recommended)</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#step-1-install-build-dependencies">Step 1: Install Build Dependencies</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#step-2-clone-repository">Step 2: Clone Repository</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#step-3-build-and-install">Step 3: Build and Install</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#step-4-verify-installation">Step 4: Verify Installation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#installation-methods">Installation Methods</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#method-1-from-source-recommended">Method 1: From Source (Recommended)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-1-install-build-dependencies">Step 1: Install Build Dependencies</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-2-clone-repository">Step 2: Clone Repository</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-3-build-and-install">Step 3: Build and Install</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#step-4-verify-installation">Step 4: Verify Installation</a></li>
 </ul>
 </li>
-<li class="toctree-l3"><a class="reference internal" href="#method-2-with-croaring-support-enhanced-performance">Method 2: With CRoaring Support (Enhanced Performance)</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#install-croaring-library">Install CRoaring Library</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#build-biscuit-with-roaring">Build Biscuit with Roaring</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#method-2-with-croaring-support-enhanced-performance">Method 2: With CRoaring Support (Enhanced Performance)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#install-croaring-library">Install CRoaring Library</a></li>
+<li class="toctree-l4"><a class="reference internal" href="installation.html#build-biscuit-with-roaring">Build Biscuit with Roaring</a></li>
 </ul>
 </li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="#enable-extension-in-database">Enable Extension in Database</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#post-installation-configuration">Post-Installation Configuration</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#set-appropriate-memory-limits">Set Appropriate Memory Limits</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#enable-query-logging-optional">Enable Query Logging (Optional)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#enable-extension-in-database">Enable Extension in Database</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#post-installation-configuration">Post-Installation Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#set-appropriate-memory-limits">Set Appropriate Memory Limits</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#enable-query-logging-optional">Enable Query Logging (Optional)</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="#verify-installation-with-test">Verify Installation with Test</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#troubleshooting">Troubleshooting</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#error-could-not-load-library">Error: “could not load library”</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#error-extension-does-not-exist">Error: “extension does not exist”</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#build-errors-with-roaring">Build Errors with Roaring</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#verify-installation-with-test">Verify Installation with Test</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#troubleshooting">Troubleshooting</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#error-could-not-load-library">Error: “could not load library”</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#error-extension-does-not-exist">Error: “extension does not exist”</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#build-errors-with-roaring">Build Errors with Roaring</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="#uninstallation">Uninstallation</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#next-steps">Next Steps</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#platform-specific-notes">Platform-Specific Notes</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#windows">Windows</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#docker">Docker</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#uninstallation">Uninstallation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#platform-specific-notes">Platform-Specific Notes</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#windows">Windows</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#docker">Docker</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="#getting-help">Getting Help</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#getting-help">Getting Help</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick Start Tutorial</a><ul>
@@ -279,7 +279,7 @@
 <li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-types">Pattern Types</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="patterns.html#exact-match-fastest">1. Exact Match (Fastest)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="patterns.html#prefix-match-very-fast">2. Prefix Match (Very Fast)</a></li>
-<li class="toctree-l3"><a class="reference internal" href="patterns.html#suffix-match-very-fast">3. Suffix Match (Very Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#suffix-match-fast">3. Suffix Match (Fast)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="patterns.html#substring-match-moderate-speed">4. Substring Match (Moderate Speed)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="patterns.html#infix-match-fast">5. Infix Match (Fast)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="patterns.html#complex-multi-part-patterns">6. Complex Multi-Part Patterns</a></li>
@@ -366,6 +366,7 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#migration-from-single-column">Migration from Single-Column</a></li>
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#next-steps">Next Steps</a></li>
+<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#examples-repository">Examples Repository</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="performance.html">Performance Tuning Guide</a><ul>
@@ -430,12 +431,12 @@
 <li class="toctree-l2"><a class="reference internal" href="performance.html#next-steps">Next Steps</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="benchmark_env.html">Benchmark Environment</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#system-overview">System Overview</a></li>
-<li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#benchmark-configuration">Benchmark Configuration</a></li>
-<li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#benchmark-methodology">Benchmark Methodology</a></li>
-<li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#reproducibility-instructions">Reproducibility Instructions</a></li>
-<li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#notes">Notes</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Benchmark Environment</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#system-overview">System Overview</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#benchmark-configuration">Benchmark Configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#benchmark-methodology">Benchmark Methodology</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#reproducibility-instructions">Reproducibility Instructions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#notes">Notes</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="faq.html">Frequently Asked Questions</a><ul>
@@ -536,9 +537,9 @@
           <div role="navigation" aria-label="Page navigation">
   <ul class="wy-breadcrumbs">
       <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
-      <li class="breadcrumb-item active">Installation Guide</li>
+      <li class="breadcrumb-item active">Benchmark Environment</li>
       <li class="wy-breadcrumbs-aside">
-            <a href="_sources/installation.md.txt" rel="nofollow"> View page source</a>
+            <a href="_sources/benchmark_env.md.txt" rel="nofollow"> View page source</a>
       </li>
   </ul>
   <hr/>
@@ -546,292 +547,128 @@
           <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
            <div itemprop="articleBody">
              
-  <section id="installation-guide">
-<h1>Installation Guide<a class="headerlink" href="#installation-guide" title="Link to this heading"></a></h1>
-<p>This guide walks you through installing the Biscuit index extension for PostgreSQL.</p>
+  <section id="benchmark-environment">
+<h1>Benchmark Environment<a class="headerlink" href="#benchmark-environment" title="Link to this heading"></a></h1>
+<p>This section documents the hardware and system environment used to run all benchmarks in this guide.</p>
+<section id="system-overview">
+<h2>System Overview<a class="headerlink" href="#system-overview" title="Link to this heading"></a></h2>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Component</p></th>
+<th class="head"><p>Details</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>CPU</strong></p></td>
+<td><p>AMD Ryzen 7 5700U with Radeon Graphics (8 cores / 16 threads, up to 4.37 GHz, Zen 2)</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>CPU Architecture</strong></p></td>
+<td><p>x86_64 (supports AVX, AVX2, FMA, BMI1/2, SHA-NI, AES-NI)</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Memory (RAM)</strong></p></td>
+<td><p>16 GB total (14 GiB usable)</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Storage</strong></p></td>
+<td><p>WD PC SN560 NVMe SSD — 1 TB (PCIe NVMe, non-rotational)</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Operating System</strong></p></td>
+<td><p>Ubuntu 24.04.2 LTS (Noble Numbat), 64-bit</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Kernel Version</strong></p></td>
+<td><p>Linux 6.14.0-36-generic (PREEMPT_DYNAMIC)</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>PostgreSQL Version</strong></p></td>
+<td><p>16.10 (Ubuntu 16.10-0ubuntu0.24.04.1)</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Extensions Used</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">biscuit</span></code> , <code class="docutils literal notranslate"><span class="pre">pg_trgm</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</section>
 <hr class="docutils" />
-<section id="prerequisites">
-<h2>Prerequisites<a class="headerlink" href="#prerequisites" title="Link to this heading"></a></h2>
-<p>Before installing Biscuit, ensure you have:</p>
+<section id="benchmark-configuration">
+<h2>Benchmark Configuration<a class="headerlink" href="#benchmark-configuration" title="Link to this heading"></a></h2>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Setting</p></th>
+<th class="head"><p>Value</p></th>
+<th class="head"><p>Notes</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>shared_buffers</strong></p></td>
+<td><p>16384 → <strong>16 MB</strong></p></td>
+<td><p>Very small (default on many distros)</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>work_mem</strong></p></td>
+<td><p>4096 → <strong>4 MB per query</strong></p></td>
+<td><p>Affects sort/hash operations</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>maintenance_work_mem</strong></p></td>
+<td><p>65536 → <strong>64 MB</strong></p></td>
+<td><p>Used for CREATE INDEX</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>effective_cache_size</strong></p></td>
+<td><p>524288 → <strong>512 MB</strong></p></td>
+<td><p>Planner estimate of OS page cache</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>synchronous_commit</strong></p></td>
+<td><p><strong>ON</strong></p></td>
+<td><p>Safer but slightly slower writes</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>wal_level</strong></p></td>
+<td><p><strong>replica</strong></p></td>
+<td><p>Allows logical/physical replication (default for modern PG)</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<hr class="docutils" />
+<section id="benchmark-methodology">
+<h2>Benchmark Methodology<a class="headerlink" href="#benchmark-methodology" title="Link to this heading"></a></h2>
 <ul class="simple">
-<li><p>PostgreSQL 16 or higher installed</p></li>
-<li><p>PostgreSQL development headers (<code class="docutils literal notranslate"><span class="pre">postgresql-server-dev</span></code> package)</p></li>
-<li><p>C compiler (gcc or clang)</p></li>
-<li><p>Make build tool</p></li>
-<li><p>Git (for source installation)</p></li>
-</ul>
-<section id="check-postgresql-version">
-<h3>Check PostgreSQL Version<a class="headerlink" href="#check-postgresql-version" title="Link to this heading"></a></h3>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>psql<span class="w"> </span>--version
-<span class="c1"># Should show: psql (PostgreSQL) 16.x or higher</span>
-</pre></div>
-</div>
-</section>
-</section>
-<hr class="docutils" />
-<section id="installation-methods">
-<h2>Installation Methods<a class="headerlink" href="#installation-methods" title="Link to this heading"></a></h2>
-<section id="method-1-from-source-recommended">
-<h3>Method 1: From Source (Recommended)<a class="headerlink" href="#method-1-from-source-recommended" title="Link to this heading"></a></h3>
-<section id="step-1-install-build-dependencies">
-<h4>Step 1: Install Build Dependencies<a class="headerlink" href="#step-1-install-build-dependencies" title="Link to this heading"></a></h4>
-<p><strong>Ubuntu/Debian:</strong></p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sudo<span class="w"> </span>apt-get<span class="w"> </span>update
-sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>postgresql-server-dev-14<span class="w"> </span>build-essential<span class="w"> </span>git
-</pre></div>
-</div>
-<p><strong>RHEL/CentOS/Fedora:</strong></p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sudo<span class="w"> </span>yum<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>postgresql-devel<span class="w"> </span>gcc<span class="w"> </span>make<span class="w"> </span>git
-</pre></div>
-</div>
-<p><strong>macOS (Homebrew):</strong></p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>brew<span class="w"> </span>install<span class="w"> </span>postgresql
-</pre></div>
-</div>
-</section>
-<section id="step-2-clone-repository">
-<h4>Step 2: Clone Repository<a class="headerlink" href="#step-2-clone-repository" title="Link to this heading"></a></h4>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/crystallinecore/biscuit.git
-<span class="nb">cd</span><span class="w"> </span>biscuit
-</pre></div>
-</div>
-</section>
-<section id="step-3-build-and-install">
-<h4>Step 3: Build and Install<a class="headerlink" href="#step-3-build-and-install" title="Link to this heading"></a></h4>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Build the extension</span>
-make
-
-<span class="c1"># Install system-wide (requires sudo)</span>
-sudo<span class="w"> </span>make<span class="w"> </span>install
-
-<span class="c1"># Or install to PostgreSQL extension directory</span>
-make<span class="w"> </span>install<span class="w"> </span><span class="nv">PG_CONFIG</span><span class="o">=</span>/path/to/pg_config
-</pre></div>
-</div>
-</section>
-<section id="step-4-verify-installation">
-<h4>Step 4: Verify Installation<a class="headerlink" href="#step-4-verify-installation" title="Link to this heading"></a></h4>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Check that biscuit.so was installed</span>
-ls<span class="w"> </span><span class="k">$(</span>pg_config<span class="w"> </span>--pkglibdir<span class="k">)</span>/biscuit.so
-
-<span class="c1"># Check control file</span>
-ls<span class="w"> </span><span class="k">$(</span>pg_config<span class="w"> </span>--sharedir<span class="k">)</span>/extension/biscuit.control
-</pre></div>
-</div>
-</section>
-</section>
-<hr class="docutils" />
-<section id="method-2-with-croaring-support-enhanced-performance">
-<h3>Method 2: With CRoaring Support (Enhanced Performance)<a class="headerlink" href="#method-2-with-croaring-support-enhanced-performance" title="Link to this heading"></a></h3>
-<p>For optimal performance, install with the CRoaring library:</p>
-<section id="install-croaring-library">
-<h4>Install CRoaring Library<a class="headerlink" href="#install-croaring-library" title="Link to this heading"></a></h4>
-<p><strong>Ubuntu/Debian:</strong></p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>libroaring-dev
-</pre></div>
-</div>
-<p><strong>From Source:</strong></p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/RoaringBitmap/CRoaring.git
-<span class="nb">cd</span><span class="w"> </span>CRoaring
-mkdir<span class="w"> </span>build<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>build
-cmake<span class="w"> </span>..
-make
-sudo<span class="w"> </span>make<span class="w"> </span>install
-</pre></div>
-</div>
-</section>
-<section id="build-biscuit-with-roaring">
-<h4>Build Biscuit with Roaring<a class="headerlink" href="#build-biscuit-with-roaring" title="Link to this heading"></a></h4>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">cd</span><span class="w"> </span>biscuit
-make<span class="w"> </span><span class="nv">HAVE_ROARING</span><span class="o">=</span><span class="m">1</span>
-sudo<span class="w"> </span>make<span class="w"> </span>install
-</pre></div>
-</div>
-</section>
-</section>
-</section>
-<hr class="docutils" />
-<section id="enable-extension-in-database">
-<h2>Enable Extension in Database<a class="headerlink" href="#enable-extension-in-database" title="Link to this heading"></a></h2>
-<p>After installation, enable Biscuit in your PostgreSQL database:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Connect to your database</span>
-<span class="n">psql</span><span class="w"> </span><span class="o">-</span><span class="n">U</span><span class="w"> </span><span class="n">postgres</span><span class="w"> </span><span class="o">-</span><span class="n">d</span><span class="w"> </span><span class="n">your_database</span>
-
-<span class="c1">-- Create the extension</span>
-<span class="k">CREATE</span><span class="w"> </span><span class="n">EXTENSION</span><span class="w"> </span><span class="n">biscuit</span><span class="p">;</span>
-
-<span class="c1">-- Verify installation</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">pg_available_extensions</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;biscuit&#39;</span><span class="p">;</span>
-</pre></div>
-</div>
-<p>Expected output:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>   <span class="n">name</span>   <span class="o">|</span> <span class="n">default_version</span> <span class="o">|</span> <span class="n">installed_version</span> <span class="o">|</span> <span class="n">comment</span>
-<span class="o">----------+-----------------+-------------------+---------</span>
- <span class="n">biscuit</span>  <span class="o">|</span> <span class="mf">1.0</span>             <span class="o">|</span> <span class="mf">1.0</span>               <span class="o">|</span> <span class="n">Bitmap</span><span class="o">-</span><span class="n">based</span><span class="o">...</span>
-</pre></div>
-</div>
-</section>
-<hr class="docutils" />
-<section id="post-installation-configuration">
-<h2>Post-Installation Configuration<a class="headerlink" href="#post-installation-configuration" title="Link to this heading"></a></h2>
-<section id="set-appropriate-memory-limits">
-<h3>Set Appropriate Memory Limits<a class="headerlink" href="#set-appropriate-memory-limits" title="Link to this heading"></a></h3>
-<p>Biscuit stores indexes in memory. Adjust PostgreSQL memory settings:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- In postgresql.conf</span>
-<span class="n">shared_buffers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="n">GB</span><span class="w">           </span><span class="o">#</span><span class="w"> </span><span class="n">Increase</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="k">large</span><span class="w"> </span><span class="n">indexes</span>
-<span class="n">work_mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">256</span><span class="n">MB</span><span class="w">               </span><span class="o">#</span><span class="w"> </span><span class="k">For</span><span class="w"> </span><span class="n">sorting</span><span class="w"> </span><span class="n">operations</span>
-<span class="n">maintenance_work_mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="n">GB</span><span class="w">     </span><span class="o">#</span><span class="w"> </span><span class="k">For</span><span class="w"> </span><span class="k">index</span><span class="w"> </span><span class="n">building</span>
-</pre></div>
-</div>
-</section>
-<section id="enable-query-logging-optional">
-<h3>Enable Query Logging (Optional)<a class="headerlink" href="#enable-query-logging-optional" title="Link to this heading"></a></h3>
-<p>Monitor Biscuit performance:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Enable timing</span>
-<span class="err">\</span><span class="n">timing</span><span class="w"> </span><span class="k">on</span>
-
-<span class="c1">-- Log slow queries</span>
-<span class="k">SET</span><span class="w"> </span><span class="n">log_min_duration_statement</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="p">;</span><span class="w">  </span><span class="c1">-- Log queries &gt; 100ms</span>
-</pre></div>
-</div>
-</section>
-</section>
-<hr class="docutils" />
-<section id="verify-installation-with-test">
-<h2>Verify Installation with Test<a class="headerlink" href="#verify-installation-with-test" title="Link to this heading"></a></h2>
-<p>Create a test table and index:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Create test table</span>
-<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">test_biscuit</span><span class="w"> </span><span class="p">(</span>
-<span class="w">    </span><span class="n">id</span><span class="w"> </span><span class="nb">SERIAL</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="p">,</span>
-<span class="w">    </span><span class="n">name</span><span class="w"> </span><span class="nb">TEXT</span>
-<span class="p">);</span>
-
-<span class="c1">-- Insert test data</span>
-<span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">test_biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="s1">&#39;product_&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">generate_series</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">10000</span><span class="p">)</span><span class="w"> </span><span class="n">i</span><span class="p">;</span>
-
-<span class="c1">-- Create Biscuit index</span>
-<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_test_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">test_biscuit</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">);</span>
-
-<span class="c1">-- Test query</span>
-<span class="k">EXPLAIN</span><span class="w"> </span><span class="k">ANALYZE</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">test_biscuit</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%product_42%&#39;</span><span class="p">;</span>
-</pre></div>
-</div>
-<p>Expected output should show:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">Index</span> <span class="n">Scan</span> <span class="n">using</span> <span class="n">idx_test_name</span> <span class="n">on</span> <span class="n">test_biscuit</span>
-  <span class="p">(</span><span class="n">cost</span><span class="o">=</span><span class="mf">0.00</span><span class="o">.</span><span class="mf">.8.27</span> <span class="n">rows</span><span class="o">=</span><span class="mi">1</span> <span class="n">width</span><span class="o">=...</span><span class="p">)</span>
-  <span class="n">Index</span> <span class="n">Cond</span><span class="p">:</span> <span class="p">(</span><span class="n">name</span> <span class="o">~~</span> <span class="s1">&#39;%product_42%&#39;</span><span class="p">::</span><span class="n">text</span><span class="p">)</span>
-<span class="n">Planning</span> <span class="n">Time</span><span class="p">:</span> <span class="mf">0.123</span> <span class="n">ms</span>
-<span class="n">Execution</span> <span class="n">Time</span><span class="p">:</span> <span class="mf">0.567</span> <span class="n">ms</span>
-</pre></div>
-</div>
-</section>
-<hr class="docutils" />
-<section id="troubleshooting">
-<h2>Troubleshooting<a class="headerlink" href="#troubleshooting" title="Link to this heading"></a></h2>
-<section id="error-could-not-load-library">
-<h3>Error: “could not load library”<a class="headerlink" href="#error-could-not-load-library" title="Link to this heading"></a></h3>
-<p><strong>Problem</strong>: PostgreSQL can’t find <code class="docutils literal notranslate"><span class="pre">biscuit.so</span></code></p>
-<p><strong>Solution</strong>:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Check installation directory</span>
-pg_config<span class="w"> </span>--pkglibdir
-
-<span class="c1"># Manually copy if needed</span>
-sudo<span class="w"> </span>cp<span class="w"> </span>biscuit.so<span class="w"> </span><span class="k">$(</span>pg_config<span class="w"> </span>--pkglibdir<span class="k">)</span>/
-</pre></div>
-</div>
-</section>
-<section id="error-extension-does-not-exist">
-<h3>Error: “extension does not exist”<a class="headerlink" href="#error-extension-does-not-exist" title="Link to this heading"></a></h3>
-<p><strong>Problem</strong>: Extension files not in correct location</p>
-<p><strong>Solution</strong>:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Check extension directory</span>
-pg_config<span class="w"> </span>--sharedir
-
-<span class="c1"># Verify files exist</span>
-ls<span class="w"> </span><span class="k">$(</span>pg_config<span class="w"> </span>--sharedir<span class="k">)</span>/extension/biscuit*
-</pre></div>
-</div>
-</section>
-<section id="build-errors-with-roaring">
-<h3>Build Errors with Roaring<a class="headerlink" href="#build-errors-with-roaring" title="Link to this heading"></a></h3>
-<p><strong>Problem</strong>: CRoaring headers not found</p>
-<p><strong>Solution</strong>:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Specify include path explicitly</span>
-make<span class="w"> </span><span class="nv">HAVE_ROARING</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="nv">CFLAGS</span><span class="o">=</span><span class="s2">&quot;-I/usr/local/include&quot;</span>
-</pre></div>
-</div>
-</section>
-</section>
-<hr class="docutils" />
-<section id="uninstallation">
-<h2>Uninstallation<a class="headerlink" href="#uninstallation" title="Link to this heading"></a></h2>
-<p>To remove Biscuit:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Drop from database first</span>
-<span class="k">DROP</span><span class="w"> </span><span class="n">EXTENSION</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="k">CASCADE</span><span class="p">;</span>
-</pre></div>
-</div>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Remove files</span>
-sudo<span class="w"> </span>rm<span class="w"> </span><span class="k">$(</span>pg_config<span class="w"> </span>--pkglibdir<span class="k">)</span>/biscuit.so
-sudo<span class="w"> </span>rm<span class="w"> </span><span class="k">$(</span>pg_config<span class="w"> </span>--sharedir<span class="k">)</span>/extension/biscuit*
-</pre></div>
-</div>
-</section>
-<hr class="docutils" />
-<section id="next-steps">
-<h2>Next Steps<a class="headerlink" href="#next-steps" title="Link to this heading"></a></h2>
-<ul class="simple">
-<li><p><strong>Installation complete!</strong></p></li>
-<li><p>Continue to <a class="reference internal" href="quickstart.html"><span class="std std-doc">Quick Start Tutorial</span></a></p></li>
-<li><p>Read about <a class="reference internal" href="patterns.html"><span class="std std-doc">Pattern Syntax</span></a></p></li>
-<li><p>Learn about <a class="reference internal" href="performance.html"><span class="std std-doc">Performance Tuning</span></a></p></li>
+<li><p>Queries were executed with <code class="docutils literal notranslate"><span class="pre">\timing</span> <span class="pre">on</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">EXPLAIN</span> <span class="pre">ANALYZE</span></code> is used for detailed plan inspection.</p></li>
 </ul>
 </section>
 <hr class="docutils" />
-<section id="platform-specific-notes">
-<h2>Platform-Specific Notes<a class="headerlink" href="#platform-specific-notes" title="Link to this heading"></a></h2>
-<section id="windows">
-<h3>Windows<a class="headerlink" href="#windows" title="Link to this heading"></a></h3>
-<p>For Windows installation:</p>
-<ol class="arabic simple">
-<li><p>Install Visual Studio with C++ support</p></li>
-<li><p>Use PostgreSQL Windows build tools</p></li>
-<li><p>Compile with: <code class="docutils literal notranslate"><span class="pre">nmake</span> <span class="pre">/f</span> <span class="pre">Makefile.win</span></code></p></li>
-</ol>
-</section>
-<section id="docker">
-<h3>Docker<a class="headerlink" href="#docker" title="Link to this heading"></a></h3>
-<p>Run Biscuit in Docker:</p>
-<div class="highlight-dockerfile notranslate"><div class="highlight"><pre><span></span><span class="k">FROM</span><span class="w"> </span><span class="s">postgres:14</span>
-
-<span class="c"># Install build dependencies</span>
-<span class="k">RUN</span><span class="w"> </span>apt-get<span class="w"> </span>update<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>postgresql-server-dev-14<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>build-essential<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>git
-
-<span class="c"># Build and install Biscuit</span>
-<span class="k">RUN</span><span class="w"> </span>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/crystallinecore/biscuit.git<span class="w"> </span>/tmp/biscuit
-<span class="k">WORKDIR</span><span class="w"> </span><span class="s">/tmp/biscuit</span>
-<span class="k">RUN</span><span class="w"> </span>make<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>make<span class="w"> </span>install
-
-<span class="c"># Cleanup</span>
-<span class="k">RUN</span><span class="w"> </span>rm<span class="w"> </span>-rf<span class="w"> </span>/tmp/biscuit
+<section id="reproducibility-instructions">
+<h2>Reproducibility Instructions<a class="headerlink" href="#reproducibility-instructions" title="Link to this heading"></a></h2>
+<p>To reproduce identical performance:</p>
+<ol class="arabic">
+<li><p>Restart PostgreSQL before cold-cache benchmarks:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sudo<span class="w"> </span>systemctl<span class="w"> </span>restart<span class="w"> </span>postgresql
 </pre></div>
 </div>
-</section>
+</li>
+<li><p>Ensure OS disk cache is cleared (optional, requires sudo):</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sync<span class="p">;</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="m">3</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>sudo<span class="w"> </span>tee<span class="w"> </span>/proc/sys/vm/drop_caches
+</pre></div>
+</div>
+</li>
+<li><p>Disable power-saving CPU governors:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sudo<span class="w"> </span>cpupower<span class="w"> </span>frequency-set<span class="w"> </span>-g<span class="w"> </span>performance
+</pre></div>
+</div>
+</li>
+<li><p>Run each query <strong>three times</strong>, discard the first warm run, take the median.</p></li>
+</ol>
 </section>
 <hr class="docutils" />
-<section id="getting-help">
-<h2>Getting Help<a class="headerlink" href="#getting-help" title="Link to this heading"></a></h2>
-<p>If you encounter issues:</p>
-<ol class="arabic simple">
-<li><p>Check the <a class="reference internal" href="faq.html"><span class="std std-doc">FAQ</span></a></p></li>
-<li><p>Search <a class="reference external" href="https://github.com/crystallinecore/biscuit/issues">GitHub Issues</a></p></li>
-<li><p>Ask on <a class="reference external" href="https://github.com/crystallinecore/biscuit/discussions">GitHub Discussions</a></p></li>
-<li><p>Email: sivaprasad.off&#64;gmail.com</p></li>
-</ol>
+<section id="notes">
+<h2>Notes<a class="headerlink" href="#notes" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p>Hardware differences significantly impact absolute latency numbers.</p></li>
+<li><p>Your Biscuit index speedups will vary depending on:</p>
+<ul>
+<li><p>Disk speed</p></li>
+<li><p>CPU branch prediction</p></li>
+<li><p>Text pattern distribution</p></li>
+<li><p>PostgreSQL configuration</p></li>
+</ul>
+</li>
+</ul>
 </section>
 </section>
 
@@ -839,8 +676,8 @@ sudo<span class="w"> </span>rm<span class="w"> </span><span class="k">$(</span>p
            </div>
           </div>
           <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
-        <a href="index.html" class="btn btn-neutral float-left" title="Biscuit Documentation" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
-        <a href="quickstart.html" class="btn btn-neutral float-right" title="Quick Start Tutorial" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+        <a href="performance.html" class="btn btn-neutral float-left" title="Performance Tuning Guide" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="faq.html" class="btn btn-neutral float-right" title="Frequently Asked Questions" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
     </div>
 
   <hr/>
