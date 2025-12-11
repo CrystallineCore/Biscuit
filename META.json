@@ -2,14 +2,14 @@
   "name": "biscuit",
   "abstract": "A fast bitmap-based index for PostgreSQL",
   "description": "biscuit provides efficient bitmap-based searching with deterministic results.",
-  "version": "2.1.0",
+  "version": "2.1.2",
   "maintainer": [ "Sivaprasad Murali <sivaprasad.off@gmail.com>" ],
   "license": "mit",
   "provides": {
     "biscuit": {
       "file": "sql/biscuit--1.0.sql",
       "docfile": "README.md",
-      "version": "2.1.0"
+      "version": "2.1.2"
     }
   },
   "tags": [

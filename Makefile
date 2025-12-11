@@ -1,13 +1,13 @@
 # Makefile for biscuit PostgreSQL extension
 
 EXTENSION = biscuit
-EXTVERSION = 2.1.0
+EXTVERSION = 2.1.2
 MODULE_big = biscuit
 OBJS = src/biscuit.o
 DATA = sql/biscuit--1.0.sql
 
 
-PGFILEDESC = "LIKE pattern matching with bitmap indexing"
+PGFILEDESC = "Wildcard pattern matching through bitmap indexing"
 
 # PostgreSQL build system
 PG_CONFIG = pg_config

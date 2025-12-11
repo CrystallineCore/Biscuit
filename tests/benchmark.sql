@@ -9,6 +9,7 @@ DROP TABLE IF EXISTS benchmark_results CASCADE;
 
 -- Enable pg_trgm extension
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS biscuit;
 
 SET enable_seqscan = OFF;
 
