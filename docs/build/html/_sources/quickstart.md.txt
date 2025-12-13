@@ -346,21 +346,7 @@ WHERE email LIKE '%@company.com'
 
 **Q: Can I use Biscuit for case-insensitive matching?**
 
-A: Convert to lowercase in the index:
-```sql
-CREATE INDEX idx_name_lower ON products 
-USING biscuit (LOWER(name));
-
-SELECT * FROM products WHERE LOWER(name) LIKE '%mouse%';
-```
-
-**Q: What's the maximum string length?**
-
-A: 256 characters (longer strings are truncated). For full-text, use `tsvector`.
-
-**Q: Does Biscuit support ILIKE?**
-
-A: Not directly. Use `LOWER()` as shown above.
+A: Yes, Biscuit versions >= 2.1.0 support ILIKE queries.
 
 ---
 

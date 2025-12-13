@@ -161,30 +161,63 @@ COMMENT ON VIEW biscuit_operators IS
 
 -- ==================== HELPER FUNCTIONS ====================
 
--- Function to check multi-column capability
-CREATE FUNCTION biscuit_multicolumn_enabled()
-RETURNS boolean AS $$
-    SELECT amcanmulticol FROM pg_am WHERE amname = 'biscuit';
-$$ LANGUAGE SQL STABLE;
+-- Create the memory size function
+CREATE OR REPLACE FUNCTION biscuit_index_memory_size(index_oid oid)
+RETURNS bigint
+AS 'MODULE_PATHNAME', 'biscuit_index_memory_size'
+LANGUAGE C STRICT VOLATILE;
 
-COMMENT ON FUNCTION biscuit_multicolumn_enabled() IS
-'Returns true if multi-column indexing is enabled';
+-- Convenient wrapper that takes index name instead of OID
+CREATE OR REPLACE FUNCTION biscuit_index_memory_size(index_name text)
+RETURNS bigint
+AS $$
+    SELECT biscuit_index_memory_size(index_name::regclass::oid);
+$$ LANGUAGE SQL STRICT VOLATILE;
 
--- Function to verify ILIKE support
-CREATE FUNCTION biscuit_ilike_enabled()
-RETURNS boolean AS $$
-    SELECT EXISTS(
-        SELECT 1 FROM pg_amop
-        JOIN pg_operator ON pg_amop.amopopr = pg_operator.oid
-        JOIN pg_opfamily ON pg_amop.amopfamily = pg_opfamily.oid
-        WHERE pg_opfamily.opfname = 'biscuit_ops'
-        AND oprname = '~~*'
-        AND amopstrategy = 3
-    );
-$$ LANGUAGE SQL STABLE;
+-- Human-readable version with formatted output
+CREATE OR REPLACE FUNCTION biscuit_size_pretty(index_name text)
+RETURNS text
+AS $$
+DECLARE
+    bytes bigint;
+    kb numeric;
+    mb numeric;
+    gb numeric;
+BEGIN
+    bytes := biscuit_index_memory_size(index_name::regclass::oid);
+    
+    IF bytes < 1024 THEN
+        RETURN bytes || ' bytes';
+    ELSIF bytes < 1024 * 1024 THEN
+        kb := round((bytes::numeric / 1024), 2);
+        RETURN kb || ' KB (' || bytes || ' bytes)';
+    ELSIF bytes < 1024 * 1024 * 1024 THEN
+        mb := round((bytes::numeric / (1024 * 1024)), 2);
+        RETURN mb || ' MB (' || bytes || ' bytes)';
+    ELSE
+        gb := round((bytes::numeric / (1024 * 1024 * 1024)), 2);
+        RETURN gb || ' GB (' || bytes || ' bytes)';
+    END IF;
+END;
+$$ LANGUAGE plpgsql STRICT VOLATILE;
 
-COMMENT ON FUNCTION biscuit_ilike_enabled() IS
-'Returns true if ILIKE (case-insensitive) support is enabled';
+-- View to show memory usage of all Biscuit indices
+CREATE OR REPLACE VIEW biscuit_memory_usage AS
+SELECT 
+    schemaname,
+    tablename,
+    indexname,
+    biscuit_index_memory_size(indexname::regclass::oid) as bytes,
+    biscuit_size_pretty(indexname) as human_readable,
+    pg_size_pretty(pg_relation_size(indexname::regclass)) as disk_size
+FROM pg_indexes
+WHERE indexdef LIKE '%USING biscuit%'
+ORDER BY biscuit_index_memory_size(indexname::regclass::oid) DESC;
+
+-- Example usage:
+-- SELECT * FROM biscuit_memory_usage;
+-- SELECT biscuit_index_memory_size('my_biscuit_idx');
+-- SELECT biscuit_size_pretty('my_biscuit_idx');
 
 -- ==================== VERSION INFO ====================
 
@@ -203,8 +236,6 @@ COMMENT ON TABLE biscuit_version IS
 -- ==================== GRANT PERMISSIONS ====================
 
 GRANT EXECUTE ON FUNCTION biscuit_index_stats(oid) TO PUBLIC;
-GRANT EXECUTE ON FUNCTION biscuit_multicolumn_enabled() TO PUBLIC;
-GRANT EXECUTE ON FUNCTION biscuit_ilike_enabled() TO PUBLIC;
 GRANT SELECT ON biscuit_indexes TO PUBLIC;
 GRANT SELECT ON biscuit_indexes_detailed TO PUBLIC;
 GRANT SELECT ON biscuit_operators TO PUBLIC;
@@ -257,9 +288,6 @@ SELECT * FROM biscuit_indexes;
 -- Get detailed stats
 SELECT biscuit_index_stats(''idx_users_name''::regclass);
 
--- Check features
-SELECT biscuit_ilike_enabled();        -- Should return true
-SELECT biscuit_multicolumn_enabled();  -- Should return true
 
 -- View supported operators
 SELECT * FROM biscuit_operators;

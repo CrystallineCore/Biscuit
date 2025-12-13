@@ -140,7 +140,7 @@ INFO:  ====================================
 CREATE INDEX idx_products ON products 
 USING biscuit (name, category, sku);
 
--- ❌ LESS OPTIMAL: Rarely-queried columns first  
+--  LESS OPTIMAL: Rarely-queried columns first  
 CREATE INDEX idx_products ON products 
 USING biscuit (internal_notes, name, category);
 ```
@@ -190,7 +190,7 @@ FROM products;
 ### 4. Avoid Redundant Indexes
 
 ```sql
--- ❌ DON'T: Create overlapping indexes
+--  DON'T: Create overlapping indexes
 CREATE INDEX idx1 ON products USING biscuit (name);
 CREATE INDEX idx2 ON products USING biscuit (name, category);
 -- idx1 is redundant!
@@ -392,7 +392,7 @@ WHERE name LIKE '%laptop%'
 
 Look for:
 - **Index Scan using Biscuit**: ✅ Good
-- **Seq Scan**: ❌ Index not being used
+- **Seq Scan**:  Index not being used
 - **Planning Time**: Should be <1ms
 - **Execution Time**: Should be <20ms for typical queries
 
@@ -400,7 +400,7 @@ Look for:
 
 ## Common Pitfalls
 
-### ❌ Pitfall 1: Too Many Columns
+###  Pitfall 1: Too Many Columns
 
 ```sql
 -- DON'T: Index everything
@@ -414,7 +414,7 @@ USING biscuit (col1, col2, col3, col4, col5, col6, col7, col8);
 
 ---
 
-### ❌ Pitfall 2: Low Selectivity Patterns
+###  Pitfall 2: Low Selectivity Patterns
 
 ```sql
 -- All predicates are low-selectivity substrings
@@ -429,7 +429,7 @@ WHERE col1 LIKE '%a%'
 
 ---
 
-### ❌ Pitfall 3: Not Using EXPLAIN
+###  Pitfall 3: Not Using EXPLAIN
 
 ```sql
 -- Assuming the index is being used

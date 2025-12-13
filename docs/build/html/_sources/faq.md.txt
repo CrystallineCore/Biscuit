@@ -8,18 +8,18 @@ Common questions and answers about Biscuit index for PostgreSQL.
 
 ### What is Biscuit?
 
-Biscuit is a PostgreSQL index access method designed for LIKE pattern matching queries. It uses bitmap-based indexing to accelerate searches with wildcards (`%`, `_`). Performance improvements vary depending on your data characteristics, query patterns, and system configuration.
+Biscuit is a PostgreSQL index access method designed for LIKE and ILIKE pattern matching queries. It uses bitmap-based indexing to accelerate searches with wildcards (`%`, `_`). Performance improvements vary depending on your data characteristics, query patterns, and system configuration.
 
 ---
 
 ### When should I use Biscuit?
 
 Consider Biscuit when you:
-- ✅ Run frequent LIKE queries with wildcards
-- ✅ Need to search across multiple text columns
-- ✅ Have high-cardinality string columns
-- ✅ Want to optimize queries with pattern matching
-- ✅ Need prefix, suffix, or substring matching
+- Run frequent LIKE queries with wildcards
+- Need to search across multiple text columns
+- Have high-cardinality string columns
+- Want to optimize queries with pattern matching
+-  Need prefix, suffix, or substring matching
 
 **Other options may be better for**:
 - Full-text search with stemming/ranking (use tsvector/GIN)
@@ -60,7 +60,7 @@ The index is stored in memory for performance. For large tables, ensure you have
 
 **Monitor with**:
 ```sql
-SELECT pg_size_pretty(pg_relation_size('idx_name'));
+SELECT biscuit_size_pretty('idx_name');
 ```
 
 ---
@@ -315,16 +315,14 @@ Always benchmark with your actual workload.
 
 ### Does Biscuit support case-insensitive search?
 
-**Not directly**, but you can use LOWER():
+**Yes**, from versions >= 2.1.0:
 
 ```sql
--- Create index on lowercase
-CREATE INDEX idx_name_lower ON products 
-USING biscuit (LOWER(name));
+-- Create index 
+CREATE INDEX idx_name ON products USING biscuit (name);
 
--- Query with lowercase
-SELECT * FROM products 
-WHERE LOWER(name) LIKE '%wireless%';
+-- Query
+SELECT * FROM products WHERE name ILIKE '%wireless%';
 ```
 
 ---
@@ -716,7 +714,7 @@ WHERE (data->>'name') LIKE '%laptop%';
 
 ### Does Biscuit support multi-byte characters (Unicode)?
 
-**Yes**, UTF-8 is fully supported:
+**Yes but with caveats**, UTF-8 is supported but not completely tested:
 
 ```sql
 -- Japanese, Chinese, Arabic, emoji, etc.
@@ -839,7 +837,6 @@ We welcome contributions!
 
 Future development may include:
 - Enhanced parallel index builds
-- Case-insensitive indexing support
 - Additional compression options
 - Extended monitoring capabilities
 

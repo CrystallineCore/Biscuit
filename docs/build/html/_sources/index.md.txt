@@ -10,10 +10,13 @@ Welcome to the official documentation for Biscuit.
 installation
 quickstart
 api
+architecture
 patterns
 multicolumn
-performance
+benchmark
 benchmark_env
+performance
+tribute
 faq
 ```
 
@@ -61,8 +64,8 @@ WHERE name LIKE '%laptop%';
 - **[Pattern Syntax](patterns.md)** - Understanding LIKE pattern matching
 - **[Multi-Column Indexes](multicolumn.md)** - Advanced multi-column queries
 - **[Performance Tuning](performance.md)** - Optimize your queries
-- **[Architecture](architecture.md)** - How Biscuit works internally
 - **[API Reference](api.md)** - Complete function reference
+- **[Benchmarks](benchmark.md)** - Benchmarks and other statistics
 - **[FAQ](faq.md)** - Common questions and troubleshooting
 
 ## When to Use Biscuit
@@ -73,12 +76,11 @@ WHERE name LIKE '%laptop%';
 - Prefix/suffix matching (`admin%`, `%_test`)
 - Multi-column pattern queries
 - High-cardinality string columns
-- Frequent `LIKE` queries in analytics
+- Frequent `LIKE/ILIKE` queries in analytics
 
 **Not Ideal For:**
 - Full-text search (use `tsvector` instead)
 - Exact equality matches (B-tree is sufficient)
-- Very long strings (>256 characters are truncated)
 - Low-selectivity patterns (single `%`)
 
 ## System Requirements

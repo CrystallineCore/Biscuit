@@ -227,11 +227,16 @@
 <li class="toctree-l3"><a class="reference internal" href="api.html#like-operator">LIKE Operator</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#not-like-operator">NOT LIKE Operator</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#ilike-operator">ILIKE Operator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#not-ilike-operator">NOT ILIKE Operator</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#multi-column-queries">Multi-Column Queries</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#diagnostic-functions">Diagnostic Functions</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-stats">biscuit_index_stats()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-memory-size"><code class="docutils literal notranslate"><span class="pre">biscuit_index_memory_size()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-size-pretty"><code class="docutils literal notranslate"><span class="pre">biscuit_size_pretty()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-memory-usage"><code class="docutils literal notranslate"><span class="pre">biscuit_memory_usage</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#notes">Notes</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#configuration-parameters">Configuration Parameters</a><ul>
@@ -359,13 +364,51 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#common-pitfalls">Common Pitfalls</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#pitfall-1-too-many-columns">❌ Pitfall 1: Too Many Columns</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#pitfall-2-low-selectivity-patterns">❌ Pitfall 2: Low Selectivity Patterns</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#pitfall-3-not-using-explain">❌ Pitfall 3: Not Using EXPLAIN</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pitfall-1-too-many-columns">Pitfall 1: Too Many Columns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pitfall-2-low-selectivity-patterns">Pitfall 2: Low Selectivity Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pitfall-3-not-using-explain">Pitfall 3: Not Using EXPLAIN</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#migration-from-single-column">Migration from Single-Column</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="patterns.html">Pattern Syntax Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#wildcard-characters">Wildcard Characters</a></li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-types">Pattern Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#exact-match-fastest">1. Exact Match (Fastest)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#prefix-match-very-fast">2. Prefix Match (Very Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#suffix-match-very-fast">3. Suffix Match (Very Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#substring-match-moderate-speed">4. Substring Match (Moderate Speed)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#infix-match-fast">5. Infix Match (Fast)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#complex-multi-part-patterns">6. Complex Multi-Part Patterns</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#underscore-patterns-position-specific">7. Underscore Patterns (Position-Specific)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pure-wildcard-patterns-fastest-special-cases">Pure Wildcard Patterns (Fastest Special Cases)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#empty-pattern">Empty Pattern</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#single-percent">Single Percent</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#pure-underscores">Pure Underscores</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#mixed-pure-wildcards">Mixed Pure Wildcards</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-optimization-strategies">Pattern Optimization Strategies</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-1-maximize-concrete-characters">Strategy 1: Maximize Concrete Characters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-2-use-strong-anchors">Strategy 2: Use Strong Anchors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-3-minimize-partitions">Strategy 3: Minimize Partitions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#strategy-4-combine-with-other-indexes">Strategy 4: Combine with Other Indexes</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-examples-by-use-case">Pattern Examples by Use Case</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#email-filtering">Email Filtering</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#sku-product-code-matching">SKU/Product Code Matching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#log-searching">Log Searching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="patterns.html#url-path-matching">URL/Path Matching</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#case-sensitivity">Case Sensitivity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#pattern-performance-hierarchy">Pattern Performance Hierarchy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="patterns.html#next-steps">Next Steps</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="performance.html">Performance Tuning Guide</a><ul>
@@ -436,6 +479,145 @@
 <li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#benchmark-methodology">Benchmark Methodology</a></li>
 <li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#reproducibility-instructions">Reproducibility Instructions</a></li>
 <li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#notes">Notes</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="benchmark.html">Biscuit vs. Trigram vs. B-tree: Comprehensive Pattern Matching Benchmark</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#table-of-contents">Table of Contents</a></li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#executive-summary">Executive Summary</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#key-findings">Key Findings</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#introduction">Introduction</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#problem-statement">Problem Statement</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#research-questions">Research Questions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#benchmark-scope">Benchmark Scope</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#methodology">Methodology</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#design-principles">Design Principles</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#complete-isolation">1. Complete Isolation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#cache-state-control">2. Cache State Control</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#forced-index-usage">3. Forced Index Usage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#statistical-rigor">4. Statistical Rigor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#randomization">5. Randomization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#comprehensive-metrics">6. Comprehensive Metrics</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#test-environment">Test Environment</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#dataset">Dataset</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#hardware-configuration">Hardware Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#software-stack">Software Stack</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#database-configuration">Database Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#dataset-characteristics">Dataset Characteristics</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#query-coverage-analysis">Query Coverage Analysis</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#overview">Overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#coverage-by-pattern-structure">Coverage by Pattern Structure</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#basic-wildcard-patterns-24-queries">1. Basic Wildcard Patterns (24 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#underscore-wildcards-12-queries">2. Underscore Wildcards (12 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#case-insensitive-patterns-ilike-20-queries">3. Case-Insensitive Patterns (ILIKE) (20 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#negation-patterns-not-like-not-ilike-16-queries">4. Negation Patterns (NOT LIKE / NOT ILIKE) (16 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#boolean-combinations-48-queries">5. Boolean Combinations (48 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#edge-cases-and-special-patterns-20-queries">6. Edge Cases and Special Patterns (20 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#real-world-query-patterns-20-queries">7. Real-World Query Patterns (20 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#selectivity-spectrum-10-queries">8. Selectivity Spectrum (10 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#special-characters-escaping-4-queries">9. Special Characters &amp; Escaping (4 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#order-by-limit-pagination-4-queries">10. ORDER BY + LIMIT (Pagination) (4 queries)</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#coverage-summary-table">Coverage Summary Table</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#selectivity-distribution">Selectivity Distribution</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#performance-results">Performance Results</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#overall-performance-summary-warm-cache">Overall Performance Summary (Warm Cache)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#cold-cache-vs-warm-cache">Cold Cache vs. Warm Cache</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#cache-hit-ratios">Cache Hit Ratios</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#statistical-significance-testing">Statistical Significance Testing</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#statistical-analysis">Statistical Analysis</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#distribution-analysis">Distribution Analysis</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#execution-time-distributions">Execution Time Distributions</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#consistency-analysis-coefficient-of-variation">Consistency Analysis (Coefficient of Variation)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#id1">Statistical Analysis</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#id2">Consistency Analysis (Coefficient of Variation)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#outlier-analysis">Outlier Analysis</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#pattern-specific-performance">Pattern-Specific Performance</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#by-wildcard-pattern-type">By Wildcard Pattern Type</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#by-selectivity-level">By Selectivity Level</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#by-boolean-complexity">By Boolean Complexity</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#correctness-verification">Correctness Verification</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#dual-level-verification-protocol">Dual-Level Verification Protocol</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#level-1-cross-index-consistency">Level 1: Cross-Index Consistency</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#level-2-cross-iteration-consistency">Level 2: Cross-Iteration Consistency</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#overall-verification-summary">Overall Verification Summary</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#correctness-implications">Correctness Implications</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#index-usage-analysis">Index Usage Analysis</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#query-execution-strategy-breakdown">Query Execution Strategy Breakdown</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#execution-plan-analysis">Execution Plan Analysis</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#biscuit-dominant-index-scan-usage">Biscuit: Dominant Index Scan Usage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#trigram-bitmap-heavy-approach">Trigram: Bitmap-Heavy Approach</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#b-tree-sequential-scan-dominant">B-tree: Sequential Scan Dominant</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#buffer-i-o-analysis">Buffer I/O Analysis</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#real-world-scenarios">Real-World Scenarios</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#scenario-1-user-search-autocomplete">Scenario 1: User Search / Autocomplete</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#scenario-2-geographic-filtering">Scenario 2: Geographic Filtering</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#scenario-3-content-moderation">Scenario 3: Content Moderation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#scenario-4-analytics-dashboard">Scenario 4: Analytics Dashboard</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#scenario-5-pagination">Scenario 5: Pagination</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#trade-off-analysis">Trade-off Analysis</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#performance-vs-storage">Performance vs. Storage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#decision-matrix">Decision Matrix</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#total-cost-of-ownership-5-year-estimate">Total Cost of Ownership (5-Year Estimate)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#limitations-and-future-work">Limitations and Future Work</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#current-limitations">Current Limitations</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#write-performance-not-tested">1. Write Performance Not Tested</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#single-hardware-configuration">2. Single Hardware Configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#id3">3. Forced Index Usage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#single-dataset-size">4. Single Dataset Size</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#no-concurrency-testing">5. No Concurrency Testing</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#threats-to-validity">Threats to Validity</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#internal-validity">Internal Validity</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#external-validity">External Validity</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#recommendations-for-practitioners">Recommendations for Practitioners</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#conclusions">Conclusions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#summary-of-findings">Summary of Findings</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#practical-recommendations">Practical Recommendations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#research-contributions">Research Contributions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#final-verdict">Final Verdict</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark.html#statistical-methods">Statistical Methods</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="faq.html">Frequently Asked Questions</a><ul>
@@ -712,7 +894,7 @@
 <span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
 <span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">category</span><span class="p">,</span><span class="w"> </span><span class="n">sku</span><span class="p">);</span>
 
-<span class="c1">-- ❌ LESS OPTIMAL: Rarely-queried columns first  </span>
+<span class="c1">--  LESS OPTIMAL: Rarely-queried columns first  </span>
 <span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
 <span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">internal_notes</span><span class="p">,</span><span class="w"> </span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">category</span><span class="p">);</span>
 </pre></div>
@@ -759,7 +941,7 @@
 <hr class="docutils" />
 <section id="avoid-redundant-indexes">
 <h3>4. Avoid Redundant Indexes<a class="headerlink" href="#avoid-redundant-indexes" title="Link to this heading"></a></h3>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- ❌ DON&#39;T: Create overlapping indexes</span>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">--  DON&#39;T: Create overlapping indexes</span>
 <span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx1</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">);</span>
 <span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx2</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">category</span><span class="p">);</span>
 <span class="c1">-- idx1 is redundant!</span>
@@ -996,7 +1178,7 @@
 <p>Look for:</p>
 <ul class="simple">
 <li><p><strong>Index Scan using Biscuit</strong>: ✅ Good</p></li>
-<li><p><strong>Seq Scan</strong>: ❌ Index not being used</p></li>
+<li><p><strong>Seq Scan</strong>:  Index not being used</p></li>
 <li><p><strong>Planning Time</strong>: Should be &lt;1ms</p></li>
 <li><p><strong>Execution Time</strong>: Should be &lt;20ms for typical queries</p></li>
 </ul>
@@ -1006,7 +1188,7 @@
 <section id="common-pitfalls">
 <h2>Common Pitfalls<a class="headerlink" href="#common-pitfalls" title="Link to this heading"></a></h2>
 <section id="pitfall-1-too-many-columns">
-<h3>❌ Pitfall 1: Too Many Columns<a class="headerlink" href="#pitfall-1-too-many-columns" title="Link to this heading"></a></h3>
+<h3>Pitfall 1: Too Many Columns<a class="headerlink" href="#pitfall-1-too-many-columns" title="Link to this heading"></a></h3>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- DON&#39;T: Index everything</span>
 <span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_huge</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span>
 <span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">col1</span><span class="p">,</span><span class="w"> </span><span class="n">col2</span><span class="p">,</span><span class="w"> </span><span class="n">col3</span><span class="p">,</span><span class="w"> </span><span class="n">col4</span><span class="p">,</span><span class="w"> </span><span class="n">col5</span><span class="p">,</span><span class="w"> </span><span class="n">col6</span><span class="p">,</span><span class="w"> </span><span class="n">col7</span><span class="p">,</span><span class="w"> </span><span class="n">col8</span><span class="p">);</span>
@@ -1017,7 +1199,7 @@
 </section>
 <hr class="docutils" />
 <section id="pitfall-2-low-selectivity-patterns">
-<h3>❌ Pitfall 2: Low Selectivity Patterns<a class="headerlink" href="#pitfall-2-low-selectivity-patterns" title="Link to this heading"></a></h3>
+<h3>Pitfall 2: Low Selectivity Patterns<a class="headerlink" href="#pitfall-2-low-selectivity-patterns" title="Link to this heading"></a></h3>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- All predicates are low-selectivity substrings</span>
 <span class="k">WHERE</span><span class="w"> </span><span class="n">col1</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%a%&#39;</span>
 <span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">col2</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%e%&#39;</span><span class="w">  </span>
@@ -1029,7 +1211,7 @@
 </section>
 <hr class="docutils" />
 <section id="pitfall-3-not-using-explain">
-<h3>❌ Pitfall 3: Not Using EXPLAIN<a class="headerlink" href="#pitfall-3-not-using-explain" title="Link to this heading"></a></h3>
+<h3>Pitfall 3: Not Using EXPLAIN<a class="headerlink" href="#pitfall-3-not-using-explain" title="Link to this heading"></a></h3>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Assuming the index is being used</span>
 <span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%laptop%&#39;</span><span class="p">;</span>
 </pre></div>

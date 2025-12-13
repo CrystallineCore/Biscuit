@@ -50,7 +50,7 @@ SELECT
         WHEN 8 THEN substring(md5(random()::text), 1, (6 + (random() * 9)::int))
         ELSE substring(md5(random()::text), 1, (6 + (random() * 9)::int))
     END
-FROM generate_series(1, 5000000) g;
+FROM generate_series(1, 10000000) g;
 
 DO $$ 
 DECLARE
@@ -78,6 +78,7 @@ CREATE TABLE benchmark_results (
     biscuit_time_ms NUMERIC(10,3),
     trgm_count INT,
     trgm_time_ms NUMERIC(10,3),
+    trgm_index_used TEXT,
     counts_match BOOLEAN,
     speedup_factor NUMERIC(10,2),
     notes TEXT
@@ -689,13 +690,13 @@ END $$;
 DO $$ BEGIN RAISE NOTICE ''; RAISE NOTICE '✓ BISCUIT tests complete'; RAISE NOTICE ''; END $$;
 
 -- ============================================================================
--- PHASE 2: PG_TRGM INDEX TESTS
+-- PHASE 2: PG_TRGM + BTREE INDEX TESTS
 -- ============================================================================
 
 DO $$ 
 BEGIN 
     RAISE NOTICE '═══════════════════════════════════════════════════════════════════';
-    RAISE NOTICE '🔧 PHASE 2: Testing with PG_TRGM Index';
+    RAISE NOTICE '🔧 PHASE 2: Testing with PG_TRGM + B-tree Indexes';
     RAISE NOTICE '═══════════════════════════════════════════════════════════════════';
     RAISE NOTICE '';
 END $$;
@@ -706,12 +707,18 @@ DROP INDEX idx_hash_biscuit;
 
 DO $$ BEGIN RAISE NOTICE '✓ BISCUIT index dropped'; RAISE NOTICE ''; END $$;
 
+-- Create both indexes
+DO $$ BEGIN RAISE NOTICE '🔧 Creating B-tree index...'; END $$;
+
+CREATE INDEX idx_hash_btree ON hash_data(hash text_pattern_ops);
+
+DO $$ BEGIN RAISE NOTICE '✓ B-tree index created'; RAISE NOTICE ''; END $$;
+
 DO $$ BEGIN RAISE NOTICE '🔧 Creating PG_TRGM GIN index...'; END $$;
 
 CREATE INDEX idx_hash_trgm ON hash_data USING gin(hash gin_trgm_ops);
 
 DO $$ BEGIN RAISE NOTICE '✓ PG_TRGM index created'; RAISE NOTICE ''; END $$;
-
 -- Warm up cache
 DO $$ 
 DECLARE
@@ -723,7 +730,7 @@ BEGIN
     RAISE NOTICE '';
 END $$;
 
-DO $$ BEGIN RAISE NOTICE '📋 Running PG_TRGM benchmark tests...'; END $$;
+DO $$ BEGIN RAISE NOTICE '📋 Running PG_TRGM+BTrees benchmark tests...'; END $$;
 
 -- Run all tests again with pg_trgm
 -- Test 1
@@ -732,7 +739,11 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
+
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE 'ab%';
     end_time := clock_timestamp();
@@ -752,7 +763,11 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
+
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE 'abc%';
     end_time := clock_timestamp();
@@ -772,7 +787,11 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
+
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE 'a%b%c%';
     end_time := clock_timestamp();
@@ -792,7 +811,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '%a';
     end_time := clock_timestamp();
@@ -812,7 +834,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '%ab';
     end_time := clock_timestamp();
@@ -832,7 +857,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '%ab%';
     end_time := clock_timestamp();
@@ -852,7 +880,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '%1%2%';
     end_time := clock_timestamp();
@@ -872,7 +903,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '%1%a%';
     end_time := clock_timestamp();
@@ -892,7 +926,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE 'a%b';
     end_time := clock_timestamp();
@@ -912,7 +949,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE 'abc%ab%';
     end_time := clock_timestamp();
@@ -932,7 +972,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '%1%a%c%';
     end_time := clock_timestamp();
@@ -952,7 +995,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash ILIKE 'ab%';
     end_time := clock_timestamp();
@@ -972,7 +1018,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash ILIKE '%1%a%';
     end_time := clock_timestamp();
@@ -992,7 +1041,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE 'A%';
     end_time := clock_timestamp();
@@ -1012,7 +1064,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE 'ab%' OR hash LIKE '%a';
     end_time := clock_timestamp();
@@ -1032,7 +1087,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE 'a_b%';
     end_time := clock_timestamp();
@@ -1052,7 +1110,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '%ab_';
     end_time := clock_timestamp();
@@ -1072,7 +1133,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '%abc%';
     end_time := clock_timestamp();
@@ -1092,7 +1156,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '%a_b%';
     end_time := clock_timestamp();
@@ -1112,7 +1179,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '%abc%def%';
     end_time := clock_timestamp();
@@ -1132,7 +1202,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '%a__b__c%';
     end_time := clock_timestamp();
@@ -1152,7 +1225,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '_ab%';
     end_time := clock_timestamp();
@@ -1172,7 +1248,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '%ab_';
     end_time := clock_timestamp();
@@ -1192,7 +1271,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE 'a_b%c_d%';
     end_time := clock_timestamp();
@@ -1212,7 +1294,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '_a%b%';
     end_time := clock_timestamp();
@@ -1232,7 +1317,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '%a%b_%';
     end_time := clock_timestamp();
@@ -1252,7 +1340,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '%a_b%c_d%e%';
     end_time := clock_timestamp();
@@ -1272,7 +1363,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '___abc%';
     end_time := clock_timestamp();
@@ -1292,7 +1386,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '%abc___';
     end_time := clock_timestamp();
@@ -1312,7 +1409,10 @@ DECLARE
     start_time TIMESTAMP;
     end_time TIMESTAMP;
     row_count INT;
+    query_plan TEXT;
 BEGIN
+    EXECUTE 'EXPLAIN (FORMAT TEXT) SELECT COUNT(*) FROM hash_data WHERE hash LIKE ''ab%''' INTO query_plan;
+    
     start_time := clock_timestamp();
     SELECT COUNT(*) INTO row_count FROM hash_data WHERE hash LIKE '%a__b__c%';
     end_time := clock_timestamp();
@@ -1510,6 +1610,37 @@ BEGIN
     RAISE NOTICE '   Pattern: %', worst_rec.test_pattern;
     RAISE NOTICE '   Speedup: %x (PG_TRGM is %x faster)', 
         worst_rec.speedup_factor, (1.0 / worst_rec.speedup_factor);
+    RAISE NOTICE '';
+END $$;
+
+-- Index Usage Analysis
+DO $$
+DECLARE
+    rec RECORD;
+BEGIN
+    RAISE NOTICE '═══════════════════════════════════════════════════════════════════';
+    RAISE NOTICE '📊 INDEX USAGE BREAKDOWN';
+    RAISE NOTICE '═══════════════════════════════════════════════════════════════════';
+    RAISE NOTICE '';
+    RAISE NOTICE '%-20s | %-6s | %-15s', 
+        'Index Type', 'Count', 'Avg Time (ms)';
+    RAISE NOTICE '%', REPEAT('-', 50);
+    
+    FOR rec IN 
+        SELECT 
+            trgm_index_used,
+            COUNT(*) as usage_count,
+            ROUND(AVG(trgm_time_ms), 3) as avg_time
+        FROM benchmark_results
+        WHERE trgm_index_used IS NOT NULL
+        GROUP BY trgm_index_used
+        ORDER BY usage_count DESC
+    LOOP
+        RAISE NOTICE '%-20s | %-6s | %-15s', 
+            rec.trgm_index_used,
+            rec.usage_count,
+            rec.avg_time;
+    END LOOP;
     RAISE NOTICE '';
 END $$;
 

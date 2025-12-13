@@ -1,6 +1,8 @@
 # Pattern Syntax Guide
 
-Complete guide to LIKE pattern matching with Biscuit indexes, including optimization strategies for each pattern type.
+**Complete guide to LIKE pattern matching with Biscuit indexes, including optimization strategies for each pattern type.**
+
+ILIKE patterns follow the same execution and optimization paths as LIKE queries in Biscuit. Performance characteristics are therefore comparable; however, actual execution time is primarily influenced by result cardinality and required heap access.
 
 ---
 
@@ -411,23 +413,18 @@ WHERE path LIKE '%.jpg'               -- Suffix (fast)
 
 ## Case Sensitivity
 
-LIKE is case-sensitive by default. For case-insensitive matching:
+LIKE is case-sensitive by default. For case-insensitive matching use ILIKE:
 
 ```sql
--- Create index on lowercase version
-CREATE INDEX idx_name_lower ON products 
-USING biscuit (LOWER(name));
+-- Create index
+CREATE INDEX idx_name ON products 
+USING biscuit (name);
 
--- Query with lowercase
+-- Query with ILIKE (supported by versions >= 2.1.0)
 SELECT * FROM products 
-WHERE LOWER(name) LIKE '%wireless%';
+WHERE name ILIKE '%wireless%';
 ```
 
-**Alternative**: Use ILIKE (but requires sequential scan):
-```sql
--- No Biscuit optimization
-SELECT * FROM products WHERE name ILIKE '%wireless%';
-```
 
 ---
 

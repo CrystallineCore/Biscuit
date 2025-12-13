@@ -2,6 +2,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PostgreSQL: 12+](https://img.shields.io/badge/PostgreSQL-16%2B-blue.svg)](https://www.postgresql.org/)
+[![Read the Docs](https://img.shields.io/badge/Read%20the%20Docs-8CA1AF?logo=readthedocs&logoColor=fff)](https://biscuit.readthedocs.io/)
+
 
 **Biscuit** is a specialized PostgreSQL index access method (IAM) designed for blazing-fast pattern matching on `LIKE` and `ILIKE` queries, with native support for multi-column searches. It eliminates the recheck overhead of trigram indexes while delivering significant performance improvements on wildcard-heavy queries. It stands for _Bitmap Indexed Searching with Comprehensive Union and Intersection Techniques_.
 
@@ -9,36 +11,50 @@
 
 ### What's new?
 
-**1) ILIKE Operator Support (Case-Insensitive Matching)**
+### ✨ New Features
 
-Biscuit now provides **full support for the `ILIKE` operator**, enabling efficient case-insensitive wildcard searches directly through the index.
+#### Added Index Memory Introspection Utilities
 
-**Capabilities:**
+Added built-in SQL functions and a view to inspect **Biscuit index in-memory footprint**.
 
-* Optimized execution path for `ILIKE` and `NOT ILIKE`
-* Works seamlessly in mixed predicate chains alongside `LIKE` / `NOT LIKE`
-* Fully compatible with multi-column Biscuit indexes
+* **`biscuit_index_memory_size(index_oid oid) → bigint`**
+  Low-level C-backed function returning the exact memory usage (in bytes) of a Biscuit index currently resident in memory.
 
-**Examples:**
+* **`biscuit_index_memory_size(index_name text) → bigint`**
+  Convenience SQL wrapper accepting an index name instead of an OID.
+
+* **`biscuit_size_pretty(index_name text) → text`**
+  Human-readable formatter that reports Biscuit index memory usage in bytes, KB, MB, or GB while preserving the exact byte count.
+
+* **`biscuit_memory_usage` view**
+  A consolidated view exposing:
+
+  * schema name
+  * table name
+  * index name
+  * Biscuit in-memory size
+  * human-readable memory size
+  * on-disk index size (via `pg_relation_size`)
+
+  This allows direct comparison between **in-memory Biscuit structures** and their **persistent disk representation**.
+
 
 ```sql
--- Case-insensitive suffix search
-SELECT * FROM users WHERE name ILIKE '%son';
-
--- Combination queries
-SELECT * FROM users
-WHERE name ILIKE 'a%' AND email NOT ILIKE '%test%';
+SELECT * FROM biscuit_memory_usage;
 ```
 
-**2) Removed Length Constraint for Indexing**
+#### Notes
 
-The previous hardcoded **256-character indexing limit** has been removed.
-Biscuit now indexes values of **any length**, including very long strings.
+* Memory accounting reflects Biscuit’s deliberate cache persistence design, intended to optimize repeated pattern-matching workloads.
+* Functions are marked `VOLATILE` to ensure accurate reporting of live memory state.
+* `pg_size_pretty(pg_relation_size(...))` reports only the on-disk footprint of the Biscuit index.
+Since Biscuit maintains its primary structures in memory (cache buffers / AM cache), the reported disk size may significantly underrepresent the index’s effective total footprint during execution. Hence, we recommend the usage of `biscuit_size_pretty(...)` to view the actual size of the index.
 
-**Impact:**
+### ⚙️ Performance improvements
 
-* All text values—short or arbitrarily long—are now included in bitmap generation
-* More consistent query coverage for fields like descriptions, logs, and message bodies
+#### Removed redundant bitmaps
+
+Separate bitmaps for length-based filtering for case-insensitive search were removed. Case insensitive searches now use the same length-based filtering bitmaps as case-sensitive ones.
 
 
 ---
@@ -133,9 +149,9 @@ Biscuit builds **two types of character-position bitmaps** for every string:
 Tracks which records have character `c` at position `p`:
 
 ```
-String: "hello"
+String: "Hello"
 Bitmaps:
-  h@0 → {record_ids...}
+  H@0 → {record_ids...}
   e@1 → {record_ids...}
   l@2 → {record_ids...}
   l@3 → {record_ids...}
@@ -146,7 +162,33 @@ Bitmaps:
 Tracks which records have character `c` at position `-p` from the end:
 
 ```
-String: "hello"
+String: "Hello"
+Bitmaps:
+  o@-1 → {record_ids...}  (last char)
+  l@-2 → {record_ids...}  (second to last)
+  l@-3 → {record_ids...}
+  e@-4 → {record_ids...}
+  H@-5 → {record_ids...}
+```
+
+#### **3. Positive Indices (Case-insensitive)**
+Tracks which records have character `c` at position `p`:
+
+```
+String: "Hello"
+Bitmaps:
+  h@0 → {record_ids...}
+  e@1 → {record_ids...}
+  l@2 → {record_ids...}
+  l@3 → {record_ids...}
+  o@4 → {record_ids...}
+```
+
+#### **4. Negative Indices (Case-insensitive)**
+Tracks which records have character `c` at position `-p` from the end:
+
+```
+String: "Hello"
 Bitmaps:
   o@-1 → {record_ids...}  (last char)
   l@-2 → {record_ids...}  (second to last)
@@ -155,7 +197,7 @@ Bitmaps:
   h@-5 → {record_ids...}
 ```
 
-#### **3. Length Bitmaps**
+#### **5. Length Bitmaps**
 Two types for fast length filtering:
 - **Exact length**: `length[5]` → all 5-character strings
 - **Minimum length**: `length_ge[3]` → all strings ≥ 3 characters
@@ -451,7 +493,6 @@ SELECT biscuit_index_stats('idx_biscuit'::regclass);
 
 ### Results
 
-**> Build time**
 
 | Index       | Command                        | Build Time        |
 | ----------- | ------------------------------ | ----------------- |
@@ -595,21 +636,21 @@ Biscuit stores bitmaps in memory:
 | **ORDER BY + LIMIT**     | ✔ Works well                 | ✔ Ordered scans       |
 | **Regex support**        | ✗ No                         | ✔ Yes                |
 | **Similarity search**    | ✗ No                         | ✔ Yes                |
-| **ILIKE support**        | ✔ Full (as of v2.1.0)         | ✔ Native             |
+| **ILIKE support**        | ✔ Full       | ✔ Native             |
 
 
 **When to use Biscuit:**
-- ✔ Wildcard-heavy `LIKE` / `ILIKE` queries (`%`, `_`)
-- ✔ Multi-column pattern matching
-- ✔ Need exact results (no false positives)
-- ✔ `COUNT(*)` / aggregate queries
-- ✔ High query volume, can afford memory
+- Wildcard-heavy `LIKE` / `ILIKE` queries (`%`, `_`)
+-  Multi-column pattern matching
+-  Need exact results (no false positives)
+-  `COUNT(*)` / aggregate queries
+-  High query volume, can afford memory
 
 **When to use pg_trgm:**
-- ✔ Fuzzy/similarity search (`word <-> pattern`)
-- ✔ Regular expressions
-- ✔ Memory-constrained environments
-- ✔ Write-heavy workloads
+- Fuzzy/similarity search (`word <-> pattern`)
+- Regular expressions
+- Memory-constrained environments
+- Write-heavy workloads
 
 ---
 
@@ -690,9 +731,7 @@ BiscuitIndex
 │   │       ├── pos: int
 │   │       └── bitmap: RoaringBitmap
 │   ├── insensitive_neg_idx[256]: CharIndex    // Backward position bitmaps
-│   ├── insensitive_char_cache[256]: RoaringBitmap  // Character existence
-│   ├── insensitive_length_bitmaps[]: RoaringBitmap[]  // Exact lengths
-│   └── insensitive_length_ge_bitmaps[]: RoaringBitmap[]  // Min lengths
+│   └── insensitive_char_cache[256]: RoaringBitmap  // Character existence
 ├── tids[]: ItemPointerData[]      // Record TIDs
 ├── column_data_cache[][]: char**  // Cached string data
 └── tombstones: RoaringBitmap      // Deleted records
@@ -737,7 +776,6 @@ Contributions are welcome! Please:
 
 ### **Areas for Contribution**
 
-- [ ] Add `ILIKE` support (case-insensitive)
 - [ ] Implement `amcanorder` for native sorted scans
 - [ ] Add statistics collection for better cost estimation
 - [ ] Support for more data types (JSON, arrays)
@@ -772,7 +810,7 @@ Sivaprasad Murali
 
 - **Issues**: [GitHub Issues](https://github.com/Crystallinecore/biscuit/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/Crystallinecore/biscuit/discussions)
-
+- **Documentation**: [ReadTheDocs Page](https://biscuit.readthedocs.io/) 
 ---
 
 **Happy pattern matching! Grab a biscuit 🍪 when pg_trgm feels half-baked!**

@@ -4,16 +4,6 @@ Complete reference for Biscuit index SQL API, functions, and operators.
 
 ---
 
-## Table of Contents
-
-1. [Extension Management](#extension-management)
-2. [Index Operations](#index-operations)
-3. [Query Operators](#query-operators)
-4. [Diagnostic Functions](#diagnostic-functions)
-5. [Configuration Parameters](#configuration-parameters)
-6. [Data Types](#data-types)
-
----
 
 ## Extension Management
 
@@ -144,12 +134,6 @@ CREATE INDEX idx_products_lower
 ON products USING biscuit (LOWER(name));
 ```
 
-**Limitations**:
-- Maximum 256 characters per string (longer strings truncated)
-- Maximum 256 positions indexed per string
-- UNIQUE constraint not supported
-- ORDER BY not supported in index
-
 ---
 
 ### DROP INDEX
@@ -269,16 +253,32 @@ SELECT * FROM products WHERE name NOT LIKE '%test%';
 
 ### ILIKE Operator
 
-Case-insensitive pattern matching (not directly supported).
+Case-insensitive pattern matching is supported from versions >= 2.1.0
 
 **Workaround**:
 ```sql
--- Create index on LOWER()
-CREATE INDEX idx_products_lower 
-ON products USING biscuit (LOWER(name));
+-- Create index
+CREATE INDEX idx_products
+ON products USING biscuit (name);
 
--- Query with LOWER()
-SELECT * FROM products WHERE LOWER(name) LIKE '%wireless%';
+-- Query 
+SELECT * FROM products WHERE name ILIKE '%wireless%';
+```
+
+---
+
+### NOT ILIKE Operator
+
+Case-insensitive pattern matching is supported from versions >= 2.1.0
+
+**Workaround**:
+```sql
+-- Create index
+CREATE INDEX idx_products
+ON products USING biscuit (name);
+
+-- Query 
+SELECT * FROM products WHERE name NOT ILIKE '%wireless%';
 ```
 
 ---
@@ -366,7 +366,6 @@ Active Optimizations:
 | Total slots | Allocated memory slots | ≥ active records |
 | Free slots | Reusable slots from deletes | < 1000 |
 | Tombstones | Deleted but not cleaned | < 1000 |
-| Max length | Longest indexed string | < 256 |
 | Inserts | Total insert operations | Monotonic increase |
 | Updates | Total update operations | - |
 | Deletes | Total delete operations | - |
@@ -391,6 +390,117 @@ FROM pg_index i
 JOIN pg_class t ON i.indrelid = t.oid
 WHERE i.indexrelid::regclass::text LIKE '%biscuit%';
 ```
+
+---
+
+### `biscuit_index_memory_size()`
+
+Returns the in-memory footprint of a Biscuit index in bytes.
+
+**Syntax**:
+
+```sql
+biscuit_index_memory_size(index_oid oid) RETURNS bigint
+biscuit_index_memory_size(index_name text) RETURNS bigint
+```
+
+**Parameters**:
+
+* `index_oid` — OID of the Biscuit index
+* `index_name` — Name of the Biscuit index
+
+**Returns**:
+Memory usage in bytes for the specified Biscuit index.
+
+**Example**:
+
+```sql
+-- Get memory usage using index OID
+SELECT biscuit_index_memory_size('idx_products_name'::regclass::oid);
+
+-- Get memory usage using index name
+SELECT biscuit_index_memory_size('idx_products_name');
+```
+
+---
+
+### `biscuit_size_pretty()`
+
+Returns a human-readable representation of the in-memory footprint of a Biscuit index.
+
+**Syntax**:
+
+```sql
+biscuit_size_pretty(index_name text) RETURNS text
+```
+
+**Parameters**:
+
+* `index_name` — Name of the Biscuit index
+
+**Returns**:
+Formatted memory usage (bytes, KB, MB, or GB).
+
+**Example**:
+
+```sql
+SELECT biscuit_size_pretty('idx_products_name');
+```
+
+**Output Format**:
+
+```
+128 MB (134217728 bytes)
+```
+
+---
+
+### `biscuit_memory_usage`
+
+Displays memory and disk usage for all Biscuit indexes in the current database.
+
+**Definition**:
+
+```sql
+biscuit_memory_usage
+```
+
+**Columns**:
+
+* `schemaname` — Schema containing the index
+* `tablename` — Table on which the index is defined
+* `indexname` — Name of the Biscuit index
+* `bytes` — In-memory size (bytes)
+* `human_readable` — Formatted memory usage
+* `disk_size` — On-disk size (`pg_relation_size`)
+
+**Example**:
+
+```sql
+-- List all Biscuit indexes with memory usage
+SELECT * FROM biscuit_memory_usage;
+```
+
+**Usage**:
+
+```sql
+-- Identify largest Biscuit indexes in memory
+SELECT
+    indexname,
+    human_readable
+FROM biscuit_memory_usage
+ORDER BY bytes DESC
+LIMIT 5;
+```
+
+
+
+### Notes
+
+* `pg_relation_size()` and `pg_size_pretty()` report **only the on-disk footprint** of a Biscuit index.
+* Biscuit maintains its primary data structures in memory for performance; disk size may significantly underrepresent total runtime usage.
+* Reported values reflect the current in-memory state and may change over time.
+
 
 ---
 
@@ -634,8 +744,6 @@ These types cannot be indexed directly:
 - `BYTEA` - Binary data
 - `JSON`, `JSONB` - Use expression index on text field
 - `ARRAY` - Use expression index on array_to_string
-- `UUID` - Cast to TEXT first
-- `INET`, `CIDR` - Cast to TEXT first
 - `GEOMETRY` (PostGIS) - Not supported
 
 **Workarounds**:
@@ -756,5 +864,3 @@ REINDEX INDEX idx_name;
 -  Master patterns: [Pattern Syntax](patterns.md)
 -  Optimize queries: [Performance Tuning](performance.md)
 -  Get help: [FAQ](faq.md)
-
----

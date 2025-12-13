@@ -1,7 +1,55 @@
 # Biscuit Index Extension - Changelog
 
+## Version 2.1.3
 
-## Version 2.1.0 (2025-12-11)
+### ✨ New Features
+
+#### Added Index Memory Introspection Utilities
+
+Added built-in SQL functions and a view to inspect **Biscuit index in-memory footprint**.
+
+* **`biscuit_index_memory_size(index_oid oid) → bigint`**
+  Low-level C-backed function returning the exact memory usage (in bytes) of a Biscuit index currently resident in memory.
+
+* **`biscuit_index_memory_size(index_name text) → bigint`**
+  Convenience SQL wrapper accepting an index name instead of an OID.
+
+* **`biscuit_size_pretty(index_name text) → text`**
+  Human-readable formatter that reports Biscuit index memory usage in bytes, KB, MB, or GB while preserving the exact byte count.
+
+* **`biscuit_memory_usage` view**
+  A consolidated view exposing:
+
+  * schema name
+  * table name
+  * index name
+  * Biscuit in-memory size
+  * human-readable memory size
+  * on-disk index size (via `pg_relation_size`)
+
+  This allows direct comparison between **in-memory Biscuit structures** and their **persistent disk representation**.
+
+
+```sql
+SELECT * FROM biscuit_memory_usage;
+```
+
+#### Notes
+
+* Memory accounting reflects Biscuit’s deliberate cache persistence design, intended to optimize repeated pattern-matching workloads.
+* Functions are marked `VOLATILE` to ensure accurate reporting of live memory state.
+* `pg_size_pretty(pg_relation_size(...))` reports only the on-disk footprint of the Biscuit index.
+Since Biscuit maintains its primary structures in memory (cache buffers / AM cache), the reported disk size may significantly underrepresent the index’s effective total footprint during execution. Hence, we recommend the usage of `biscuit_size_pretty(...)` to view the actual size of the index.
+
+### ⚙️ Performance improvements
+
+#### Removed redundant bitmaps
+
+Separate bitmaps for length-based filtering for case-insensitive search were removed. Case insensitive searches now use the same length-based filtering bitmaps as case-sensitive ones.
+
+---
+
+## Version 2.1.2 (2025-12-11)
 
 ### ✨ New Features
 
@@ -37,6 +85,12 @@ Biscuit now indexes values of **any length**, including very long strings.
 
 * All text values—short or arbitrarily long—are now included in bitmap generation
 * More consistent query coverage for fields like descriptions, logs, and message bodies
+
+---
+
+## Version 2.1.0 - 2.1.1
+
+> Contain build issues. Fixed in version - 2.1.2.
 
 ---
 
