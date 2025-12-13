@@ -7,8 +7,8 @@ sys.path.insert(0, os.path.abspath('../../'))
 project = 'BISCUIT'
 author = 'Sivaprasad Murali'
 copyright = '2025'
-release = '2.0.0'
-version = '2.0.0'
+release = '2.1.3'
+version = '2.1.3'
 
 # -- General Configuration ---------------------------------------------------
 
