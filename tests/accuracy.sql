@@ -1097,7 +1097,4 @@ DO $$
 BEGIN 
     RAISE NOTICE '📁 Full results available in verification_results table';
     RAISE NOTICE '   Run: SELECT * FROM verification_results ORDER BY test_number;';
-    RAISE NOTICE '';
-    RAISE NOTICE '🎉 FOSDEM 2025 Biscuit Verification Complete!';
-    RAISE NOTICE '';
 END $$;

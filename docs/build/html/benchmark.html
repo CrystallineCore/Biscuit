@@ -862,7 +862,7 @@
 </table>
 <p><strong>Bottom Line:</strong></p>
 <ul class="simple">
-<li><p>Biscuit is <strong>5.0× faster than B-tree</strong> and <strong>3.5× faster than Trigram</strong></p></li>
+<li><p>Biscuit is <strong>14.4× faster than B-tree</strong> (median) and <strong>7.3× faster than Trigram</strong> (median)</p></li>
 <li><p><strong>100% correctness verified</strong> across 11,400 measurements</p></li>
 <li><p><strong>All results highly statistically significant</strong> (p &lt; 0.001)</p></li>
 <li><p>Consistent performance across all wildcard pattern types</p></li>
@@ -2740,7 +2740,7 @@ VERIFICATION 2: Cross-Iteration Consistency
 <p><strong>Biscuit</strong>:</p>
 <ul class="simple">
 <li><p><strong>Cost</strong>: 10× more storage than Trigram, 21× more than B-tree</p></li>
-<li><p><strong>Benefit</strong>: 3.5× faster than Trigram, 5× faster than B-tree</p></li>
+<li><p><strong>Benefit</strong>: 7.3× faster than Trigram (median), 14.4× faster than B-tree (median)</p></li>
 <li><p><strong>ROI</strong>: For every 1 GB extra storage, gain 95.72 ms query speed vs Trigram</p></li>
 </ul>
 <p><strong>Trigram</strong>:</p>
@@ -2949,7 +2949,7 @@ VERIFICATION 2: Cross-Iteration Consistency
 <section id="summary-of-findings">
 <h3>Summary of Findings<a class="headerlink" href="#summary-of-findings" title="Link to this heading"></a></h3>
 <ol class="arabic simple">
-<li><p><strong>Performance</strong>: Biscuit is <strong>5.0× faster than B-tree</strong> and <strong>3.5× faster than Trigram</strong> (warm cache, mean)</p>
+<li><p><strong>Performance</strong>: Biscuit is <strong>14.4× faster than B-tree</strong> (median) and <strong>7.3× faster than Trigram</strong> (warm cache, median)</p>
 <ul class="simple">
 <li><p>Statistical significance: p &lt; 0.0001 (highly significant)</p></li>
 <li><p>Effect sizes: Large to very large (Cohen’s d &gt; 0.8)</p></li>

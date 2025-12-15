@@ -21,7 +21,7 @@ This report presents a comprehensive benchmark comparing three PostgreSQL indexi
 | **Statistical Significance** | — | p < 0.0001 *** | p < 0.0001 *** |
 
 **Bottom Line:**
-- Biscuit is **5.0× faster than B-tree** and **3.5× faster than Trigram**
+- Biscuit is **14.4× faster than B-tree** (median) and **7.3× faster than Trigram** (median)
 - **100% correctness verified** across 11,400 measurements
 - **All results highly statistically significant** (p < 0.001)
 - Consistent performance across all wildcard pattern types
@@ -1275,7 +1275,7 @@ LIMIT 50 OFFSET 100;
 
 **Biscuit**:
 - **Cost**: 10× more storage than Trigram, 21× more than B-tree
-- **Benefit**: 3.5× faster than Trigram, 5× faster than B-tree
+- **Benefit**: 7.3× faster than Trigram (median), 14.4× faster than B-tree (median)
 - **ROI**: For every 1 GB extra storage, gain 95.72 ms query speed vs Trigram
 
 **Trigram**:
@@ -1433,7 +1433,7 @@ LIMIT 50 OFFSET 100;
 
 ### Summary of Findings
 
-1. **Performance**: Biscuit is **5.0× faster than B-tree** and **3.5× faster than Trigram** (warm cache, mean)
+1. **Performance**: Biscuit is **14.4× faster than B-tree** (median) and **7.3× faster than Trigram** (warm cache, median)
    - Statistical significance: p < 0.0001 (highly significant)
    - Effect sizes: Large to very large (Cohen's d > 0.8)
    

@@ -21,7 +21,7 @@ set -e  # Exit on error
 DB_NAME="postgres"
 DB_USER="postgres"
 RESULTS_DIR="./benchmark_results_$(date +%Y%m%d_%H%M%S)"
-NUM_ITERATIONS=10  # Increased for statistical significance
+NUM_ITERATIONS=10 # Increased for statistical significance
 WARMUP_ITERATIONS=3
 
 # Colors for output
