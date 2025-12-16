@@ -229,11 +229,25 @@
 <li class="toctree-l3"><a class="reference internal" href="api.html#multi-column-queries">Multi-Column Queries</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="api.html#diagnostic-functions">Diagnostic Functions</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="api.html#build-diagnostic-functions">Build Diagnostic Functions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-has-roaring">biscuit_has_roaring()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-version">biscuit_version()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-roaring-version">biscuit_roaring_version()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-build-info">biscuit_build_info()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-build-info-json">biscuit_build_info_json()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-check-config">biscuit_check_config()</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#diagnostic-views">Diagnostic Views</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-status">biscuit_status</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#troubleshooting-guide">Troubleshooting Guide</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#issue-biscuit-has-roaring-returns-false">Issue: biscuit_has_roaring() returns false</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-stats">biscuit_index_stats()</a></li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-memory-size"><code class="docutils literal notranslate"><span class="pre">biscuit_index_memory_size()</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-size-pretty"><code class="docutils literal notranslate"><span class="pre">biscuit_size_pretty()</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-memory-usage"><code class="docutils literal notranslate"><span class="pre">biscuit_memory_usage</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-memory-size">biscuit_index_memory_size()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-size-pretty">biscuit_size_pretty()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-memory-usage">biscuit_memory_usage</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#notes">Notes</a></li>
 </ul>
 </li>
@@ -453,7 +467,7 @@
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#next-steps">Next Steps</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="benchmark.html">Biscuit benchmarks without Roaring Bitmaps</a><ul>
+<li class="toctree-l1"><a class="reference internal" href="benchmark.html">Biscuit Performance Benchmark — Fallback Bitmaps</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="benchmark.html#executive-summary">Executive Summary</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="benchmark.html#key-findings">Key Findings</a><ul>
 <li class="toctree-l4"><a class="reference internal" href="benchmark.html#summary">Summary:</a></li>
@@ -594,7 +608,7 @@
 <li class="toctree-l2"><a class="reference internal" href="benchmark.html#statistical-methods">Statistical Methods</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="benchmark_roaring.html">Biscuit benchmarks with Roaring Bitmaps</a><ul>
+<li class="toctree-l1"><a class="reference internal" href="benchmark_roaring.html">Biscuit Performance Benchmark — Roaring Bitmaps</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#executive-summary">Executive Summary</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#key-findings">Key Findings</a></li>
 </ul>
@@ -986,7 +1000,9 @@
 <li class="toctree-l2"><a class="reference internal" href="api.html#extension-management">Extension Management</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#index-operations">Index Operations</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#query-operators">Query Operators</a></li>
-<li class="toctree-l2"><a class="reference internal" href="api.html#diagnostic-functions">Diagnostic Functions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#build-diagnostic-functions">Build Diagnostic Functions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#diagnostic-views">Diagnostic Views</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#troubleshooting-guide">Troubleshooting Guide</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#configuration-parameters">Configuration Parameters</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#data-types">Data Types</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#system-views">System Views</a></li>
@@ -1040,7 +1056,7 @@
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#next-steps">Next Steps</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="benchmark.html">Biscuit benchmarks without Roaring Bitmaps</a><ul>
+<li class="toctree-l1"><a class="reference internal" href="benchmark.html">Biscuit Performance Benchmark — Fallback Bitmaps</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="benchmark.html#executive-summary">Executive Summary</a></li>
 <li class="toctree-l2"><a class="reference internal" href="benchmark.html#introduction">Introduction</a></li>
 <li class="toctree-l2"><a class="reference internal" href="benchmark.html#methodology">Methodology</a></li>
@@ -1059,7 +1075,7 @@
 <li class="toctree-l2"><a class="reference internal" href="benchmark.html#statistical-methods">Statistical Methods</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="benchmark_roaring.html">Biscuit benchmarks with Roaring Bitmaps</a><ul>
+<li class="toctree-l1"><a class="reference internal" href="benchmark_roaring.html">Biscuit Performance Benchmark — Roaring Bitmaps</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#executive-summary">Executive Summary</a></li>
 <li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#introduction">Introduction</a></li>
 <li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#methodology">Methodology</a></li>

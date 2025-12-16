@@ -309,7 +309,355 @@ WHERE name LIKE '%laptop%'          -- Priority: 50 (substring)
 
 ---
 
-## Diagnostic Functions
+## Build Diagnostic Functions
+
+### biscuit_has_roaring()
+
+Checks if the extension was compiled with CRoaring bitmap support.
+
+**Syntax**:
+```sql
+biscuit_has_roaring() RETURNS boolean
+```
+
+**Parameters**: None
+
+**Returns**: `true` if compiled with Roaring support, `false` otherwise
+
+**Example**:
+```sql
+-- Check Roaring support
+SELECT biscuit_has_roaring();
+
+-- Conditional query
+SELECT 
+    CASE 
+        WHEN biscuit_has_roaring() THEN 'Optimal performance'
+        ELSE 'Using fallback implementation'
+    END as performance_status;
+```
+
+**Performance Impact**:
+- `true`: High-performance CRoaring bitmaps 
+- `false`: Fallback implementation with high memory footprint
+
+**When to Rebuild**:
+If this returns `false`, install CRoaring and rebuild:
+```bash
+# Debian/Ubuntu
+sudo apt-get install libroaring-dev
+make clean && make && sudo make install
+
+# macOS
+brew install croaring
+make clean && make && sudo make install
+```
+
+---
+
+### biscuit_version()
+
+Returns the Biscuit extension version string.
+
+**Syntax**:
+```sql
+biscuit_version() RETURNS text
+```
+
+**Parameters**: None
+
+**Returns**: Version string (e.g., `"1.0.0"`)
+
+**Example**:
+```sql
+-- Get version
+SELECT biscuit_version();
+
+-- Check minimum version
+SELECT biscuit_version() >= '1.0.0' as meets_requirement;
+```
+
+---
+
+### biscuit_roaring_version()
+
+Returns the CRoaring library version if available.
+
+**Syntax**:
+```sql
+biscuit_roaring_version() RETURNS text
+```
+
+**Parameters**: None
+
+**Returns**: 
+- Roaring version string (e.g., `"2.0.4"`) if compiled with Roaring
+- `NULL` if not compiled with Roaring support
+
+**Example**:
+```sql
+-- Get Roaring version
+SELECT biscuit_roaring_version();
+
+-- Check if Roaring is available
+SELECT biscuit_roaring_version() IS NOT NULL as has_roaring;
+
+-- Full version report
+SELECT 
+    biscuit_version() as extension_version,
+    biscuit_roaring_version() as roaring_version,
+    CASE 
+        WHEN biscuit_roaring_version() IS NOT NULL THEN 'Optimal'
+        ELSE 'Fallback'
+    END as performance_mode;
+```
+
+**Output**:
+```
+ extension_version | roaring_version | performance_mode
+-------------------+-----------------+------------------
+ 1.0.0             | 2.0.4           | Optimal
+```
+
+---
+
+### biscuit_build_info()
+
+Returns detailed build-time configuration information.
+
+**Syntax**:
+```sql
+biscuit_build_info() RETURNS TABLE (
+    feature text,
+    enabled boolean,
+    description text
+)
+```
+
+**Parameters**: None
+
+**Returns**: Table with build configuration details
+
+**Columns**:
+- `feature` - Feature or library name
+- `enabled` - Whether the feature is enabled
+- `description` - Detailed description
+
+**Example**:
+```sql
+-- Get all build information
+SELECT * FROM biscuit_build_info();
+
+-- Check specific features
+SELECT feature, enabled 
+FROM biscuit_build_info() 
+WHERE feature = 'CRoaring Bitmaps';
+
+-- Filter enabled features only
+SELECT feature, description 
+FROM biscuit_build_info() 
+WHERE enabled = true;
+```
+
+**Output**:
+```
+      feature       | enabled |              description
+--------------------+---------+---------------------------------------
+ CRoaring Bitmaps   | t       | High-performance bitmap operations...
+ PostgreSQL         | t       | Compiled for PostgreSQL 16.1
+```
+
+---
+
+### biscuit_build_info_json()
+
+Returns build configuration as a JSON string for automation and scripting.
+
+**Syntax**:
+```sql
+biscuit_build_info_json() RETURNS text
+```
+
+**Parameters**: None
+
+**Returns**: JSON-formatted string with build information
+
+**Example**:
+```sql
+-- Get JSON build info
+SELECT biscuit_build_info_json();
+
+-- Parse as JSON
+SELECT biscuit_build_info_json()::json;
+
+-- Extract specific fields
+SELECT 
+    (biscuit_build_info_json()::json)->>'version' as version,
+    (biscuit_build_info_json()::json)->>'roaring_enabled' as roaring,
+    (biscuit_build_info_json()::json)->>'postgres_version' as pg_version;
+```
+
+**Output Format**:
+```json
+{
+  "version": "1.0.0",
+  "roaring_enabled": true,
+  "roaring_version": "2.0.4",
+  "postgres_version": "16.1",
+  "build_date": "Dec 16 2025 10:30:00"
+}
+```
+
+**Use Cases**:
+- CI/CD validation scripts
+- Automated deployment checks
+- Monitoring systems
+- Version compatibility verification
+
+**Shell Script Example**:
+```bash
+#!/bin/bash
+# Check if Roaring is enabled
+ROARING=$(psql -t -c "SELECT (biscuit_build_info_json()::json)->>'roaring_enabled';")
+
+if [ "$ROARING" != "true" ]; then
+    echo "Warning: Roaring not enabled. Installing CRoaring..."
+    sudo apt-get install libroaring-dev
+    make clean && make && sudo make install
+fi
+```
+
+---
+
+### biscuit_check_config()
+
+Performs a comprehensive configuration health check and provides recommendations.
+
+**Syntax**:
+```sql
+biscuit_check_config() RETURNS TABLE (
+    check_name text,
+    status text,
+    recommendation text
+)
+```
+
+**Parameters**: None
+
+**Returns**: Table with configuration checks and recommendations
+
+**Columns**:
+- `check_name` - Name of the configuration check
+- `status` - Current status with visual indicators
+- `recommendation` - Action recommendation
+
+**Example**:
+```sql
+-- Run full configuration check
+SELECT * FROM biscuit_check_config();
+
+-- Check for issues
+SELECT * FROM biscuit_check_config() 
+WHERE status NOT LIKE '✓%';
+
+-- Save check results
+CREATE TABLE biscuit_health_log AS
+SELECT now() as checked_at, * 
+FROM biscuit_check_config();
+```
+
+**Output**:
+```
+   check_name     |      status       |                recommendation
+------------------+-------------------+----------------------------------------------
+ Roaring Support  | ✓ Enabled         | Optimal configuration (v2.0.4)
+ Extension Ver... | 1.0.0             | Current version
+ Active Indexes   | 5                 | Indexes are active
+```
+
+
+
+---
+
+## Diagnostic Views
+
+### biscuit_status
+
+Quick overview of extension status and configuration.
+
+**Definition**:
+```sql
+biscuit_status
+```
+
+**Columns**:
+- `version` - Extension version
+- `roaring_enabled` - Whether CRoaring is enabled
+- `bitmap_implementation` - Current bitmap backend
+- `total_indexes` - Number of active Biscuit indexes
+- `total_index_size` - Combined size of all indexes
+
+**Example**:
+```sql
+-- View current status
+SELECT * FROM biscuit_status;
+
+-- Monitor status changes
+CREATE TABLE biscuit_status_history AS
+SELECT now() as timestamp, * FROM biscuit_status;
+```
+
+**Output**:
+```
+ version | roaring_enabled | bitmap_implementation  | total_indexes | total_index_size
+---------+-----------------+------------------------+---------------+------------------
+ 1.0.0   | t               | Optimal (CRoaring)     | 5             | 245 MB
+```
+
+---
+
+## Troubleshooting Guide
+
+### Issue: biscuit_has_roaring() returns false
+
+**Symptoms**:
+```sql
+SELECT biscuit_has_roaring();
+-- Returns: false
+```
+
+**Diagnosis**:
+```sql
+SELECT * FROM biscuit_check_config();
+-- Shows: Roaring Support | ✗ Disabled | Install CRoaring...
+```
+
+**Solution**:
+```bash
+# Install CRoaring development library
+# Debian/Ubuntu
+sudo apt-get update
+sudo apt-get install libroaring-dev
+
+# Verify installation
+dpkg -L libroaring-dev | grep roaring.h
+
+# Rebuild extension
+cd /path/to/biscuit
+make clean
+make
+sudo make install
+
+# Restart PostgreSQL
+sudo systemctl restart postgresql
+
+# Verify in PostgreSQL
+psql -c "DROP EXTENSION biscuit CASCADE;"
+psql -c "CREATE EXTENSION biscuit;"
+psql -c "SELECT biscuit_has_roaring();"
+-- Should return: true
+```
+
 
 ### biscuit_index_stats()
 
@@ -370,30 +718,11 @@ Active Optimizations:
 | Updates | Total update operations | - |
 | Deletes | Total delete operations | - |
 
-**Usage**:
-```sql
--- Monitor index health
-SELECT 
-    indexrelid::regclass as index_name,
-    biscuit_index_stats(indexrelid) as stats
-FROM pg_index 
-WHERE indexrelid::regclass::text LIKE '%biscuit%';
 
--- Create monitoring view
-CREATE VIEW biscuit_health AS
-SELECT 
-    i.indexrelid::regclass as index_name,
-    t.relname as table_name,
-    pg_size_pretty(pg_relation_size(i.indexrelid)) as index_size,
-    biscuit_index_stats(i.indexrelid) as stats
-FROM pg_index i
-JOIN pg_class t ON i.indrelid = t.oid
-WHERE i.indexrelid::regclass::text LIKE '%biscuit%';
-```
 
 ---
 
-### `biscuit_index_memory_size()`
+### biscuit_index_memory_size()
 
 Returns the in-memory footprint of a Biscuit index in bytes.
 
@@ -424,7 +753,7 @@ SELECT biscuit_index_memory_size('idx_products_name');
 
 ---
 
-### `biscuit_size_pretty()`
+### biscuit_size_pretty()
 
 Returns a human-readable representation of the in-memory footprint of a Biscuit index.
 
@@ -455,7 +784,7 @@ SELECT biscuit_size_pretty('idx_products_name');
 
 ---
 
-### `biscuit_memory_usage`
+### biscuit_memory_usage
 
 Displays memory and disk usage for all Biscuit indexes in the current database.
 

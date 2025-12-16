@@ -6,7 +6,7 @@
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Biscuit benchmarks with Roaring Bitmaps &mdash; BISCUIT 2.1.3 Documentation</title>
+  <title>Biscuit Performance Benchmark — Roaring Bitmaps &mdash; BISCUIT 2.1.3 Documentation</title>
       <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
       <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=e59714d7" />
 
@@ -22,7 +22,7 @@
     <link rel="index" title="Index" href="genindex.html" />
     <link rel="search" title="Search" href="search.html" />
     <link rel="next" title="Benchmark Environment" href="benchmark_env.html" />
-    <link rel="prev" title="Biscuit benchmarks without Roaring Bitmaps" href="benchmark.html" />
+    <link rel="prev" title="Biscuit Performance Benchmark — Fallback Bitmaps" href="benchmark.html" />
      
 
     <!-- Google Search Console -->
@@ -90,7 +90,7 @@
     },{
         "@type": "ListItem",
         "position": 2,
-        "name": "Biscuit benchmarks with Roaring Bitmaps",
+        "name": "Biscuit Performance Benchmark — Roaring Bitmaps",
         "item": "https://biscuit.readthedocs.io/benchmark_roaring.html"
     }]
     }
@@ -230,11 +230,25 @@
 <li class="toctree-l3"><a class="reference internal" href="api.html#multi-column-queries">Multi-Column Queries</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="api.html#diagnostic-functions">Diagnostic Functions</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="api.html#build-diagnostic-functions">Build Diagnostic Functions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-has-roaring">biscuit_has_roaring()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-version">biscuit_version()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-roaring-version">biscuit_roaring_version()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-build-info">biscuit_build_info()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-build-info-json">biscuit_build_info_json()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-check-config">biscuit_check_config()</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#diagnostic-views">Diagnostic Views</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-status">biscuit_status</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#troubleshooting-guide">Troubleshooting Guide</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#issue-biscuit-has-roaring-returns-false">Issue: biscuit_has_roaring() returns false</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-stats">biscuit_index_stats()</a></li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-memory-size"><code class="docutils literal notranslate"><span class="pre">biscuit_index_memory_size()</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-size-pretty"><code class="docutils literal notranslate"><span class="pre">biscuit_size_pretty()</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-memory-usage"><code class="docutils literal notranslate"><span class="pre">biscuit_memory_usage</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-memory-size">biscuit_index_memory_size()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-size-pretty">biscuit_size_pretty()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-memory-usage">biscuit_memory_usage</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#notes">Notes</a></li>
 </ul>
 </li>
@@ -454,7 +468,7 @@
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#next-steps">Next Steps</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="benchmark.html">Biscuit benchmarks without Roaring Bitmaps</a><ul>
+<li class="toctree-l1"><a class="reference internal" href="benchmark.html">Biscuit Performance Benchmark — Fallback Bitmaps</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="benchmark.html#executive-summary">Executive Summary</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="benchmark.html#key-findings">Key Findings</a><ul>
 <li class="toctree-l4"><a class="reference internal" href="benchmark.html#summary">Summary:</a></li>
@@ -595,7 +609,7 @@
 <li class="toctree-l2"><a class="reference internal" href="benchmark.html#statistical-methods">Statistical Methods</a></li>
 </ul>
 </li>
-<li class="toctree-l1 current"><a class="current reference internal" href="#">Biscuit benchmarks with Roaring Bitmaps</a><ul>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Biscuit Performance Benchmark — Roaring Bitmaps</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="#executive-summary">Executive Summary</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#key-findings">Key Findings</a></li>
 </ul>
@@ -939,7 +953,7 @@
           <div role="navigation" aria-label="Page navigation">
   <ul class="wy-breadcrumbs">
       <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
-      <li class="breadcrumb-item active">Biscuit benchmarks with Roaring Bitmaps</li>
+      <li class="breadcrumb-item active">Biscuit Performance Benchmark — Roaring Bitmaps</li>
       <li class="wy-breadcrumbs-aside">
             <a href="_sources/benchmark_roaring.md.txt" rel="nofollow"> View page source</a>
       </li>
@@ -949,8 +963,8 @@
           <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
            <div itemprop="articleBody">
              
-  <section id="biscuit-benchmarks-with-roaring-bitmaps">
-<h1>Biscuit benchmarks with Roaring Bitmaps<a class="headerlink" href="#biscuit-benchmarks-with-roaring-bitmaps" title="Link to this heading"></a></h1>
+  <section id="biscuit-performance-benchmark-roaring-bitmaps">
+<h1>Biscuit Performance Benchmark — Roaring Bitmaps<a class="headerlink" href="#biscuit-performance-benchmark-roaring-bitmaps" title="Link to this heading"></a></h1>
 <p><strong>A rigorous, publication-grade performance analysis with Roaring Bitmaps optimization</strong></p>
 <blockquote>
 <div><p>Refer Benchmark Environment section to know more about the configurations of the system used to generate these results.</p>
@@ -3369,7 +3383,7 @@ Where:
            </div>
           </div>
           <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
-        <a href="benchmark.html" class="btn btn-neutral float-left" title="Biscuit benchmarks without Roaring Bitmaps" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="benchmark.html" class="btn btn-neutral float-left" title="Biscuit Performance Benchmark — Fallback Bitmaps" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
         <a href="benchmark_env.html" class="btn btn-neutral float-right" title="Benchmark Environment" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
     </div>
 

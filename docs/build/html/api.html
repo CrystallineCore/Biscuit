@@ -230,11 +230,25 @@
 <li class="toctree-l3"><a class="reference internal" href="#multi-column-queries">Multi-Column Queries</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="#diagnostic-functions">Diagnostic Functions</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#build-diagnostic-functions">Build Diagnostic Functions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#biscuit-has-roaring">biscuit_has_roaring()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#biscuit-version">biscuit_version()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#biscuit-roaring-version">biscuit_roaring_version()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#biscuit-build-info">biscuit_build_info()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#biscuit-build-info-json">biscuit_build_info_json()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#biscuit-check-config">biscuit_check_config()</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#diagnostic-views">Diagnostic Views</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#biscuit-status">biscuit_status</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#troubleshooting-guide">Troubleshooting Guide</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#issue-biscuit-has-roaring-returns-false">Issue: biscuit_has_roaring() returns false</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#biscuit-index-stats">biscuit_index_stats()</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#biscuit-index-memory-size"><code class="docutils literal notranslate"><span class="pre">biscuit_index_memory_size()</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#biscuit-size-pretty"><code class="docutils literal notranslate"><span class="pre">biscuit_size_pretty()</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#biscuit-memory-usage"><code class="docutils literal notranslate"><span class="pre">biscuit_memory_usage</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#biscuit-index-memory-size">biscuit_index_memory_size()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#biscuit-size-pretty">biscuit_size_pretty()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#biscuit-memory-usage">biscuit_memory_usage</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#notes">Notes</a></li>
 </ul>
 </li>
@@ -454,9 +468,12 @@
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#next-steps">Next Steps</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="benchmark.html">Biscuit vs. Trigram vs. B-tree</a><ul>
+<li class="toctree-l1"><a class="reference internal" href="benchmark.html">Biscuit Performance Benchmark — Fallback Bitmaps</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="benchmark.html#executive-summary">Executive Summary</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="benchmark.html#key-findings">Key Findings</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#key-findings">Key Findings</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#summary">Summary:</a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="benchmark.html#introduction">Introduction</a><ul>
@@ -590,6 +607,145 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="benchmark.html#statistical-methods">Statistical Methods</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="benchmark_roaring.html">Biscuit Performance Benchmark — Roaring Bitmaps</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#executive-summary">Executive Summary</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#key-findings">Key Findings</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#introduction">Introduction</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#problem-statement">Problem Statement</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#research-questions">Research Questions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#benchmark-scope">Benchmark Scope</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#methodology">Methodology</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#design-principles">Design Principles</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#complete-isolation">1. Complete Isolation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#cache-state-control">2. Cache State Control</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#forced-index-usage">3. Forced Index Usage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#statistical-rigor">4. Statistical Rigor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#randomization">5. Randomization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#comprehensive-metrics">6. Comprehensive Metrics</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#test-environment">Test Environment</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#dataset">Dataset</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#hardware-configuration">Hardware Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#software-stack">Software Stack</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#database-configuration">Database Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#dataset-characteristics">Dataset Characteristics</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#query-coverage-analysis">Query Coverage Analysis</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#overview">Overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#coverage-by-pattern-structure">Coverage by Pattern Structure</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#basic-wildcard-patterns-24-queries">1. Basic Wildcard Patterns (24 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#underscore-wildcards-12-queries">2. Underscore Wildcards (12 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#case-insensitive-patterns-ilike-20-queries">3. Case-Insensitive Patterns (ILIKE) (20 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#negation-patterns-not-like-not-ilike-16-queries">4. Negation Patterns (NOT LIKE / NOT ILIKE) (16 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#boolean-combinations-48-queries">5. Boolean Combinations (48 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#edge-cases-and-special-patterns-20-queries">6. Edge Cases and Special Patterns (20 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#real-world-query-patterns-20-queries">7. Real-World Query Patterns (20 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#selectivity-spectrum-10-queries">8. Selectivity Spectrum (10 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#special-characters-escaping-4-queries">9. Special Characters &amp; Escaping (4 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#order-by-limit-pagination-4-queries">10. ORDER BY + LIMIT (Pagination) (4 queries)</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#coverage-summary-table">Coverage Summary Table</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#selectivity-distribution">Selectivity Distribution</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#performance-results">Performance Results</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#overall-performance-summary-warm-cache">Overall Performance Summary (Warm Cache)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#cold-cache-vs-warm-cache">Cold Cache vs. Warm Cache</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#cache-hit-ratios">Cache Hit Ratios</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#statistical-significance-testing">Statistical Significance Testing</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#statistical-analysis">Statistical Analysis</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#distribution-analysis">Distribution Analysis</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#execution-time-distributions">Execution Time Distributions</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#consistency-analysis-coefficient-of-variation">Consistency Analysis (Coefficient of Variation)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#outlier-analysis">Outlier Analysis</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#pattern-specific-performance">Pattern-Specific Performance</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#by-wildcard-pattern-type-warm-cache">By Wildcard Pattern Type (Warm Cache)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#by-selectivity-level-estimated-from-available-data">By Selectivity Level (Estimated from available data)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#correctness-verification">Correctness Verification</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#dual-level-verification-protocol">Dual-Level Verification Protocol</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#level-1-cross-index-consistency">Level 1: Cross-Index Consistency</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#level-2-cross-iteration-consistency">Level 2: Cross-Iteration Consistency</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#overall-verification-summary">Overall Verification Summary</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#correctness-implications">Correctness Implications</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#index-usage-analysis">Index Usage Analysis</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#query-execution-strategy-breakdown">Query Execution Strategy Breakdown</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#execution-plan-analysis">Execution Plan Analysis</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#biscuit-dominant-index-scan-usage">Biscuit: Dominant Index Scan Usage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#trigram-bitmap-heavy-approach">Trigram: Bitmap-Heavy Approach</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#b-tree-sequential-scan-dominant">B-tree: Sequential Scan Dominant</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#buffer-i-o-analysis">Buffer I/O Analysis</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#roaring-bitmap-optimization-impact">Roaring Bitmap Optimization Impact</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#storage-comparison">Storage Comparison</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#performance-impact-analysis">Performance Impact Analysis</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#roaring-bitmap-benefits-summary">Roaring Bitmap Benefits Summary</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#why-roaring-bitmaps-work-well-for-biscuit">Why Roaring Bitmaps Work Well for Biscuit</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#real-world-scenarios">Real-World Scenarios</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#scenario-1-user-search-autocomplete">Scenario 1: User Search / Autocomplete</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#scenario-2-geographic-filtering">Scenario 2: Geographic Filtering</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#scenario-3-content-moderation">Scenario 3: Content Moderation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#scenario-4-analytics-dashboard">Scenario 4: Analytics Dashboard</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#trade-off-analysis">Trade-off Analysis</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#performance-vs-storage">Performance vs. Storage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#decision-matrix">Decision Matrix</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#total-cost-of-ownership-5-year-estimate">Total Cost of Ownership (5-Year Estimate)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#limitations-and-future-work">Limitations and Future Work</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#current-limitations">Current Limitations</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#write-performance-not-tested">1. Write Performance Not Tested</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#single-hardware-configuration">2. Single Hardware Configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#id1">3. Forced Index Usage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#single-dataset-size">4. Single Dataset Size</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#no-concurrency-testing">5. No Concurrency Testing</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#recommendations-for-practitioners">Recommendations for Practitioners</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#conclusions">Conclusions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#summary-of-findings">Summary of Findings</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#practical-recommendations">Practical Recommendations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#research-contributions">Research Contributions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#final-verdict">Final Verdict</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#statistical-methods">Statistical Methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#appendix-verification-checklist">Appendix: Verification Checklist</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#publication-readiness-assessment">Publication Readiness Assessment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#data-quality-summary">Data Quality Summary</a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="benchmark_env.html">Benchmark Environment</a><ul>
@@ -1093,8 +1249,320 @@
 </section>
 </section>
 <hr class="docutils" />
-<section id="diagnostic-functions">
-<h2>Diagnostic Functions<a class="headerlink" href="#diagnostic-functions" title="Link to this heading"></a></h2>
+<section id="build-diagnostic-functions">
+<h2>Build Diagnostic Functions<a class="headerlink" href="#build-diagnostic-functions" title="Link to this heading"></a></h2>
+<section id="biscuit-has-roaring">
+<h3>biscuit_has_roaring()<a class="headerlink" href="#biscuit-has-roaring" title="Link to this heading"></a></h3>
+<p>Checks if the extension was compiled with CRoaring bitmap support.</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="n">biscuit_has_roaring</span><span class="p">()</span><span class="w"> </span><span class="k">RETURNS</span><span class="w"> </span><span class="nb">boolean</span>
+</pre></div>
+</div>
+<p><strong>Parameters</strong>: None</p>
+<p><strong>Returns</strong>: <code class="docutils literal notranslate"><span class="pre">true</span></code> if compiled with Roaring support, <code class="docutils literal notranslate"><span class="pre">false</span></code> otherwise</p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Check Roaring support</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_has_roaring</span><span class="p">();</span>
+
+<span class="c1">-- Conditional query</span>
+<span class="k">SELECT</span><span class="w"> </span>
+<span class="w">    </span><span class="k">CASE</span><span class="w"> </span>
+<span class="w">        </span><span class="k">WHEN</span><span class="w"> </span><span class="n">biscuit_has_roaring</span><span class="p">()</span><span class="w"> </span><span class="k">THEN</span><span class="w"> </span><span class="s1">&#39;Optimal performance&#39;</span>
+<span class="w">        </span><span class="k">ELSE</span><span class="w"> </span><span class="s1">&#39;Using fallback implementation&#39;</span>
+<span class="w">    </span><span class="k">END</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">performance_status</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Performance Impact</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">true</span></code>: High-performance CRoaring bitmaps</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">false</span></code>: Fallback implementation with high memory footprint</p></li>
+</ul>
+<p><strong>When to Rebuild</strong>:
+If this returns <code class="docutils literal notranslate"><span class="pre">false</span></code>, install CRoaring and rebuild:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Debian/Ubuntu</span>
+sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>libroaring-dev
+make<span class="w"> </span>clean<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>make<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>sudo<span class="w"> </span>make<span class="w"> </span>install
+
+<span class="c1"># macOS</span>
+brew<span class="w"> </span>install<span class="w"> </span>croaring
+make<span class="w"> </span>clean<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>make<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>sudo<span class="w"> </span>make<span class="w"> </span>install
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="biscuit-version">
+<h3>biscuit_version()<a class="headerlink" href="#biscuit-version" title="Link to this heading"></a></h3>
+<p>Returns the Biscuit extension version string.</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="n">biscuit_version</span><span class="p">()</span><span class="w"> </span><span class="k">RETURNS</span><span class="w"> </span><span class="nb">text</span>
+</pre></div>
+</div>
+<p><strong>Parameters</strong>: None</p>
+<p><strong>Returns</strong>: Version string (e.g., <code class="docutils literal notranslate"><span class="pre">&quot;1.0.0&quot;</span></code>)</p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Get version</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_version</span><span class="p">();</span>
+
+<span class="c1">-- Check minimum version</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_version</span><span class="p">()</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">&#39;1.0.0&#39;</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">meets_requirement</span><span class="p">;</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="biscuit-roaring-version">
+<h3>biscuit_roaring_version()<a class="headerlink" href="#biscuit-roaring-version" title="Link to this heading"></a></h3>
+<p>Returns the CRoaring library version if available.</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="n">biscuit_roaring_version</span><span class="p">()</span><span class="w"> </span><span class="k">RETURNS</span><span class="w"> </span><span class="nb">text</span>
+</pre></div>
+</div>
+<p><strong>Parameters</strong>: None</p>
+<p><strong>Returns</strong>:</p>
+<ul class="simple">
+<li><p>Roaring version string (e.g., <code class="docutils literal notranslate"><span class="pre">&quot;2.0.4&quot;</span></code>) if compiled with Roaring</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">NULL</span></code> if not compiled with Roaring support</p></li>
+</ul>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Get Roaring version</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_roaring_version</span><span class="p">();</span>
+
+<span class="c1">-- Check if Roaring is available</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_roaring_version</span><span class="p">()</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">has_roaring</span><span class="p">;</span>
+
+<span class="c1">-- Full version report</span>
+<span class="k">SELECT</span><span class="w"> </span>
+<span class="w">    </span><span class="n">biscuit_version</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">extension_version</span><span class="p">,</span>
+<span class="w">    </span><span class="n">biscuit_roaring_version</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">roaring_version</span><span class="p">,</span>
+<span class="w">    </span><span class="k">CASE</span><span class="w"> </span>
+<span class="w">        </span><span class="k">WHEN</span><span class="w"> </span><span class="n">biscuit_roaring_version</span><span class="p">()</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">THEN</span><span class="w"> </span><span class="s1">&#39;Optimal&#39;</span>
+<span class="w">        </span><span class="k">ELSE</span><span class="w"> </span><span class="s1">&#39;Fallback&#39;</span>
+<span class="w">    </span><span class="k">END</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">performance_mode</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Output</strong>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span> <span class="n">extension_version</span> <span class="o">|</span> <span class="n">roaring_version</span> <span class="o">|</span> <span class="n">performance_mode</span>
+<span class="o">-------------------+-----------------+------------------</span>
+ <span class="mf">1.0.0</span>             <span class="o">|</span> <span class="mf">2.0.4</span>           <span class="o">|</span> <span class="n">Optimal</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="biscuit-build-info">
+<h3>biscuit_build_info()<a class="headerlink" href="#biscuit-build-info" title="Link to this heading"></a></h3>
+<p>Returns detailed build-time configuration information.</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="n">biscuit_build_info</span><span class="p">()</span><span class="w"> </span><span class="k">RETURNS</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">feature</span><span class="w"> </span><span class="nb">text</span><span class="p">,</span>
+<span class="w">    </span><span class="n">enabled</span><span class="w"> </span><span class="nb">boolean</span><span class="p">,</span>
+<span class="w">    </span><span class="n">description</span><span class="w"> </span><span class="nb">text</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p><strong>Parameters</strong>: None</p>
+<p><strong>Returns</strong>: Table with build configuration details</p>
+<p><strong>Columns</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">feature</span></code> - Feature or library name</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">enabled</span></code> - Whether the feature is enabled</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">description</span></code> - Detailed description</p></li>
+</ul>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Get all build information</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">biscuit_build_info</span><span class="p">();</span>
+
+<span class="c1">-- Check specific features</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">feature</span><span class="p">,</span><span class="w"> </span><span class="n">enabled</span><span class="w"> </span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">biscuit_build_info</span><span class="p">()</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">feature</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;CRoaring Bitmaps&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Filter enabled features only</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">feature</span><span class="p">,</span><span class="w"> </span><span class="n">description</span><span class="w"> </span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">biscuit_build_info</span><span class="p">()</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">enabled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">true</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Output</strong>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>      <span class="n">feature</span>       <span class="o">|</span> <span class="n">enabled</span> <span class="o">|</span>              <span class="n">description</span>
+<span class="o">--------------------+---------+---------------------------------------</span>
+ <span class="n">CRoaring</span> <span class="n">Bitmaps</span>   <span class="o">|</span> <span class="n">t</span>       <span class="o">|</span> <span class="n">High</span><span class="o">-</span><span class="n">performance</span> <span class="n">bitmap</span> <span class="n">operations</span><span class="o">...</span>
+ <span class="n">PostgreSQL</span>         <span class="o">|</span> <span class="n">t</span>       <span class="o">|</span> <span class="n">Compiled</span> <span class="k">for</span> <span class="n">PostgreSQL</span> <span class="mf">16.1</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="biscuit-build-info-json">
+<h3>biscuit_build_info_json()<a class="headerlink" href="#biscuit-build-info-json" title="Link to this heading"></a></h3>
+<p>Returns build configuration as a JSON string for automation and scripting.</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="n">biscuit_build_info_json</span><span class="p">()</span><span class="w"> </span><span class="k">RETURNS</span><span class="w"> </span><span class="nb">text</span>
+</pre></div>
+</div>
+<p><strong>Parameters</strong>: None</p>
+<p><strong>Returns</strong>: JSON-formatted string with build information</p>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Get JSON build info</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_build_info_json</span><span class="p">();</span>
+
+<span class="c1">-- Parse as JSON</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_build_info_json</span><span class="p">()::</span><span class="n">json</span><span class="p">;</span>
+
+<span class="c1">-- Extract specific fields</span>
+<span class="k">SELECT</span><span class="w"> </span>
+<span class="w">    </span><span class="p">(</span><span class="n">biscuit_build_info_json</span><span class="p">()::</span><span class="n">json</span><span class="p">)</span><span class="o">-&gt;&gt;</span><span class="s1">&#39;version&#39;</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="k">version</span><span class="p">,</span>
+<span class="w">    </span><span class="p">(</span><span class="n">biscuit_build_info_json</span><span class="p">()::</span><span class="n">json</span><span class="p">)</span><span class="o">-&gt;&gt;</span><span class="s1">&#39;roaring_enabled&#39;</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">roaring</span><span class="p">,</span>
+<span class="w">    </span><span class="p">(</span><span class="n">biscuit_build_info_json</span><span class="p">()::</span><span class="n">json</span><span class="p">)</span><span class="o">-&gt;&gt;</span><span class="s1">&#39;postgres_version&#39;</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">pg_version</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Output Format</strong>:</p>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;1.0.0&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;roaring_enabled&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;roaring_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2.0.4&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;postgres_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;16.1&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;build_date&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Dec 16 2025 10:30:00&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p><strong>Use Cases</strong>:</p>
+<ul class="simple">
+<li><p>CI/CD validation scripts</p></li>
+<li><p>Automated deployment checks</p></li>
+<li><p>Monitoring systems</p></li>
+<li><p>Version compatibility verification</p></li>
+</ul>
+<p><strong>Shell Script Example</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="ch">#!/bin/bash</span>
+<span class="c1"># Check if Roaring is enabled</span>
+<span class="nv">ROARING</span><span class="o">=</span><span class="k">$(</span>psql<span class="w"> </span>-t<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;SELECT (biscuit_build_info_json()::json)-&gt;&gt;&#39;roaring_enabled&#39;;&quot;</span><span class="k">)</span>
+
+<span class="k">if</span><span class="w"> </span><span class="o">[</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$ROARING</span><span class="s2">&quot;</span><span class="w"> </span>!<span class="o">=</span><span class="w"> </span><span class="s2">&quot;true&quot;</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;Warning: Roaring not enabled. Installing CRoaring...&quot;</span>
+<span class="w">    </span>sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>libroaring-dev
+<span class="w">    </span>make<span class="w"> </span>clean<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>make<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>sudo<span class="w"> </span>make<span class="w"> </span>install
+<span class="k">fi</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="biscuit-check-config">
+<h3>biscuit_check_config()<a class="headerlink" href="#biscuit-check-config" title="Link to this heading"></a></h3>
+<p>Performs a comprehensive configuration health check and provides recommendations.</p>
+<p><strong>Syntax</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="n">biscuit_check_config</span><span class="p">()</span><span class="w"> </span><span class="k">RETURNS</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="p">(</span>
+<span class="w">    </span><span class="n">check_name</span><span class="w"> </span><span class="nb">text</span><span class="p">,</span>
+<span class="w">    </span><span class="n">status</span><span class="w"> </span><span class="nb">text</span><span class="p">,</span>
+<span class="w">    </span><span class="n">recommendation</span><span class="w"> </span><span class="nb">text</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p><strong>Parameters</strong>: None</p>
+<p><strong>Returns</strong>: Table with configuration checks and recommendations</p>
+<p><strong>Columns</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">check_name</span></code> - Name of the configuration check</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">status</span></code> - Current status with visual indicators</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">recommendation</span></code> - Action recommendation</p></li>
+</ul>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Run full configuration check</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">biscuit_check_config</span><span class="p">();</span>
+
+<span class="c1">-- Check for issues</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">biscuit_check_config</span><span class="p">()</span><span class="w"> </span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;✓%&#39;</span><span class="p">;</span>
+
+<span class="c1">-- Save check results</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">biscuit_health_log</span><span class="w"> </span><span class="k">AS</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">now</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">checked_at</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="w"> </span>
+<span class="k">FROM</span><span class="w"> </span><span class="n">biscuit_check_config</span><span class="p">();</span>
+</pre></div>
+</div>
+<p><strong>Output</strong>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>   check_name     |      status       |                recommendation
+------------------+-------------------+----------------------------------------------
+ Roaring Support  | ✓ Enabled         | Optimal configuration (v2.0.4)
+ Extension Ver... | 1.0.0             | Current version
+ Active Indexes   | 5                 | Indexes are active
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="diagnostic-views">
+<h2>Diagnostic Views<a class="headerlink" href="#diagnostic-views" title="Link to this heading"></a></h2>
+<section id="biscuit-status">
+<h3>biscuit_status<a class="headerlink" href="#biscuit-status" title="Link to this heading"></a></h3>
+<p>Quick overview of extension status and configuration.</p>
+<p><strong>Definition</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="n">biscuit_status</span>
+</pre></div>
+</div>
+<p><strong>Columns</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">version</span></code> - Extension version</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">roaring_enabled</span></code> - Whether CRoaring is enabled</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">bitmap_implementation</span></code> - Current bitmap backend</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">total_indexes</span></code> - Number of active Biscuit indexes</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">total_index_size</span></code> - Combined size of all indexes</p></li>
+</ul>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- View current status</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">biscuit_status</span><span class="p">;</span>
+
+<span class="c1">-- Monitor status changes</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">biscuit_status_history</span><span class="w"> </span><span class="k">AS</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">now</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="k">timestamp</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">biscuit_status</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Output</strong>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span> <span class="n">version</span> <span class="o">|</span> <span class="n">roaring_enabled</span> <span class="o">|</span> <span class="n">bitmap_implementation</span>  <span class="o">|</span> <span class="n">total_indexes</span> <span class="o">|</span> <span class="n">total_index_size</span>
+<span class="o">---------+-----------------+------------------------+---------------+------------------</span>
+ <span class="mf">1.0.0</span>   <span class="o">|</span> <span class="n">t</span>               <span class="o">|</span> <span class="n">Optimal</span> <span class="p">(</span><span class="n">CRoaring</span><span class="p">)</span>     <span class="o">|</span> <span class="mi">5</span>             <span class="o">|</span> <span class="mi">245</span> <span class="n">MB</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="troubleshooting-guide">
+<h2>Troubleshooting Guide<a class="headerlink" href="#troubleshooting-guide" title="Link to this heading"></a></h2>
+<section id="issue-biscuit-has-roaring-returns-false">
+<h3>Issue: biscuit_has_roaring() returns false<a class="headerlink" href="#issue-biscuit-has-roaring-returns-false" title="Link to this heading"></a></h3>
+<p><strong>Symptoms</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_has_roaring</span><span class="p">();</span>
+<span class="c1">-- Returns: false</span>
+</pre></div>
+</div>
+<p><strong>Diagnosis</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">biscuit_check_config</span><span class="p">();</span>
+<span class="c1">-- Shows: Roaring Support | ✗ Disabled | Install CRoaring...</span>
+</pre></div>
+</div>
+<p><strong>Solution</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Install CRoaring development library</span>
+<span class="c1"># Debian/Ubuntu</span>
+sudo<span class="w"> </span>apt-get<span class="w"> </span>update
+sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>libroaring-dev
+
+<span class="c1"># Verify installation</span>
+dpkg<span class="w"> </span>-L<span class="w"> </span>libroaring-dev<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>roaring.h
+
+<span class="c1"># Rebuild extension</span>
+<span class="nb">cd</span><span class="w"> </span>/path/to/biscuit
+make<span class="w"> </span>clean
+make
+sudo<span class="w"> </span>make<span class="w"> </span>install
+
+<span class="c1"># Restart PostgreSQL</span>
+sudo<span class="w"> </span>systemctl<span class="w"> </span>restart<span class="w"> </span>postgresql
+
+<span class="c1"># Verify in PostgreSQL</span>
+psql<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;DROP EXTENSION biscuit CASCADE;&quot;</span>
+psql<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;CREATE EXTENSION biscuit;&quot;</span>
+psql<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;SELECT biscuit_has_roaring();&quot;</span>
+--<span class="w"> </span>Should<span class="w"> </span><span class="k">return</span>:<span class="w"> </span><span class="nb">true</span>
+</pre></div>
+</div>
+</section>
 <section id="biscuit-index-stats">
 <h3>biscuit_index_stats()<a class="headerlink" href="#biscuit-index-stats" title="Link to this heading"></a></h3>
 <p>Returns detailed statistics about a Biscuit index.</p>
@@ -1177,30 +1645,10 @@ Active Optimizations:
 </tr>
 </tbody>
 </table>
-<p><strong>Usage</strong>:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Monitor index health</span>
-<span class="k">SELECT</span><span class="w"> </span>
-<span class="w">    </span><span class="n">indexrelid</span><span class="p">::</span><span class="n">regclass</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">index_name</span><span class="p">,</span>
-<span class="w">    </span><span class="n">biscuit_index_stats</span><span class="p">(</span><span class="n">indexrelid</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">stats</span>
-<span class="k">FROM</span><span class="w"> </span><span class="n">pg_index</span><span class="w"> </span>
-<span class="k">WHERE</span><span class="w"> </span><span class="n">indexrelid</span><span class="p">::</span><span class="n">regclass</span><span class="p">::</span><span class="nb">text</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%biscuit%&#39;</span><span class="p">;</span>
-
-<span class="c1">-- Create monitoring view</span>
-<span class="k">CREATE</span><span class="w"> </span><span class="k">VIEW</span><span class="w"> </span><span class="n">biscuit_health</span><span class="w"> </span><span class="k">AS</span>
-<span class="k">SELECT</span><span class="w"> </span>
-<span class="w">    </span><span class="n">i</span><span class="p">.</span><span class="n">indexrelid</span><span class="p">::</span><span class="n">regclass</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">index_name</span><span class="p">,</span>
-<span class="w">    </span><span class="n">t</span><span class="p">.</span><span class="n">relname</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="k">table_name</span><span class="p">,</span>
-<span class="w">    </span><span class="n">pg_size_pretty</span><span class="p">(</span><span class="n">pg_relation_size</span><span class="p">(</span><span class="n">i</span><span class="p">.</span><span class="n">indexrelid</span><span class="p">))</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">index_size</span><span class="p">,</span>
-<span class="w">    </span><span class="n">biscuit_index_stats</span><span class="p">(</span><span class="n">i</span><span class="p">.</span><span class="n">indexrelid</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">stats</span>
-<span class="k">FROM</span><span class="w"> </span><span class="n">pg_index</span><span class="w"> </span><span class="n">i</span>
-<span class="k">JOIN</span><span class="w"> </span><span class="n">pg_class</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">i</span><span class="p">.</span><span class="n">indrelid</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">t</span><span class="p">.</span><span class="n">oid</span>
-<span class="k">WHERE</span><span class="w"> </span><span class="n">i</span><span class="p">.</span><span class="n">indexrelid</span><span class="p">::</span><span class="n">regclass</span><span class="p">::</span><span class="nb">text</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%biscuit%&#39;</span><span class="p">;</span>
-</pre></div>
-</div>
 </section>
 <hr class="docutils" />
 <section id="biscuit-index-memory-size">
-<h3><code class="docutils literal notranslate"><span class="pre">biscuit_index_memory_size()</span></code><a class="headerlink" href="#biscuit-index-memory-size" title="Link to this heading"></a></h3>
+<h3>biscuit_index_memory_size()<a class="headerlink" href="#biscuit-index-memory-size" title="Link to this heading"></a></h3>
 <p>Returns the in-memory footprint of a Biscuit index in bytes.</p>
 <p><strong>Syntax</strong>:</p>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="n">biscuit_index_memory_size</span><span class="p">(</span><span class="n">index_oid</span><span class="w"> </span><span class="n">oid</span><span class="p">)</span><span class="w"> </span><span class="k">RETURNS</span><span class="w"> </span><span class="nb">bigint</span>
@@ -1225,7 +1673,7 @@ Memory usage in bytes for the specified Biscuit index.</p>
 </section>
 <hr class="docutils" />
 <section id="biscuit-size-pretty">
-<h3><code class="docutils literal notranslate"><span class="pre">biscuit_size_pretty()</span></code><a class="headerlink" href="#biscuit-size-pretty" title="Link to this heading"></a></h3>
+<h3>biscuit_size_pretty()<a class="headerlink" href="#biscuit-size-pretty" title="Link to this heading"></a></h3>
 <p>Returns a human-readable representation of the in-memory footprint of a Biscuit index.</p>
 <p><strong>Syntax</strong>:</p>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="n">biscuit_size_pretty</span><span class="p">(</span><span class="n">index_name</span><span class="w"> </span><span class="nb">text</span><span class="p">)</span><span class="w"> </span><span class="k">RETURNS</span><span class="w"> </span><span class="nb">text</span>
@@ -1248,7 +1696,7 @@ Formatted memory usage (bytes, KB, MB, or GB).</p>
 </section>
 <hr class="docutils" />
 <section id="biscuit-memory-usage">
-<h3><code class="docutils literal notranslate"><span class="pre">biscuit_memory_usage</span></code><a class="headerlink" href="#biscuit-memory-usage" title="Link to this heading"></a></h3>
+<h3>biscuit_memory_usage<a class="headerlink" href="#biscuit-memory-usage" title="Link to this heading"></a></h3>
 <p>Displays memory and disk usage for all Biscuit indexes in the current database.</p>
 <p><strong>Definition</strong>:</p>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="n">biscuit_memory_usage</span>

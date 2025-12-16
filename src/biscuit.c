@@ -39,6 +39,9 @@
 #include "fmgr.h"
 #include "utils/inval.h"
 #include "storage/ipc.h"           /* for on_proc_exit */
+#include "funcapi.h"
+#include "access/htup_details.h"
+
 
 #ifdef HAVE_ROARING
 #pragma message("Biscuit: compiled WITH Roaring Bitmap support")
@@ -98,6 +101,165 @@ typedef struct QueryPlan QueryPlan;
 PG_FUNCTION_INFO_V1(biscuit_handler);
 PG_FUNCTION_INFO_V1(biscuit_index_stats);
 
+// Check if compiled with Roaring support
+PG_FUNCTION_INFO_V1(biscuit_has_roaring);
+Datum
+biscuit_has_roaring(PG_FUNCTION_ARGS)
+{
+#ifdef HAVE_ROARING
+    PG_RETURN_BOOL(true);
+#else
+    PG_RETURN_BOOL(false);
+#endif
+}
+
+// Get version string
+PG_FUNCTION_INFO_V1(biscuit_version);
+Datum
+biscuit_version(PG_FUNCTION_ARGS)
+{
+    PG_RETURN_TEXT_P(cstring_to_text("2.1.4"));
+}
+
+// Get build information - Set-Returning Function
+PG_FUNCTION_INFO_V1(biscuit_build_info);
+Datum
+biscuit_build_info(PG_FUNCTION_ARGS)
+{
+    FuncCallContext *funcctx;
+    int             call_cntr;
+    int             max_calls;
+    TupleDesc       tupdesc;
+    AttInMetadata  *attinmeta;
+
+    /* First call setup */
+    if (SRF_IS_FIRSTCALL())
+    {
+        MemoryContext oldcontext;
+
+        funcctx = SRF_FIRSTCALL_INIT();
+        oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+        /* Build tuple descriptor */
+        if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+            ereport(ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("function returning record called in context "
+                            "that cannot accept type record")));
+
+        attinmeta = TupleDescGetAttInMetadata(tupdesc);
+        funcctx->attinmeta = attinmeta;
+        funcctx->max_calls = 2; /* Number of rows to return */
+
+        MemoryContextSwitchTo(oldcontext);
+    }
+
+    /* Each call */
+    funcctx = SRF_PERCALL_SETUP();
+    call_cntr = funcctx->call_cntr;
+    max_calls = funcctx->max_calls;
+    attinmeta = funcctx->attinmeta;
+
+    if (call_cntr < max_calls)
+    {
+        char      **values;
+        HeapTuple   tuple;
+        Datum       result;
+
+        values = (char **) palloc(3 * sizeof(char *));
+
+        if (call_cntr == 0)
+        {
+            /* Row 1: Roaring support */
+            values[0] = pstrdup("CRoaring Bitmaps");
+        #ifdef HAVE_ROARING
+            values[1] = pstrdup("true");
+            values[2] = pstrdup("High-performance bitmap operations enabled");
+        #else
+            values[1] = pstrdup("false");
+            values[2] = pstrdup("Using fallback bitmap implementation (reduced performance)");
+        #endif
+        }
+        else if (call_cntr == 1)
+        {
+            /* Row 2: PostgreSQL version */
+            values[0] = pstrdup("PostgreSQL");
+            values[1] = pstrdup("true");
+            values[2] = psprintf("Compiled for PostgreSQL %s", PG_VERSION);
+        }
+
+        tuple = BuildTupleFromCStrings(attinmeta, values);
+        result = HeapTupleGetDatum(tuple);
+
+        pfree(values[0]);
+        pfree(values[1]);
+        pfree(values[2]);
+        pfree(values);
+
+        SRF_RETURN_NEXT(funcctx, result);
+    }
+    else
+    {
+        /* No more rows */
+        SRF_RETURN_DONE(funcctx);
+    }
+}
+
+/* Alternative simpler implementation if you prefer single-row returns */
+
+// Get Roaring library version (if available)
+#ifdef HAVE_ROARING
+#include <roaring/roaring.h>
+
+PG_FUNCTION_INFO_V1(biscuit_roaring_version);
+Datum
+biscuit_roaring_version(PG_FUNCTION_ARGS)
+{
+    char version_str[64];
+    
+    snprintf(version_str, sizeof(version_str), "%d.%d.%d",
+             ROARING_VERSION_MAJOR,
+             ROARING_VERSION_MINOR,
+             ROARING_VERSION_REVISION);
+    
+    PG_RETURN_TEXT_P(cstring_to_text(version_str));
+}
+#else
+PG_FUNCTION_INFO_V1(biscuit_roaring_version);
+Datum
+biscuit_roaring_version(PG_FUNCTION_ARGS)
+{
+    PG_RETURN_NULL();
+}
+#endif
+
+// Simpler alternative: return build info as JSON text
+PG_FUNCTION_INFO_V1(biscuit_build_info_json);
+Datum
+biscuit_build_info_json(PG_FUNCTION_ARGS)
+{
+    StringInfoData buf;
+    
+    initStringInfo(&buf);
+    
+    appendStringInfo(&buf, "{");
+    appendStringInfo(&buf, "\"version\": \"2.1.4\",");
+    
+#ifdef HAVE_ROARING
+    appendStringInfo(&buf, "\"roaring_enabled\": true,");
+    appendStringInfo(&buf, "\"roaring_version\": \"%d.%d.%d\",",
+                     ROARING_VERSION_MAJOR,
+                     ROARING_VERSION_MINOR,
+                     ROARING_VERSION_REVISION);
+#else
+    appendStringInfo(&buf, "\"roaring_enabled\": false,");
+#endif
+    
+    appendStringInfo(&buf, "\"postgres_version\": \"%s\",", PG_VERSION);
+    appendStringInfo(&buf, "}");
+    
+    PG_RETURN_TEXT_P(cstring_to_text(buf.data));
+}
 
 /* ==================== QUERY ANALYSIS STRUCTURES ==================== */
 
