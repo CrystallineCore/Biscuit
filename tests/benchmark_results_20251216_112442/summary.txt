@@ -1,0 +1,188 @@
+================================================================================
+BENCHMARK SUMMARY REPORT
+================================================================================
+
+Total records: 11400
+Index types: ['btree', 'biscuit', 'trigram']
+Cache states: ['cold', 'warm']
+Iterations per cache state: 10
+
+Overall Performance by Index Type and Cache State
+--------------------------------------------------------------------------------
+                       execution_time          ... cache_hit_ratio shared_read
+                                 mean  median  ...            mean         sum
+index_type cache_state                         ...                            
+biscuit    cold                 38.96   11.57  ...            0.90     1257341
+           warm                 38.37   11.34  ...            0.90     1076943
+btree      cold                193.04  169.60  ...            0.76    11931438
+           warm                192.42  170.26  ...            0.76    11909333
+trigram    cold                112.30   65.40  ...            0.90     1749957
+           warm                111.45   63.74  ...            0.91     1494316
+
+[6 rows x 11 columns]
+
+95% Confidence Intervals for Execution Time (ms)
+--------------------------------------------------------------------------------
+biscuit      cold  :   38.96 ±   2.20 ms  [n=1900]
+biscuit      warm  :   38.37 ±   2.17 ms  [n=1900]
+btree        cold  :  193.04 ±   6.07 ms  [n=1900]
+btree        warm  :  192.42 ±   6.06 ms  [n=1900]
+trigram      cold  :  112.30 ±   4.43 ms  [n=1900]
+trigram      warm  :  111.45 ±   4.41 ms  [n=1900]
+
+Statistical Significance Tests (Warm Cache)
+--------------------------------------------------------------------------------
+Pairwise t-tests (p-values):
+
+  btree        vs biscuit     : p=0.0000 ***
+  btree        vs trigram     : p=0.0000 ***
+  biscuit      vs trigram     : p=0.0000 ***
+
+  *** p<0.001  ** p<0.01  * p<0.05  ns = not significant
+
+Performance by Query Type (Warm Cache)
+--------------------------------------------------------------------------------
+Median Execution Time (ms):
+index_type  biscuit   btree  trigram
+query_id                            
+Q01            9.07   69.63    48.43
+Q02            8.71   62.94    52.29
+Q03            5.18   48.40    38.14
+Q04            2.36   32.47    33.36
+Q05           66.35  341.82   160.73
+...             ...     ...      ...
+Q95            2.22   40.26    43.06
+Q96           10.50  149.82    49.11
+Q97            7.46  134.62    78.68
+Q98            5.62   69.62    61.62
+Q99            2.82   77.10    52.11
+
+[190 rows x 3 columns]
+
+Coefficient of Variation (lower = more consistent):
+index_type  biscuit  btree  trigram
+query_id                           
+Q01           0.023  0.182    0.098
+Q02           0.016  0.052    0.005
+Q03           0.020  0.038    0.004
+Q04           0.012  0.013    0.006
+Q05           0.014  0.020    0.029
+...             ...    ...      ...
+Q95           0.093  0.007    0.006
+Q96           0.013  0.010    0.002
+Q97           0.029  0.009    0.060
+Q98           0.027  0.006    0.015
+Q99           0.007  0.019    0.029
+
+[190 rows x 3 columns]
+
+Index Sizes
+--------------------------------------------------------------------------------
+Biscuit: 277.09 MB (290550951 bytes)
+Trigram: 86 MB
+Btree: 43 MB
+
+Cold vs Warm Cache Impact (Mean Execution Time)
+--------------------------------------------------------------------------------
+cache_state    cold    warm
+index_type                 
+biscuit       38.96   38.37
+btree        193.04  192.42
+trigram      112.30  111.45
+
+Cache Efficiency (Average Cache Hit Ratio)
+--------------------------------------------------------------------------------
+cache_state    cold    warm
+index_type                 
+biscuit      0.8983  0.9049
+btree        0.7558  0.7565
+trigram      0.9033  0.9135
+
+WINNER DETERMINATION
+--------------------------------------------------------------------------------
+Fastest index (warm cache, mean execution time): biscuit
+  Mean execution time: 38.37 ms
+  Standard deviation: 48.17 ms
+  Sample size: 1900 queries
+
+Performance vs. Winner:
+  btree       :  192.42 ms  (+401.5%, +154.05 ms slower)
+  trigram     :  111.45 ms  (+190.5%, +73.09 ms slower)
+
+Query Type Performance (warm cache):
+
+  Prefix queries:
+    biscuit     :    7.64 ms
+    btree       :   61.43 ms
+    trigram     :   46.81 ms
+
+  Suffix queries:
+    biscuit     :   44.76 ms
+    btree       :  226.77 ms
+    trigram     :  113.58 ms
+
+  Infix queries:
+    biscuit     :   29.22 ms
+    btree       :  147.37 ms
+    trigram     :   81.25 ms
+
+DATA QUALITY CHECK
+--------------------------------------------------------------------------------
+Total queries executed: 11400
+Queries per index type:
+  btree: 3800
+  biscuit: 3800
+  trigram: 3800
+
+Outlier Detection (warm cache, >3 std devs from mean):
+  btree: 20 outliers detected
+    Q112: 783.53 ms
+    Q113: 629.25 ms
+    Q112: 782.49 ms
+    Q113: 620.88 ms
+    Q112: 783.47 ms
+  biscuit: 30 outliers detected
+    Q114: 261.20 ms
+    Q115: 217.08 ms
+    Q134: 215.14 ms
+    Q114: 236.01 ms
+    Q115: 212.73 ms
+  trigram: 50 outliers detected
+    Q65: 569.10 ms
+    Q66: 545.39 ms
+    Q67: 425.70 ms
+    Q68: 547.05 ms
+    Q113: 569.23 ms
+
+Warmup Effectiveness (cache hit ratio improvement):
+  btree       : 0.7558 → 0.7565 (+0.07%)
+  biscuit     : 0.8983 → 0.9049 (+0.67%)
+  trigram     : 0.9033 → 0.9135 (+1.02%)
+
+Index Usage Verification:
+(All queries should use Index Scan or similar, not Seq Scan)
+node_type   Bitmap Heap Scan  Gather  Index Scan  Limit  Seq Scan
+index_type                                                       
+biscuit                  580       0        3120     60        40
+btree                     40     140        1160     60      2400
+trigram                 2860       0           0     60       880
+
+PUBLICATION READINESS CHECKLIST
+--------------------------------------------------------------------------------
+✓ Sufficient iterations (≥10): True
+✓ Statistical significance: All comparisons significant (p<0.05)
+⚠ Index usage issue: 3320 sequential scans found
+⚠ Warmup may be ineffective: Only 0.6% improvement
+⚠ Result consistency: Average CV = 0.945 (acceptable)
+
+RECOMMENDATIONS FOR PUBLICATION:
+--------------------------------------------------------------------------------
+1. Include system specifications in your paper (CPU, RAM, disk type)
+2. Mention PostgreSQL version and configuration settings
+3. Describe the dataset characteristics (size, cardinality, distribution)
+4. Report both median and mean with confidence intervals
+5. Include the coefficient of variation to show result stability
+6. Discuss any query-specific patterns (e.g., where each index excels)
+7. Mention index sizes as a trade-off consideration
+8. Consider running on multiple hardware configurations for robustness
+

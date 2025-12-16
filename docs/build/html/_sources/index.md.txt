@@ -14,6 +14,7 @@ architecture
 patterns
 multicolumn
 benchmark
+benchmark_roaring
 benchmark_env
 performance
 tribute

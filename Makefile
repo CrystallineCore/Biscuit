@@ -12,6 +12,11 @@ PGFILEDESC = "Wildcard pattern matching through bitmap indexing"
 # PostgreSQL build system
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
+
+# Define HAVE_ROARING manually
+PG_CPPFLAGS += -DHAVE_ROARING -I/usr/include
+SHLIB_LINK += -L/usr/lib/x86_64-linux-gnu -lroaring
+
 include $(PGXS)
 
 # Compiler flags for stricter checking

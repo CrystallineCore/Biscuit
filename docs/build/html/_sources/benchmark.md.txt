@@ -1,4 +1,4 @@
-# Biscuit vs. Trigram vs. B-tree
+# Biscuit benchmarks without Roaring Bitmaps
 
 **A rigorous, publication-grade performance analysis**
 > Refer Benchmark Environment section to know more about the configurations of the system used to generate these results. 
@@ -15,17 +15,17 @@ This report presents a comprehensive benchmark comparing three PostgreSQL indexi
 |--------|---------|---------|--------|
 | **Mean Execution Time** | **38.82 ms** | 134.54 ms | 193.38 ms |
 | **Median Execution Time** | **11.76 ms** | 85.85 ms | 168.92 ms |
-| **vs. Biscuit Speedup** | 1.0× | 0.29× (3.5× slower) | 0.20× (5.0× slower) |
+| **vs. Biscuit Speedup** | 1.0× | 0.14× (7.3× slower) | 0.07× (14.4× slower) |
 | **95% Confidence Interval** | ±2.21 ms | ±5.34 ms | ±6.11 ms |
 | **Index Size** | 914.59 MB | 86 MB | 43 MB |
 | **Statistical Significance** | — | p < 0.0001 *** | p < 0.0001 *** |
 
-**Bottom Line:**
-- Biscuit is **14.4× faster than B-tree** (median) and **7.3× faster than Trigram** (median)
-- **100% correctness verified** across 11,400 measurements
-- **All results highly statistically significant** (p < 0.001)
+#### Summary:
+- Biscuit demonstrates **14.4× median speedup** over B-tree
+- 100% correctness verified across 11,400 measurements
+- All results achieve statistical significance (p < 0.0001)
 - Consistent performance across all wildcard pattern types
-- Trade-off: 10× larger index size than Trigram
+- Trade-off: **10× larger index** size than Trigram
 
 ---
 
@@ -821,8 +821,8 @@ Reason: Bitmap heap scan on very large result set
 | Index | Mean (ms) | Median (ms) | vs. Biscuit |
 |-------|-----------|-------------|-------------|
 | **Biscuit** | **7.76** | **5.41** | 1.0× |
-| B-tree | 63.81 | 48.67 | 8.2× slower |
-| Trigram | 58.41 | 45.23 | 7.5× slower |
+| B-tree | 63.81 | 48.67 | 9.0× slower |
+| Trigram | 58.41 | 45.23 | 8.4× slower |
 
 **Analysis**: Biscuit dominates even on B-tree's "home turf" (prefix patterns). B-tree should excel here, but multi-column index overhead degrades performance.
 
@@ -831,8 +831,8 @@ Reason: Bitmap heap scan on very large result set
 | Index | Mean (ms) | Median (ms) | vs. Biscuit |
 |-------|-----------|-------------|-------------|
 | **Biscuit** | **44.76** | **28.93** | 1.0× |
-| B-tree | 237.06 | 189.34 | 5.3× slower |
-| Trigram | 133.32 | 97.45 | 3.0× slower |
+| B-tree | 237.06 | 189.34 | 6.5× slower |
+| Trigram | 133.32 | 97.45 | 3.4× slower |
 
 **Analysis**: B-tree's worst case (sequential scans). Trigram handles well but Biscuit still 3× faster.
 
@@ -841,8 +841,8 @@ Reason: Bitmap heap scan on very large result set
 | Index | Mean (ms) | Median (ms) | vs. Biscuit |
 |-------|-----------|-------------|-------------|
 | **Biscuit** | **29.72** | **18.45** | 1.0× |
-| B-tree | 152.03 | 124.56 | 5.1× slower |
-| Trigram | 93.28 | 74.32 | 3.1× slower |
+| B-tree | 152.03 | 124.56 | 6.8× slower |
+| Trigram | 93.28 | 74.32 | 4.0× slower |
 
 **Analysis**: Most common real-world pattern. Biscuit's consistent advantage makes it ideal for general-purpose wildcard search.
 
@@ -1142,7 +1142,7 @@ SELECT * FROM users WHERE username LIKE 'da%' LIMIT 10;
 **Winner**: **Biscuit** - 10× faster, imperceptible latency
 
 **Real-World Impact**:
-- Sub-5ms = feels instant
+- Response times <5ms fall below human perception threshold (10-13ms)
 - 40ms = slight lag but usable
 - 100ms+ = noticeable delay, poor UX
 
@@ -1169,12 +1169,12 @@ SELECT * FROM interactions WHERE country LIKE '%United%';
 | Infix (`%island%`) | 18.4 ms | 74.3 ms | 124.6 ms |
 | Infix (`%United%`) | 28.9 ms | 97.5 ms | 168.9 ms |
 
-**Winner**: **Biscuit** - 3-80× faster depending on pattern
+**Winner**: **Biscuit** - 3-86× faster depending on pattern
 
 **Real-World Impact**:
 - Dashboard loads: Biscuit < 30ms, B-tree > 150ms
 - Interactive filters feel sluggish with B-tree
-- Trigram acceptable but Biscuit provides premium UX
+- Trigram acceptable but Biscuit achieves <30ms response time, meeting interactive latency requirements
 
 ### Scenario 3: Content Moderation
 
@@ -1276,7 +1276,7 @@ LIMIT 50 OFFSET 100;
 **Biscuit**:
 - **Cost**: 10× more storage than Trigram, 21× more than B-tree
 - **Benefit**: 7.3× faster than Trigram (median), 14.4× faster than B-tree (median)
-- **ROI**: For every 1 GB extra storage, gain 95.72 ms query speed vs Trigram
+- **ROI (median-based)**: For every 1 GB extra storage, gain 74.09 ms query speed vs Trigram
 
 **Trigram**:
 - **Cost**: 2× storage of B-tree
@@ -1291,25 +1291,25 @@ LIMIT 50 OFFSET 100;
 ### Decision Matrix
 
 **Choose Biscuit if**:
-- ✅ Query performance is critical (< 50ms target)
-- ✅ Frequent wildcard queries (especially suffix/infix)
-- ✅ Storage is not primary constraint
-- ✅ Read-heavy workload
-- ✅ Budget allows for premium hardware
+-  Query performance is critical (< 50ms target)
+-  Frequent wildcard queries (especially suffix/infix)
+-  Storage is not primary constraint
+-  Read-heavy workload
+-  Budget allows for premium hardware
 
 **Choose Trigram if**:
-- ✅ Good wildcard performance needed
-- ✅ Storage somewhat constrained
-- ✅ Case-insensitive search common (ILIKE)
-- ✅ Balanced read/write workload
-- ✅ Budget-conscious infrastructure
+-  Good wildcard performance needed
+-  Storage somewhat constrained
+-  Case-insensitive search common (ILIKE)
+-  Balanced read/write workload
+-  Budget-conscious infrastructure
 
 **Choose B-tree if**:
-- ✅ Queries are primarily prefix-only
-- ✅ Storage severely constrained
-- ✅ Write performance critical
-- ✅ Wildcard queries infrequent
-- ✅ Legacy systems/compatibility
+-  Queries are primarily prefix-only
+-  Storage severely constrained
+-  Write performance critical
+-  Wildcard queries infrequent
+-  Legacy systems/compatibility
 
 ### Total Cost of Ownership (5-Year Estimate)
 
@@ -1477,7 +1477,7 @@ This benchmark advances the state of practice in several ways:
    - Statistical significance testing
    - Comprehensive correctness verification
 
-2. **Coverage**: Most comprehensive wildcard pattern benchmark published
+2. **Coverage**: Comprehensive wildcard pattern benchmark
    - 190 unique queries
    - 11,400 total measurements
    - All pattern types covered
@@ -1494,7 +1494,7 @@ This benchmark advances the state of practice in several ways:
 
 ### Final Verdict
 
-**For wildcard pattern matching workloads, Biscuit offers substantial performance advantages that justify its larger storage footprint.**
+**For wildcard pattern matching workloads, Biscuit offers significant performance advantages that justify its larger storage footprint.**
 
 The 5× speedup over B-tree and 3.5× speedup over Trigram translate directly to:
 - Better user experience (faster page loads)

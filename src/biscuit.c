@@ -40,9 +40,15 @@
 #include "utils/inval.h"
 #include "storage/ipc.h"           /* for on_proc_exit */
 
+#ifdef HAVE_ROARING
+#pragma message("Biscuit: compiled WITH Roaring Bitmap support")
+#else
+#pragma message("Biscuit: compiled WITHOUT Roaring Bitmap support")
+#endif
+
 
 #ifdef HAVE_ROARING
-#include "roaring.h"
+#include "roaring/roaring.h"
 typedef roaring_bitmap_t RoaringBitmap;
 #else
 typedef struct {
