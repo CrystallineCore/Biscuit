@@ -1,18 +1,6 @@
 /*
-* biscuit.c - FULLY OPTIMIZED MERGED VERSION
+* biscuit.c
 * PostgreSQL Index Access Method for Biscuit Pattern Matching with Full CRUD Support
-* 
-* Key Optimizations:
-* 1. Skip wildcard '_' intersections - they match everything at that position
-* 2. Early termination on empty intersections
-* 3. Avoid redundant bitmap copies
-* 4. Optimize single-part patterns
-* 5. Skip unnecessary length bitmap operations
-* 6. TID sorting for sequential heap access
-* 7. Batch TID insertion for bitmap scans
-* 8. Direct Roaring bitmap iteration without intermediate arrays
-* 9. Parallel bitmap heap scan support
-* 10. Batch cleanup on threshold
 */
 
 #include "postgres.h"
@@ -42,13 +30,13 @@
 #include "funcapi.h"
 #include "access/htup_details.h"
 
-
+/*
 #ifdef HAVE_ROARING
 #pragma message("Biscuit: compiled WITH Roaring Bitmap support")
 #else
 #pragma message("Biscuit: compiled WITHOUT Roaring Bitmap support")
 #endif
-
+*/
 
 #ifdef HAVE_ROARING
 #include "roaring/roaring.h"
@@ -6569,7 +6557,7 @@ biscuit_index_stats(PG_FUNCTION_ARGS)
     }
     
     initStringInfo(&buf);
-    appendStringInfo(&buf, "Biscuit Index Statistics (FULLY OPTIMIZED)\n");
+    appendStringInfo(&buf, "Biscuit Index Statistics\n");
     appendStringInfo(&buf, "==========================================\n");
     appendStringInfo(&buf, "Index: %s\n", RelationGetRelationName(index));
     appendStringInfo(&buf, "Active records: %d\n", active_records);

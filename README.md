@@ -9,53 +9,56 @@
 
 ---
 
-### What's new?
+## Version 2.1.4
+
+### 🛠️ Build & Packaging
+
+* Improved Makefile detection logic for CRoaring bitmap support by checking multiple common installation paths, increasing portability across systems and build environments.
+
 
 ### ✨ New Features
 
-#### Added Index Memory Introspection Utilities
+#### Build and configuration introspection
 
-Added built-in SQL functions and a view to inspect **Biscuit index in-memory footprint**.
+Added SQL functions to inspect Biscuit build-time configuration, useful for debugging,
+reproducibility, and deployment verification.
 
-* **`biscuit_index_memory_size(index_oid oid) → bigint`**
-  Low-level C-backed function returning the exact memory usage (in bytes) of a Biscuit index currently resident in memory.
+* **`biscuit_version() → text`**    
 
-* **`biscuit_index_memory_size(index_name text) → bigint`**
-  Convenience SQL wrapper accepting an index name instead of an OID.
+Returns the Biscuit extension version string.
 
-* **`biscuit_size_pretty(index_name text) → text`**
-  Human-readable formatter that reports Biscuit index memory usage in bytes, KB, MB, or GB while preserving the exact byte count.
+* **`biscuit_build_info() → table`**    
 
-* **`biscuit_memory_usage` view**
-  A consolidated view exposing:
+Returns detailed build-time configuration information.
 
-  * schema name
-  * table name
-  * index name
-  * Biscuit in-memory size
-  * human-readable memory size
-  * on-disk index size (via `pg_relation_size`)
+* **`biscuit_build_info_json() → text`**    
 
-  This allows direct comparison between **in-memory Biscuit structures** and their **persistent disk representation**.
+Returns build configuration as a JSON string for automation and scripting.
 
+#### Roaring Bitmap support introspection
 
-```sql
-SELECT * FROM biscuit_memory_usage;
-```
+Added built-in SQL functions to inspect CRoaring bitmap support in Biscuit.
 
-#### Notes
+* **`biscuit_has_roaring() → boolean`**    
 
-* Memory accounting reflects Biscuit’s deliberate cache persistence design, intended to optimize repeated pattern-matching workloads.
-* Functions are marked `VOLATILE` to ensure accurate reporting of live memory state.
-* `pg_size_pretty(pg_relation_size(...))` reports only the on-disk footprint of the Biscuit index.
-Since Biscuit maintains its primary structures in memory (cache buffers / AM cache), the reported disk size may significantly underrepresent the index’s effective total footprint during execution. Hence, we recommend the usage of `biscuit_size_pretty(...)` to view the actual size of the index.
+Checks whether the extension was compiled with CRoaring bitmap support.
 
-### ⚙️ Performance improvements
+* **`biscuit_roaring_version() → text`** 
 
-#### Removed redundant bitmaps
+Returns the CRoaring library version if available.
 
-Separate bitmaps for length-based filtering for case-insensitive search were removed. Case insensitive searches now use the same length-based filtering bitmaps as case-sensitive ones.
+#### Diagnostic views
 
+Added a built-in diagnostic view for quick inspection of Biscuit status
+and configuration.
+
+* **`biscuit_status`**  
+  A single-row view providing an overview of:
+  - extension version
+  - CRoaring enablement
+  - bitmap backend in use
+  - total number of Biscuit indexes
+  - combined on-disk index size
 
 ---
 

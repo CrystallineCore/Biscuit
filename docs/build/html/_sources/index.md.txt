@@ -41,7 +41,56 @@ Biscuit is a specialized PostgreSQL index access method designed to dramatically
 - **Smart Query Planning**: Automatic reordering of predicates based on selectivity analysis
 - **Memory Efficient**: Uses Roaring Bitmaps for compact in-memory representation
 
+## What's new in version 2.1.4?
 
+### Build & Packaging
+
+* Improved Makefile detection logic for CRoaring bitmap support by checking multiple common installation paths, increasing portability across systems and build environments.
+
+
+### New Features
+
+#### Build and configuration introspection
+
+Added SQL functions to inspect Biscuit build-time configuration, useful for debugging,
+reproducibility, and deployment verification.
+
+* **`biscuit_version() → text`**    
+
+Returns the Biscuit extension version string.
+
+* **`biscuit_build_info() → table`**    
+
+Returns detailed build-time configuration information.
+
+* **`biscuit_build_info_json() → text`**    
+
+Returns build configuration as a JSON string for automation and scripting.
+
+#### Roaring Bitmap support introspection
+
+Added built-in SQL functions to inspect CRoaring bitmap support in Biscuit.
+
+* **`biscuit_has_roaring() → boolean`**    
+
+Checks whether the extension was compiled with CRoaring bitmap support.
+
+* **`biscuit_roaring_version() → text`** 
+
+Returns the CRoaring library version if available.
+
+#### Diagnostic views
+
+Added a built-in diagnostic view for quick inspection of Biscuit status
+and configuration.
+
+* **`biscuit_status`**  
+  A single-row view providing an overview of:
+  - extension version
+  - CRoaring enablement
+  - bitmap backend in use
+  - total number of Biscuit indexes
+  - combined on-disk index size
 
 ## Quick Start
 
@@ -88,7 +137,7 @@ WHERE name LIKE '%laptop%';
 
 - PostgreSQL 16 or higher
 - Linux, macOS, or Windows
-- Optional: CRoaring library for enhanced performance
+- Recommended: CRoaring library for enhanced performance
 
 ## License
 

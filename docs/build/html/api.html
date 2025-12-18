@@ -237,17 +237,13 @@
 <li class="toctree-l3"><a class="reference internal" href="#biscuit-build-info">biscuit_build_info()</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#biscuit-build-info-json">biscuit_build_info_json()</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#biscuit-check-config">biscuit_check_config()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#biscuit-index-stats">biscuit_index_stats()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#biscuit-index-memory-size">biscuit_index_memory_size()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#biscuit-size-pretty">biscuit_size_pretty()</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#diagnostic-views">Diagnostic Views</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#biscuit-status">biscuit_status</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="#troubleshooting-guide">Troubleshooting Guide</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#issue-biscuit-has-roaring-returns-false">Issue: biscuit_has_roaring() returns false</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#biscuit-index-stats">biscuit_index_stats()</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#biscuit-index-memory-size">biscuit_index_memory_size()</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#biscuit-size-pretty">biscuit_size_pretty()</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#biscuit-memory-usage">biscuit_memory_usage</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#notes">Notes</a></li>
 </ul>
@@ -287,6 +283,7 @@
 <li class="toctree-l3"><a class="reference internal" href="#error-data-type-x-is-not-supported-for-biscuit-index">ERROR: data type X is not supported for biscuit index</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#error-could-not-open-relation-with-oid">ERROR: could not open relation with OID</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#warning-biscuit-index-cache-miss">WARNING: Biscuit: Index cache miss</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#issue-biscuit-has-roaring-returns-false">ISSUE: biscuit_has_roaring() returns false</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#next-steps">Next Steps</a></li>
@@ -1486,83 +1483,6 @@ make<span class="w"> </span>clean<span class="w"> </span><span class="o">&amp;&a
 </pre></div>
 </div>
 </section>
-</section>
-<hr class="docutils" />
-<section id="diagnostic-views">
-<h2>Diagnostic Views<a class="headerlink" href="#diagnostic-views" title="Link to this heading"></a></h2>
-<section id="biscuit-status">
-<h3>biscuit_status<a class="headerlink" href="#biscuit-status" title="Link to this heading"></a></h3>
-<p>Quick overview of extension status and configuration.</p>
-<p><strong>Definition</strong>:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="n">biscuit_status</span>
-</pre></div>
-</div>
-<p><strong>Columns</strong>:</p>
-<ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">version</span></code> - Extension version</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">roaring_enabled</span></code> - Whether CRoaring is enabled</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">bitmap_implementation</span></code> - Current bitmap backend</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">total_indexes</span></code> - Number of active Biscuit indexes</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">total_index_size</span></code> - Combined size of all indexes</p></li>
-</ul>
-<p><strong>Example</strong>:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- View current status</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">biscuit_status</span><span class="p">;</span>
-
-<span class="c1">-- Monitor status changes</span>
-<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">biscuit_status_history</span><span class="w"> </span><span class="k">AS</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="n">now</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="k">timestamp</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">biscuit_status</span><span class="p">;</span>
-</pre></div>
-</div>
-<p><strong>Output</strong>:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span> <span class="n">version</span> <span class="o">|</span> <span class="n">roaring_enabled</span> <span class="o">|</span> <span class="n">bitmap_implementation</span>  <span class="o">|</span> <span class="n">total_indexes</span> <span class="o">|</span> <span class="n">total_index_size</span>
-<span class="o">---------+-----------------+------------------------+---------------+------------------</span>
- <span class="mf">1.0.0</span>   <span class="o">|</span> <span class="n">t</span>               <span class="o">|</span> <span class="n">Optimal</span> <span class="p">(</span><span class="n">CRoaring</span><span class="p">)</span>     <span class="o">|</span> <span class="mi">5</span>             <span class="o">|</span> <span class="mi">245</span> <span class="n">MB</span>
-</pre></div>
-</div>
-</section>
-</section>
-<hr class="docutils" />
-<section id="troubleshooting-guide">
-<h2>Troubleshooting Guide<a class="headerlink" href="#troubleshooting-guide" title="Link to this heading"></a></h2>
-<section id="issue-biscuit-has-roaring-returns-false">
-<h3>Issue: biscuit_has_roaring() returns false<a class="headerlink" href="#issue-biscuit-has-roaring-returns-false" title="Link to this heading"></a></h3>
-<p><strong>Symptoms</strong>:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_has_roaring</span><span class="p">();</span>
-<span class="c1">-- Returns: false</span>
-</pre></div>
-</div>
-<p><strong>Diagnosis</strong>:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">biscuit_check_config</span><span class="p">();</span>
-<span class="c1">-- Shows: Roaring Support | ✗ Disabled | Install CRoaring...</span>
-</pre></div>
-</div>
-<p><strong>Solution</strong>:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Install CRoaring development library</span>
-<span class="c1"># Debian/Ubuntu</span>
-sudo<span class="w"> </span>apt-get<span class="w"> </span>update
-sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>libroaring-dev
-
-<span class="c1"># Verify installation</span>
-dpkg<span class="w"> </span>-L<span class="w"> </span>libroaring-dev<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>roaring.h
-
-<span class="c1"># Rebuild extension</span>
-<span class="nb">cd</span><span class="w"> </span>/path/to/biscuit
-make<span class="w"> </span>clean
-make
-sudo<span class="w"> </span>make<span class="w"> </span>install
-
-<span class="c1"># Restart PostgreSQL</span>
-sudo<span class="w"> </span>systemctl<span class="w"> </span>restart<span class="w"> </span>postgresql
-
-<span class="c1"># Verify in PostgreSQL</span>
-psql<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;DROP EXTENSION biscuit CASCADE;&quot;</span>
-psql<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;CREATE EXTENSION biscuit;&quot;</span>
-psql<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;SELECT biscuit_has_roaring();&quot;</span>
---<span class="w"> </span>Should<span class="w"> </span><span class="k">return</span>:<span class="w"> </span><span class="nb">true</span>
-</pre></div>
-</div>
-</section>
 <section id="biscuit-index-stats">
 <h3>biscuit_index_stats()<a class="headerlink" href="#biscuit-index-stats" title="Link to this heading"></a></h3>
 <p>Returns detailed statistics about a Biscuit index.</p>
@@ -1691,6 +1611,41 @@ Formatted memory usage (bytes, KB, MB, or GB).</p>
 </div>
 <p><strong>Output Format</strong>:</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="mi">128</span> <span class="n">MB</span> <span class="p">(</span><span class="mi">134217728</span> <span class="nb">bytes</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="diagnostic-views">
+<h2>Diagnostic Views<a class="headerlink" href="#diagnostic-views" title="Link to this heading"></a></h2>
+<section id="biscuit-status">
+<h3>biscuit_status<a class="headerlink" href="#biscuit-status" title="Link to this heading"></a></h3>
+<p>Quick overview of extension status and configuration.</p>
+<p><strong>Definition</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="n">biscuit_status</span>
+</pre></div>
+</div>
+<p><strong>Columns</strong>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">version</span></code> - Extension version</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">roaring_enabled</span></code> - Whether CRoaring is enabled</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">bitmap_implementation</span></code> - Current bitmap backend</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">total_indexes</span></code> - Number of active Biscuit indexes</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">total_index_size</span></code> - Combined size of all indexes</p></li>
+</ul>
+<p><strong>Example</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- View current status</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">biscuit_status</span><span class="p">;</span>
+
+<span class="c1">-- Monitor status changes</span>
+<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">biscuit_status_history</span><span class="w"> </span><span class="k">AS</span>
+<span class="k">SELECT</span><span class="w"> </span><span class="n">now</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="k">timestamp</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">biscuit_status</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Output</strong>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span> <span class="n">version</span> <span class="o">|</span> <span class="n">roaring_enabled</span> <span class="o">|</span> <span class="n">bitmap_implementation</span>  <span class="o">|</span> <span class="n">total_indexes</span> <span class="o">|</span> <span class="n">total_index_size</span>
+<span class="o">---------+-----------------+------------------------+---------------+------------------</span>
+ <span class="mf">1.0.0</span>   <span class="o">|</span> <span class="n">t</span>               <span class="o">|</span> <span class="n">Optimal</span> <span class="p">(</span><span class="n">CRoaring</span><span class="p">)</span>     <span class="o">|</span> <span class="mi">5</span>             <span class="o">|</span> <span class="mi">245</span> <span class="n">MB</span>
 </pre></div>
 </div>
 </section>
@@ -2049,8 +2004,46 @@ Formatted memory usage (bytes, KB, MB, or GB).</p>
 <p><strong>Cause</strong>: Normal - index loaded on first use</p>
 <p><strong>Solution</strong>: No action needed (informational only)</p>
 </section>
-</section>
 <hr class="docutils" />
+<section id="issue-biscuit-has-roaring-returns-false">
+<h3>ISSUE: biscuit_has_roaring() returns false<a class="headerlink" href="#issue-biscuit-has-roaring-returns-false" title="Link to this heading"></a></h3>
+<p><strong>Symptoms</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_has_roaring</span><span class="p">();</span>
+<span class="c1">-- Returns: false</span>
+</pre></div>
+</div>
+<p><strong>Diagnosis</strong>:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">biscuit_check_config</span><span class="p">();</span>
+<span class="c1">-- Shows: Roaring Support | ✗ Disabled | Install CRoaring...</span>
+</pre></div>
+</div>
+<p><strong>Solution</strong>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Install CRoaring development library</span>
+<span class="c1"># Debian/Ubuntu</span>
+sudo<span class="w"> </span>apt-get<span class="w"> </span>update
+sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>libroaring-dev
+
+<span class="c1"># Verify installation</span>
+dpkg<span class="w"> </span>-L<span class="w"> </span>libroaring-dev<span class="w"> </span><span class="p">|</span><span class="w"> </span>grep<span class="w"> </span>roaring.h
+
+<span class="c1"># Rebuild extension</span>
+<span class="nb">cd</span><span class="w"> </span>/path/to/biscuit
+make<span class="w"> </span>clean
+make
+sudo<span class="w"> </span>make<span class="w"> </span>install
+
+<span class="c1"># Restart PostgreSQL</span>
+sudo<span class="w"> </span>systemctl<span class="w"> </span>restart<span class="w"> </span>postgresql
+
+<span class="c1"># Verify in PostgreSQL</span>
+psql<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;DROP EXTENSION biscuit CASCADE;&quot;</span>
+psql<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;CREATE EXTENSION biscuit;&quot;</span>
+psql<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;SELECT biscuit_has_roaring();&quot;</span>
+--<span class="w"> </span>Should<span class="w"> </span><span class="k">return</span>:<span class="w"> </span><span class="nb">true</span>
+</pre></div>
+</div>
+</section>
+</section>
 <section id="next-steps">
 <h2>Next Steps<a class="headerlink" href="#next-steps" title="Link to this heading"></a></h2>
 <ul class="simple">

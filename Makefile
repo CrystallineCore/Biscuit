@@ -16,7 +16,7 @@ PGXS := $(shell $(PG_CONFIG) --pgxs)
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 
-# Try pkg-config first for Roaring
+# Try to detect CRoaring library (optional)
 ROARING_CFLAGS := $(shell pkg-config --cflags roaring 2>/dev/null)
 ROARING_LIBS := $(shell pkg-config --libs roaring 2>/dev/null)
 
@@ -31,10 +31,9 @@ ifeq ($(ROARING_CFLAGS),)
             fi; \
         done)
     
-    ifeq ($(ROARING_INCLUDE),)
-        $(error CRoaring library headers not found. Install via: apt-get install libroaring-dev, brew install croaring, or from https://github.com/RoaringBitmap/CRoaring)
+    ifneq ($(ROARING_INCLUDE),)
+        ROARING_CFLAGS := $(ROARING_INCLUDE)
     endif
-    ROARING_CFLAGS := $(ROARING_INCLUDE)
 endif
 
 ifeq ($(ROARING_LIBS),)
@@ -51,7 +50,7 @@ ifeq ($(ROARING_LIBS),)
     else ifeq ($(UNAME_S),Linux)
         # Linux - check multiarch and standard paths
         ROARING_LIBDIR := $(shell \
-            for dir in /usr/lib/$(shell gcc -print-multiarch) /usr/lib64 /usr/lib /usr/local/lib /usr/local/lib64; do \
+            for dir in /usr/lib/$(shell gcc -print-multiarch 2>/dev/null) /usr/lib64 /usr/lib /usr/local/lib /usr/local/lib64; do \
                 if [ -f $$dir/libroaring.so ] || [ -f $$dir/libroaring.a ]; then \
                     echo "$$dir"; \
                     break; \
@@ -68,21 +67,25 @@ ifeq ($(ROARING_LIBS),)
             done)
     endif
     
-    ifeq ($(ROARING_LIBDIR),)
-        $(error CRoaring library not found. Install via: apt-get install libroaring-dev, brew install croaring, or from https://github.com/RoaringBitmap/CRoaring)
+    ifneq ($(ROARING_LIBDIR),)
+        ROARING_LIBS := -L$(ROARING_LIBDIR) -lroaring
     endif
-    ROARING_LIBS := -L$(ROARING_LIBDIR) -lroaring
 endif
 
-# Apply flags
-PG_CPPFLAGS += -DHAVE_ROARING $(ROARING_CFLAGS)
-SHLIB_LINK += $(ROARING_LIBS)
-
-# Add rpath for runtime library discovery (Linux/BSD)
-ifneq ($(UNAME_S),Darwin)
-    SHLIB_LINK += -Wl,-rpath,'$$ORIGIN'
-    ifneq ($(ROARING_LIBDIR),)
-        SHLIB_LINK += -Wl,-rpath,$(ROARING_LIBDIR)
+# Apply CRoaring flags only if library was found
+ifneq ($(ROARING_CFLAGS),)
+    ifneq ($(ROARING_LIBS),)
+        PG_CPPFLAGS += -DHAVE_ROARING $(ROARING_CFLAGS)
+        SHLIB_LINK += $(ROARING_LIBS)
+        ROARING_FOUND = yes
+        
+        # Add rpath for runtime library discovery (Linux/BSD)
+        ifneq ($(UNAME_S),Darwin)
+            SHLIB_LINK += -Wl,-rpath,'$$ORIGIN'
+            ifneq ($(ROARING_LIBDIR),)
+                SHLIB_LINK += -Wl,-rpath,$(ROARING_LIBDIR)
+            endif
+        endif
     endif
 endif
 
@@ -108,9 +111,18 @@ check-deps:
 	@echo "Checking dependencies..."
 	@command -v $(PG_CONFIG) >/dev/null 2>&1 || { echo "PostgreSQL pg_config not found. Install postgresql-server-dev."; exit 1; }
 	@echo "PostgreSQL version: $$($(PG_CONFIG) --version)"
-	@echo "Roaring CFLAGS: $(ROARING_CFLAGS)"
-	@echo "Roaring LIBS: $(ROARING_LIBS)"
-	@echo "All dependencies found."
+ifeq ($(ROARING_FOUND),yes)
+	@echo "CRoaring library: FOUND"
+	@echo "  CFLAGS: $(ROARING_CFLAGS)"
+	@echo "  LIBS: $(ROARING_LIBS)"
+else
+	@echo "CRoaring library: NOT FOUND (using fallback bitmap implementation)"
+	@echo "  For better performance, install CRoaring:"
+	@echo "    - Debian/Ubuntu: apt-get install libroaring-dev"
+	@echo "    - macOS: brew install croaring"
+	@echo "    - From source: https://github.com/RoaringBitmap/CRoaring"
+endif
+	@echo "All required dependencies found."
 
 # Clean up build artifacts
 .PHONY: clean
@@ -145,7 +157,12 @@ help:
 	@echo "  PG_CONFIG         - Path to pg_config (default: pg_config)"
 	@echo ""
 	@echo "Requirements:"
-	@echo "  - PostgreSQL development files"
-	@echo "  - CRoaring library (libroaring-dev)"
+	@echo "  - PostgreSQL development files (required)"
+	@echo "  - CRoaring library (optional, recommended for performance)"
+	@echo ""
+	@echo "Notes:"
+	@echo "  - If CRoaring is not found, the extension will use a fallback"
+	@echo "    bitmap implementation with reduced performance."
+	@echo "  - Run 'make check-deps' to see which libraries are detected."
 
 .PHONY: all install

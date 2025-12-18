@@ -1,5 +1,57 @@
 # Biscuit Index Extension - Changelog
 
+
+## Version 2.1.4
+
+### 🛠️ Build & Packaging
+
+* Improved Makefile detection logic for CRoaring bitmap support by checking multiple common installation paths, increasing portability across systems and build environments.
+
+
+### ✨ New Features
+
+#### Build and configuration introspection
+
+Added SQL functions to inspect Biscuit build-time configuration, useful for debugging,
+reproducibility, and deployment verification.
+
+* **`biscuit_version() → text`**    
+
+Returns the Biscuit extension version string.
+
+* **`biscuit_build_info() → table`**    
+
+Returns detailed build-time configuration information.
+
+* **`biscuit_build_info_json() → text`**    
+
+Returns build configuration as a JSON string for automation and scripting.
+
+#### Roaring Bitmap support introspection
+
+Added built-in SQL functions to inspect CRoaring bitmap support in Biscuit.
+
+* **`biscuit_has_roaring() → boolean`**    
+
+Checks whether the extension was compiled with CRoaring bitmap support.
+
+* **`biscuit_roaring_version() → text`** 
+
+Returns the CRoaring library version if available.
+
+#### Diagnostic views
+
+Added a built-in diagnostic view for quick inspection of Biscuit status
+and configuration.
+
+* **`biscuit_status`**  
+  A single-row view providing an overview of:
+  - extension version
+  - CRoaring enablement
+  - bitmap backend in use
+  - total number of Biscuit indexes
+  - combined on-disk index size
+
 ## Version 2.1.3
 
 ### ✨ New Features
@@ -9,15 +61,19 @@
 Added built-in SQL functions and a view to inspect **Biscuit index in-memory footprint**.
 
 * **`biscuit_index_memory_size(index_oid oid) → bigint`**
+
   Low-level C-backed function returning the exact memory usage (in bytes) of a Biscuit index currently resident in memory.
 
 * **`biscuit_index_memory_size(index_name text) → bigint`**
+
   Convenience SQL wrapper accepting an index name instead of an OID.
 
 * **`biscuit_size_pretty(index_name text) → text`**
+
   Human-readable formatter that reports Biscuit index memory usage in bytes, KB, MB, or GB while preserving the exact byte count.
 
 * **`biscuit_memory_usage` view**
+
   A consolidated view exposing:
 
   * schema name
@@ -201,6 +257,6 @@ WHERE col1 LIKE 'A%' AND col2 NOT LIKE '%test%' AND col1 LIKE '%end'
 
 ---
 
-**Full Documentation:** See README.md for complete usage guide and examples.
+**Full Documentation:** See [README.md](https://github.com/CrystallineCore/Biscuit) or visit [ReadTheDocs](https://biscuit.readthedocs.io/) for complete usage guide and examples.
 
 ---

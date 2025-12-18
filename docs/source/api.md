@@ -577,88 +577,6 @@ FROM biscuit_check_config();
 
 
 
----
-
-## Diagnostic Views
-
-### biscuit_status
-
-Quick overview of extension status and configuration.
-
-**Definition**:
-```sql
-biscuit_status
-```
-
-**Columns**:
-- `version` - Extension version
-- `roaring_enabled` - Whether CRoaring is enabled
-- `bitmap_implementation` - Current bitmap backend
-- `total_indexes` - Number of active Biscuit indexes
-- `total_index_size` - Combined size of all indexes
-
-**Example**:
-```sql
--- View current status
-SELECT * FROM biscuit_status;
-
--- Monitor status changes
-CREATE TABLE biscuit_status_history AS
-SELECT now() as timestamp, * FROM biscuit_status;
-```
-
-**Output**:
-```
- version | roaring_enabled | bitmap_implementation  | total_indexes | total_index_size
----------+-----------------+------------------------+---------------+------------------
- 1.0.0   | t               | Optimal (CRoaring)     | 5             | 245 MB
-```
-
----
-
-## Troubleshooting Guide
-
-### Issue: biscuit_has_roaring() returns false
-
-**Symptoms**:
-```sql
-SELECT biscuit_has_roaring();
--- Returns: false
-```
-
-**Diagnosis**:
-```sql
-SELECT * FROM biscuit_check_config();
--- Shows: Roaring Support | ✗ Disabled | Install CRoaring...
-```
-
-**Solution**:
-```bash
-# Install CRoaring development library
-# Debian/Ubuntu
-sudo apt-get update
-sudo apt-get install libroaring-dev
-
-# Verify installation
-dpkg -L libroaring-dev | grep roaring.h
-
-# Rebuild extension
-cd /path/to/biscuit
-make clean
-make
-sudo make install
-
-# Restart PostgreSQL
-sudo systemctl restart postgresql
-
-# Verify in PostgreSQL
-psql -c "DROP EXTENSION biscuit CASCADE;"
-psql -c "CREATE EXTENSION biscuit;"
-psql -c "SELECT biscuit_has_roaring();"
--- Should return: true
-```
-
-
 ### biscuit_index_stats()
 
 Returns detailed statistics about a Biscuit index.
@@ -780,6 +698,44 @@ SELECT biscuit_size_pretty('idx_products_name');
 
 ```
 128 MB (134217728 bytes)
+```
+
+
+---
+
+## Diagnostic Views
+
+### biscuit_status
+
+Quick overview of extension status and configuration.
+
+**Definition**:
+```sql
+biscuit_status
+```
+
+**Columns**:
+- `version` - Extension version
+- `roaring_enabled` - Whether CRoaring is enabled
+- `bitmap_implementation` - Current bitmap backend
+- `total_indexes` - Number of active Biscuit indexes
+- `total_index_size` - Combined size of all indexes
+
+**Example**:
+```sql
+-- View current status
+SELECT * FROM biscuit_status;
+
+-- Monitor status changes
+CREATE TABLE biscuit_status_history AS
+SELECT now() as timestamp, * FROM biscuit_status;
+```
+
+**Output**:
+```
+ version | roaring_enabled | bitmap_implementation  | total_indexes | total_index_size
+---------+-----------------+------------------------+---------------+------------------
+ 1.0.0   | t               | Optimal (CRoaring)     | 5             | 245 MB
 ```
 
 ---
@@ -1186,6 +1142,46 @@ REINDEX INDEX idx_name;
 
 
 ---
+
+### ISSUE: biscuit_has_roaring() returns false
+
+**Symptoms**:
+```sql
+SELECT biscuit_has_roaring();
+-- Returns: false
+```
+
+**Diagnosis**:
+```sql
+SELECT * FROM biscuit_check_config();
+-- Shows: Roaring Support | ✗ Disabled | Install CRoaring...
+```
+
+**Solution**:
+```bash
+# Install CRoaring development library
+# Debian/Ubuntu
+sudo apt-get update
+sudo apt-get install libroaring-dev
+
+# Verify installation
+dpkg -L libroaring-dev | grep roaring.h
+
+# Rebuild extension
+cd /path/to/biscuit
+make clean
+make
+sudo make install
+
+# Restart PostgreSQL
+sudo systemctl restart postgresql
+
+# Verify in PostgreSQL
+psql -c "DROP EXTENSION biscuit CASCADE;"
+psql -c "CREATE EXTENSION biscuit;"
+psql -c "SELECT biscuit_has_roaring();"
+-- Should return: true
+```
 
 ## Next Steps
 

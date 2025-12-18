@@ -236,17 +236,13 @@
 <li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-build-info">biscuit_build_info()</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-build-info-json">biscuit_build_info_json()</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-check-config">biscuit_check_config()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-stats">biscuit_index_stats()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-memory-size">biscuit_index_memory_size()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-size-pretty">biscuit_size_pretty()</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#diagnostic-views">Diagnostic Views</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-status">biscuit_status</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="api.html#troubleshooting-guide">Troubleshooting Guide</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="api.html#issue-biscuit-has-roaring-returns-false">Issue: biscuit_has_roaring() returns false</a></li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-stats">biscuit_index_stats()</a></li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-memory-size">biscuit_index_memory_size()</a></li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-size-pretty">biscuit_size_pretty()</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-memory-usage">biscuit_memory_usage</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#notes">Notes</a></li>
 </ul>
@@ -286,6 +282,7 @@
 <li class="toctree-l3"><a class="reference internal" href="api.html#error-data-type-x-is-not-supported-for-biscuit-index">ERROR: data type X is not supported for biscuit index</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#error-could-not-open-relation-with-oid">ERROR: could not open relation with OID</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#warning-biscuit-index-cache-miss">WARNING: Biscuit: Index cache miss</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#issue-biscuit-has-roaring-returns-false">ISSUE: biscuit_has_roaring() returns false</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#next-steps">Next Steps</a></li>
@@ -1002,7 +999,6 @@
 <li class="toctree-l2"><a class="reference internal" href="api.html#query-operators">Query Operators</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#build-diagnostic-functions">Build Diagnostic Functions</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#diagnostic-views">Diagnostic Views</a></li>
-<li class="toctree-l2"><a class="reference internal" href="api.html#troubleshooting-guide">Troubleshooting Guide</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#configuration-parameters">Configuration Parameters</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#data-types">Data Types</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#system-views">System Views</a></li>
@@ -1166,6 +1162,64 @@
 <li><p><strong>Memory Efficient</strong>: Uses Roaring Bitmaps for compact in-memory representation</p></li>
 </ul>
 </section>
+<section id="whats-new-in-version-2-1-4">
+<h2>What’s new in version 2.1.4?<a class="headerlink" href="#whats-new-in-version-2-1-4" title="Link to this heading"></a></h2>
+<section id="build-packaging">
+<h3>Build &amp; Packaging<a class="headerlink" href="#build-packaging" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>Improved Makefile detection logic for CRoaring bitmap support by checking multiple common installation paths, increasing portability across systems and build environments.</p></li>
+</ul>
+</section>
+<section id="new-features">
+<h3>New Features<a class="headerlink" href="#new-features" title="Link to this heading"></a></h3>
+<section id="build-and-configuration-introspection">
+<h4>Build and configuration introspection<a class="headerlink" href="#build-and-configuration-introspection" title="Link to this heading"></a></h4>
+<p>Added SQL functions to inspect Biscuit build-time configuration, useful for debugging,
+reproducibility, and deployment verification.</p>
+<ul class="simple">
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">biscuit_version()</span> <span class="pre">→</span> <span class="pre">text</span></code></strong></p></li>
+</ul>
+<p>Returns the Biscuit extension version string.</p>
+<ul class="simple">
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">biscuit_build_info()</span> <span class="pre">→</span> <span class="pre">table</span></code></strong></p></li>
+</ul>
+<p>Returns detailed build-time configuration information.</p>
+<ul class="simple">
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">biscuit_build_info_json()</span> <span class="pre">→</span> <span class="pre">text</span></code></strong></p></li>
+</ul>
+<p>Returns build configuration as a JSON string for automation and scripting.</p>
+</section>
+<section id="roaring-bitmap-support-introspection">
+<h4>Roaring Bitmap support introspection<a class="headerlink" href="#roaring-bitmap-support-introspection" title="Link to this heading"></a></h4>
+<p>Added built-in SQL functions to inspect CRoaring bitmap support in Biscuit.</p>
+<ul class="simple">
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">biscuit_has_roaring()</span> <span class="pre">→</span> <span class="pre">boolean</span></code></strong></p></li>
+</ul>
+<p>Checks whether the extension was compiled with CRoaring bitmap support.</p>
+<ul class="simple">
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">biscuit_roaring_version()</span> <span class="pre">→</span> <span class="pre">text</span></code></strong></p></li>
+</ul>
+<p>Returns the CRoaring library version if available.</p>
+</section>
+<section id="diagnostic-views">
+<h4>Diagnostic views<a class="headerlink" href="#diagnostic-views" title="Link to this heading"></a></h4>
+<p>Added a built-in diagnostic view for quick inspection of Biscuit status
+and configuration.</p>
+<ul class="simple">
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">biscuit_status</span></code></strong><br />
+A single-row view providing an overview of:</p>
+<ul>
+<li><p>extension version</p></li>
+<li><p>CRoaring enablement</p></li>
+<li><p>bitmap backend in use</p></li>
+<li><p>total number of Biscuit indexes</p></li>
+<li><p>combined on-disk index size</p></li>
+</ul>
+</li>
+</ul>
+</section>
+</section>
+</section>
 <section id="quick-start">
 <h2>Quick Start<a class="headerlink" href="#quick-start" title="Link to this heading"></a></h2>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Install the extension</span>
@@ -1217,7 +1271,7 @@
 <ul class="simple">
 <li><p>PostgreSQL 16 or higher</p></li>
 <li><p>Linux, macOS, or Windows</p></li>
-<li><p>Optional: CRoaring library for enhanced performance</p></li>
+<li><p>Recommended: CRoaring library for enhanced performance</p></li>
 </ul>
 </section>
 <section id="license">
