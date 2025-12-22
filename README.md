@@ -209,12 +209,12 @@ Two types for fast length filtering:
 
 ### **Pattern Matching Algorithm**
 
-#### **Example: `LIKE '%abc%def'`**
+#### **Example: `LIKE 'abc%def'`**
 
 **Step 1: Parse pattern into parts**
 ```
 Parts: ["abc", "def"]
-Starts with %: YES
+Starts with %: NO
 Ends with %: NO
 ```
 
@@ -494,13 +494,6 @@ SELECT biscuit_index_stats('idx_biscuit'::regclass);
    ✓ 12. LIMIT-aware TID collection                +
 ```
 
-### Results
-
-
-| Index       | Command                        | Build Time        |
-| ----------- | ------------------------------ | ----------------- |
-| **pg_trgm** | `CREATE INDEX idx_trgm ...`    | **20,358.655 ms** |
-| **biscuit** | `CREATE INDEX idx_biscuit ...` | **2,734.310 ms**  |
 
 ---
 
