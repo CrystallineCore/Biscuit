@@ -81,7 +81,7 @@ Creates a Biscuit index on one or more columns.
 
 **Syntax**:
 ```sql
-CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ IF NOT EXISTS ] index_name
+CREATE INDEX [ CONCURRENTLY ] [ IF NOT EXISTS ] index_name
     ON table_name
     USING biscuit ( column_name [, ...] )
     [ WITH ( storage_parameter [= value] [, ... ] ) ]
@@ -99,11 +99,6 @@ CREATE [ UNIQUE ] INDEX [ CONCURRENTLY ] [ IF NOT EXISTS ] index_name
 
 **Supported Column Types**:
 - `TEXT`, `VARCHAR`, `CHAR` - Direct indexing
-- `INTEGER`, `BIGINT`, `SMALLINT` - Converted to sortable text
-- `FLOAT`, `DOUBLE PRECISION` - Converted to scientific notation
-- `DATE` - Converted to sortable integer
-- `TIMESTAMP`, `TIMESTAMPTZ` - Converted to microseconds
-- `BOOLEAN` - Converted to 't' or 'f'
 
 **Examples**:
 
@@ -124,14 +119,6 @@ ON products USING biscuit (name);
 CREATE INDEX idx_active_products 
 ON products USING biscuit (name)
 WHERE status = 'active';
-
--- Index with type conversion
-CREATE INDEX idx_orders_date 
-ON orders USING biscuit (created_at);
-
--- Index on expression
-CREATE INDEX idx_products_lower 
-ON products USING biscuit (LOWER(name));
 ```
 
 ---
@@ -416,7 +403,7 @@ SELECT
 ```
  extension_version | roaring_version | performance_mode
 -------------------+-----------------+------------------
- 1.0.0             | 2.0.4           | Optimal
+ 2.1.5            | 2.0.4           | Optimal
 ```
 
 ---
@@ -845,7 +832,6 @@ maintenance_work_mem = '1GB'
 SET maintenance_work_mem = '1GB';
 ```
 
-**Recommendation**: 1GB minimum for large indexes
 
 ---
 
@@ -858,8 +844,6 @@ SET maintenance_work_mem = '1GB';
 -- In postgresql.conf
 effective_cache_size = '12GB'
 ```
-
-**Recommendation**: 75% of system RAM
 
 ---
 
@@ -921,129 +905,6 @@ SET max_parallel_workers_per_gather = 4;
 RESET ALL;
 ```
 
----
-
-## Data Types
-
-### Supported Input Types
-
-Biscuit indexes can be created on these column types:
-
-#### Text Types
-
-```sql
--- Direct support (no conversion)
-TEXT
-VARCHAR(n)
-CHAR(n)
-NAME
-```
-
-**Storage**: As-is, up to 256 characters
-
-**Example**:
-```sql
-CREATE INDEX idx_text ON table1 USING biscuit (text_column);
-```
-
----
-
-#### Numeric Types
-
-```sql
--- Converted to sortable text
-SMALLINT, INTEGER, BIGINT
-NUMERIC, DECIMAL
-REAL, DOUBLE PRECISION
-```
-
-**Storage Format**:
-- Integers: `+0000000042` (sign + zero-padded)
-- Floats: `1.234567e+02` (scientific notation)
-
-**Example**:
-```sql
-CREATE INDEX idx_price ON products USING biscuit (price);
-
--- Query with pattern
-SELECT * FROM products WHERE price::TEXT LIKE '1%';
-```
-
-**Use Cases**:
-- Price ranges: `WHERE price::TEXT LIKE '1%'` (100-199)
-- ID prefixes: `WHERE id::TEXT LIKE '2024%'`
-
----
-
-#### Date/Time Types
-
-```sql
--- Converted to sortable integers
-DATE
-TIMESTAMP
-TIMESTAMPTZ
-TIME
-```
-
-**Storage Format**:
-- DATE: Days since epoch (zero-padded)
-- TIMESTAMP: Microseconds since epoch
-
-**Example**:
-```sql
-CREATE INDEX idx_created ON orders USING biscuit (created_at);
-
--- Query by year-month
-SELECT * FROM orders WHERE created_at::TEXT LIKE '2024-01%';
-
--- Query by year
-SELECT * FROM orders WHERE created_at::TEXT LIKE '2024%';
-```
-
----
-
-#### Boolean Type
-
-```sql
-BOOLEAN
-```
-
-**Storage**: `'t'` or `'f'`
-
-**Example**:
-```sql
-CREATE INDEX idx_active ON users USING biscuit (is_active);
-
--- Query
-SELECT * FROM users WHERE is_active::TEXT LIKE 't';
-```
-
-**Note**: B-tree is more efficient for boolean columns
-
----
-
-### Unsupported Types
-
-These types cannot be indexed directly:
-
-- `BYTEA` - Binary data
-- `JSON`, `JSONB` - Use expression index on text field
-- `ARRAY` - Use expression index on array_to_string
-- `GEOMETRY` (PostGIS) - Not supported
-
-**Workarounds**:
-
-```sql
--- JSON field
-CREATE INDEX idx_json ON table1 USING biscuit ((data->>'name'));
-
--- Array
-CREATE INDEX idx_array ON table1 
-USING biscuit (array_to_string(tags, ','));
-
--- UUID
-CREATE INDEX idx_uuid ON table1 USING biscuit (id::TEXT);
-```
 
 ---
 

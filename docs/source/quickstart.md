@@ -166,18 +166,6 @@ SELECT * FROM products WHERE sku LIKE 'MOUSE-00_';
 SELECT * FROM products WHERE name LIKE 'W_reless%';
 ```
 
-**Results:**
-
-| Query Pattern                          | Rows | No Index (Seq Scan) | Biscuit Index Time | Notes                                         |
-| -------------------------------------- | ---- | ------------------- | ------------------ | --------------------------------------------- |
-| `name LIKE '%Mouse%'` (Cold Start) | 2    | 3.519 ms        | 7.922 ms       | Cold cache warm-up → slower. Speedup: 2.25x slower |
-| `name LIKE '%Mouse%'`                  | 2    | 3.519 ms        | 0.048 ms       | Warm cache. Speedup: ~73× faster          |
-| `name LIKE 'Wireless%'`                | 2    | 1.631 ms        | 0.500 ms       | Warm cache. Speedup: ~3.3× faster         |
-| `name LIKE '%Laptop%Stand%'`           | 1    | ~2.8 ms *(seq)*     | 0.274 ms       | Warm cache. Speedup: ~10× faster          |
-| `name LIKE '%USB%C%'`                  | 1    | ~2.5 ms *(seq)*     | 0.588 ms       | Warm cache. Speedup: ~4.2× faster         |
-| `name LIKE 'Wireless%Mouse%'`          | 1    | ~2.0 ms *(seq)*     | 0.346 ms       | Warm cache. Speedup: ~5.8× faster         |
-| `name LIKE 'W_reless%'`                | 2    | ~2.7 ms *(seq)*     | 0.693 ms       | Warm cache. Speedup: ~3.9× faster         |
-
 ---
 
 ## Step 6: Multi-Column Indexes

@@ -1,5 +1,27 @@
 # Biscuit Index Extension - Changelog
 
+## Version 2.1.5
+
+### 🔧 Improvements
+
+**Removed arbitrary limits on multi-column indexes**
+
+*  Biscuit no longer enforces hard-coded limits when creating indexes over multiple columns, allowing more flexible index definitions.
+
+### 🛡️ Safety & Correctness
+
+**Restricted indexing to text-based datatypes**
+
+* Support for non-text datatypes has been removed. Biscuit now explicitly enforces text-only columns to ensure correct operator semantics, planner behavior, and index consistency.
+
+**Explicit error for expression indexing**
+
+*  Biscuit now raises a clear error when users attempt to create an index on an expression (e.g., `lower(col)`), which is not currently supported.
+  This prevents silent misconfiguration and enforces Biscuit’s column-based indexing semantics.
+
+> **Note:** Biscuit currently indexes **base columns only**. This may be revisited in future versions.
+
+---
 
 ## Version 2.1.4
 

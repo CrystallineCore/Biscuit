@@ -260,17 +260,6 @@
 <li class="toctree-l3"><a class="reference internal" href="api.html#session-parameters">Session Parameters</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="api.html#data-types">Data Types</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="api.html#supported-input-types">Supported Input Types</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="api.html#text-types">Text Types</a></li>
-<li class="toctree-l4"><a class="reference internal" href="api.html#numeric-types">Numeric Types</a></li>
-<li class="toctree-l4"><a class="reference internal" href="api.html#date-time-types">Date/Time Types</a></li>
-<li class="toctree-l4"><a class="reference internal" href="api.html#boolean-type">Boolean Type</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#unsupported-types">Unsupported Types</a></li>
-</ul>
-</li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#system-views">System Views</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="api.html#pg-index">pg_index</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#pg-stat-user-indexes">pg_stat_user_indexes</a></li>
@@ -323,7 +312,6 @@
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#multi-column-support">Multi-Column Support</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#architecture">Architecture</a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#query-execution">Query Execution</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#type-conversion">Type Conversion</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#crud-operations">CRUD Operations</a><ul>
@@ -359,11 +347,6 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#comparison-to-other-approaches">Comparison to Other Approaches</a></li>
-<li class="toctree-l2"><a class="reference internal" href="architecture.html#references">References</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#papers-techniques">Papers &amp; Techniques</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#postgresql-documentation">PostgreSQL Documentation</a></li>
-</ul>
-</li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#appendix-code-navigation">Appendix: Code Navigation</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#important-functions">Important Functions</a></li>
 </ul>
@@ -436,11 +419,6 @@
 <li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-1-user-search-with-email-domain">Pattern 1: User Search with Email Domain</a></li>
 <li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-2-product-search-with-multiple-attributes">Pattern 2: Product Search with Multiple Attributes</a></li>
 <li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-3-log-analysis">Pattern 3: Log Analysis</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#type-conversion-support">Type Conversion Support</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#supported-types">Supported Types</a></li>
-<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#type-conversion-details">Type Conversion Details</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#performance-characteristics">Performance Characteristics</a><ul>
@@ -790,7 +768,6 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#hardware-considerations">Hardware Considerations</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#memory-requirements">Memory Requirements</a></li>
-<li class="toctree-l3"><a class="reference internal" href="performance.html#ssd-vs-hdd">SSD vs. HDD</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#cpu-considerations">CPU Considerations</a></li>
 </ul>
 </li>
@@ -868,7 +845,6 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="faq.html#index-creation">Index Creation</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-do-i-create-a-biscuit-index">How do I create a Biscuit index?</a></li>
-<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-on-non-text-columns">Can I use Biscuit on non-text columns?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-long-does-index-creation-take">How long does index creation take?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-create-partial-biscuit-indexes">Can I create partial Biscuit indexes?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-many-columns-can-i-index">How many columns can I index?</a></li>
@@ -905,7 +881,6 @@
 <li class="toctree-l3"><a class="reference internal" href="faq.html#does-biscuit-work-with-replication">Does Biscuit work with replication?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-in-read-replicas">Can I use Biscuit in read replicas?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-does-biscuit-handle-null-values">How does Biscuit handle NULL values?</a></li>
-<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-with-json-columns">Can I use Biscuit with JSON columns?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#does-biscuit-support-multi-byte-characters-unicode">Does Biscuit support multi-byte characters (Unicode)?</a></li>
 </ul>
 </li>
@@ -1000,7 +975,6 @@
 <li class="toctree-l2"><a class="reference internal" href="api.html#build-diagnostic-functions">Build Diagnostic Functions</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#diagnostic-views">Diagnostic Views</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#configuration-parameters">Configuration Parameters</a></li>
-<li class="toctree-l2"><a class="reference internal" href="api.html#data-types">Data Types</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#system-views">System Views</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#error-messages">Error Messages</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#next-steps">Next Steps</a></li>
@@ -1020,7 +994,6 @@
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#limitations-tradeoffs">Limitations &amp; Tradeoffs</a></li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#future-enhancements">Future Enhancements</a></li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#comparison-to-other-approaches">Comparison to Other Approaches</a></li>
-<li class="toctree-l2"><a class="reference internal" href="architecture.html#references">References</a></li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#appendix-code-navigation">Appendix: Code Navigation</a></li>
 </ul>
 </li>
@@ -1043,7 +1016,6 @@
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#viewing-query-plans">Viewing Query Plans</a></li>
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#best-practices">Best Practices</a></li>
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#advanced-patterns">Advanced Patterns</a></li>
-<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#type-conversion-support">Type Conversion Support</a></li>
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#performance-characteristics">Performance Characteristics</a></li>
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#limit-optimization">LIMIT Optimization</a></li>
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#monitoring-and-diagnostics">Monitoring and Diagnostics</a></li>
@@ -1162,62 +1134,29 @@
 <li><p><strong>Memory Efficient</strong>: Uses Roaring Bitmaps for compact in-memory representation</p></li>
 </ul>
 </section>
-<section id="whats-new-in-version-2-1-4">
-<h2>What’s new in version 2.1.4?<a class="headerlink" href="#whats-new-in-version-2-1-4" title="Link to this heading"></a></h2>
-<section id="build-packaging">
-<h3>Build &amp; Packaging<a class="headerlink" href="#build-packaging" title="Link to this heading"></a></h3>
+<section id="version-2-1-5">
+<h2>Version 2.1.5<a class="headerlink" href="#version-2-1-5" title="Link to this heading"></a></h2>
+<section id="improvements">
+<h3>Improvements<a class="headerlink" href="#improvements" title="Link to this heading"></a></h3>
+<p><strong>Removed arbitrary limits on multi-column indexes</strong></p>
 <ul class="simple">
-<li><p>Improved Makefile detection logic for CRoaring bitmap support by checking multiple common installation paths, increasing portability across systems and build environments.</p></li>
+<li><p>Biscuit no longer enforces hard-coded limits when creating indexes over multiple columns, allowing more flexible index definitions.</p></li>
 </ul>
 </section>
-<section id="new-features">
-<h3>New Features<a class="headerlink" href="#new-features" title="Link to this heading"></a></h3>
-<section id="build-and-configuration-introspection">
-<h4>Build and configuration introspection<a class="headerlink" href="#build-and-configuration-introspection" title="Link to this heading"></a></h4>
-<p>Added SQL functions to inspect Biscuit build-time configuration, useful for debugging,
-reproducibility, and deployment verification.</p>
+<section id="safety-correctness">
+<h3>Safety &amp; Correctness<a class="headerlink" href="#safety-correctness" title="Link to this heading"></a></h3>
+<p><strong>Restricted indexing to text-based datatypes</strong></p>
 <ul class="simple">
-<li><p><strong><code class="docutils literal notranslate"><span class="pre">biscuit_version()</span> <span class="pre">→</span> <span class="pre">text</span></code></strong></p></li>
+<li><p>Support for non-text datatypes has been removed. Biscuit now explicitly enforces text-only columns to ensure correct operator semantics, planner behavior, and index consistency.</p></li>
 </ul>
-<p>Returns the Biscuit extension version string.</p>
+<p><strong>Explicit error for expression indexing</strong></p>
 <ul class="simple">
-<li><p><strong><code class="docutils literal notranslate"><span class="pre">biscuit_build_info()</span> <span class="pre">→</span> <span class="pre">table</span></code></strong></p></li>
+<li><p>Biscuit now raises a clear error when users attempt to create an index on an expression (e.g., <code class="docutils literal notranslate"><span class="pre">lower(col)</span></code>), which is not currently supported.
+This prevents silent misconfiguration and enforces Biscuit’s column-based indexing semantics.</p></li>
 </ul>
-<p>Returns detailed build-time configuration information.</p>
-<ul class="simple">
-<li><p><strong><code class="docutils literal notranslate"><span class="pre">biscuit_build_info_json()</span> <span class="pre">→</span> <span class="pre">text</span></code></strong></p></li>
-</ul>
-<p>Returns build configuration as a JSON string for automation and scripting.</p>
-</section>
-<section id="roaring-bitmap-support-introspection">
-<h4>Roaring Bitmap support introspection<a class="headerlink" href="#roaring-bitmap-support-introspection" title="Link to this heading"></a></h4>
-<p>Added built-in SQL functions to inspect CRoaring bitmap support in Biscuit.</p>
-<ul class="simple">
-<li><p><strong><code class="docutils literal notranslate"><span class="pre">biscuit_has_roaring()</span> <span class="pre">→</span> <span class="pre">boolean</span></code></strong></p></li>
-</ul>
-<p>Checks whether the extension was compiled with CRoaring bitmap support.</p>
-<ul class="simple">
-<li><p><strong><code class="docutils literal notranslate"><span class="pre">biscuit_roaring_version()</span> <span class="pre">→</span> <span class="pre">text</span></code></strong></p></li>
-</ul>
-<p>Returns the CRoaring library version if available.</p>
-</section>
-<section id="diagnostic-views">
-<h4>Diagnostic views<a class="headerlink" href="#diagnostic-views" title="Link to this heading"></a></h4>
-<p>Added a built-in diagnostic view for quick inspection of Biscuit status
-and configuration.</p>
-<ul class="simple">
-<li><p><strong><code class="docutils literal notranslate"><span class="pre">biscuit_status</span></code></strong><br />
-A single-row view providing an overview of:</p>
-<ul>
-<li><p>extension version</p></li>
-<li><p>CRoaring enablement</p></li>
-<li><p>bitmap backend in use</p></li>
-<li><p>total number of Biscuit indexes</p></li>
-<li><p>combined on-disk index size</p></li>
-</ul>
-</li>
-</ul>
-</section>
+<blockquote>
+<div><p><strong>Note:</strong> Biscuit currently indexes <strong>base columns only</strong>. This may be revisited in future versions.</p>
+</div></blockquote>
 </section>
 </section>
 <section id="quick-start">

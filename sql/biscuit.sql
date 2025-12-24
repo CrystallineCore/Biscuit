@@ -135,14 +135,19 @@ SELECT
     n.nspname AS schema_name,
     c.relname AS index_name,
     t.relname AS table_name,
+    i.indnatts AS num_columns,
     CASE 
-        WHEN array_length(i.indkey, 1) = 1 THEN 
-            (SELECT a.attname FROM pg_attribute a 
-             WHERE a.attrelid = t.oid AND a.attnum = i.indkey[0])
+        WHEN i.indnatts = 1 THEN
+            CASE
+                WHEN i.indkey[0] = 0 THEN 
+                    '(expression)'  -- Expression index
+                ELSE 
+                    (SELECT a.attname FROM pg_attribute a 
+                     WHERE a.attrelid = t.oid AND a.attnum = i.indkey[0])
+            END
         ELSE 
-            array_length(i.indkey, 1)::text || ' columns'
+            i.indnatts::text || ' columns'
     END AS columns,
-    array_length(i.indkey, 1) AS num_columns,
     pg_size_pretty(pg_relation_size(c.oid)) AS index_size,
     c.oid AS index_oid
 FROM
@@ -158,17 +163,17 @@ ORDER BY
     n.nspname, c.relname;
 
 COMMENT ON VIEW biscuit_indexes IS
-'Shows all Biscuit indexes in the current database with their tables, columns, and sizes';
+'Shows all Biscuit indexes in the current database. 
+For expression indexes (like age::text), shows "(expression)" - use biscuit_indexes_detailed for full definitions.';
 
--- Detailed multi-column index view
+-- Detailed multi-column index view (handles expression indexes correctly)
 CREATE VIEW biscuit_indexes_detailed AS
 SELECT
     n.nspname AS schema_name,
     c.relname AS index_name,
     t.relname AS table_name,
-    array_length(i.indkey, 1) AS num_columns,
-    array_agg(a.attname ORDER BY array_position(i.indkey, a.attnum)) AS column_names,
-    array_agg(format_type(a.atttypid, a.atttypmod) ORDER BY array_position(i.indkey, a.attnum)) AS column_types,
+    i.indnatts AS num_columns,
+    pg_get_indexdef(c.oid) AS index_definition,
     pg_size_pretty(pg_relation_size(c.oid)) AS index_size,
     c.oid AS index_oid
 FROM
@@ -177,17 +182,15 @@ FROM
     JOIN pg_am am ON am.oid = c.relam
     JOIN pg_index i ON i.indexrelid = c.oid
     JOIN pg_class t ON t.oid = i.indrelid
-    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(i.indkey)
 WHERE
     am.amname = 'biscuit'
     AND c.relkind = 'i'
-GROUP BY
-    n.nspname, c.relname, t.relname, i.indkey, c.oid
 ORDER BY
     n.nspname, c.relname;
 
 COMMENT ON VIEW biscuit_indexes_detailed IS
-'Detailed view of Biscuit indexes showing all columns and their types';
+'Detailed view of Biscuit indexes showing full index definitions including expressions.
+Use pg_get_indexdef() to see the complete CREATE INDEX statement with all casts.';
 
 -- Verification view for operators
 CREATE VIEW biscuit_operators AS
@@ -363,7 +366,6 @@ FEATURES:
 - Case-insensitive ILIKE support
 - Multi-column indexes
 - Full CRUD support with O(1) deletion
-- Automatic type conversion (int, date, timestamp, etc.)
 - CRoaring bitmap optimization (when available)
 
 QUICK START:

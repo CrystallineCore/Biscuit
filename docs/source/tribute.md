@@ -144,10 +144,7 @@ CREATE INDEX ON logs(timestamp);        -- timestamps
 CREATE INDEX ON users(email);           -- text
 ```
 
-**Biscuit only works on text-like data.** We convert everything to strings, which:
-- Wastes space for integers (20 bytes vs 4 bytes)
-- Slower for numeric comparisons
-- No native support for complex types
+**Biscuit only works on text-like data.** 
 
 #### 5. **Lock-Free Concurrent Access**
 ```sql
@@ -172,7 +169,7 @@ LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 | **Equality queries** | ✅ Almost always | Simpler than Biscuit |
 | **Range queries** | ✅ Always | Biscuit: no range support |
 | **Sorted access** | ✅ Always | Biscuit: must sort results |
-| **Numeric data** | ✅ Preferred | Biscuit: wasteful string conversion |
+| **Numeric data** | ✅ Preferred | Biscuit: unsupported |
 | **High write load** | ✅ Preferred | Biscuit: exclusive locks on insert |
 | **Space-constrained** | ✅ Always | Biscuit: Often larger |
 | **Small strings** | ✅ Preferred | B-tree overhead acceptable |

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Biscuit is a PostgreSQL index access method (AM) optimized for pattern matching operations (`LIKE`, `ILIKE`, `NOT LIKE`, `NOT ILIKE`). It uses compressed bitmap indices with character-position indexing to achieve sub-millisecond query performance on pattern matching workloads.
+Biscuit is a PostgreSQL index access method (AM) optimized for pattern matching operations (`LIKE`, `ILIKE`, `NOT LIKE`, `NOT ILIKE`). It uses compressed bitmap indices with character-position indexing to achieve faster query performance on pattern matching workloads.
 
 ## Core Design Principles
 
@@ -414,28 +414,6 @@ Execution plan:
 4. **Filter tombstones**: Remove deleted records
 5. **Collect TIDs**: Convert bitmap to tuple IDs
 
-### Type Conversion
-
-Non-text columns are converted to sortable text:
-
-```c
-case INT4OID:
-    // "+0000000042" or "-0000000042"
-    result = psprintf("%c%020llu", sign, abs_val);
-    break;
-
-case TIMESTAMPOID:
-    // "00000001234567890123" (microseconds)
-    result = psprintf("%020lld", timestamp);
-    break;
-
-case DATEOID:
-    // "+000012345" (days since epoch)
-    result = psprintf("%+010d", date);
-    break;
-```
-
-This enables pattern matching on any type while maintaining correct sort order.
 
 ---
 
@@ -610,7 +588,7 @@ if (tombstone_count >= 1000) {
 
 - **Equality/range queries**: Use B-tree  
 - **Full-text search**: Use GIN with tsvector  
-- **Regex**: Not supported (too complex)  
+- **Regex**: Not supported 
 - **Very long strings**: Memory usage scales with length  
 - **Online serialization**: Requires rebuild on load  
 
@@ -654,22 +632,6 @@ if (tombstone_count >= 1000) {
 
 ---
 
-## References
-
-### Papers & Techniques
-
-- [Roaring Bitmaps](https://arxiv.org/abs/1603.06549) - Compression technique
-- [Bitmap Index Design](https://dl.acm.org/doi/10.1145/93597.98738) - Bitmap basics
-- [Pattern Matching Algorithms](https://dl.acm.org/doi/10.1145/356653.356655) - KMP, Boyer-Moore
-
-### PostgreSQL Documentation
-
-- [Index Access Methods](https://www.postgresql.org/docs/current/indexam.html)
-- [Generic WAL](https://www.postgresql.org/docs/current/generic-wal.html)
-- [MVCC](https://www.postgresql.org/docs/current/mvcc.html)
-
----
-
 ## Appendix: Code Navigation
 
 
@@ -682,9 +644,3 @@ if (tombstone_count >= 1000) {
 - `biscuit_match_part_at_pos()` - Windowed matching core
 - `create_query_plan()` - Multi-column optimizer
 - `biscuit_collect_tids_optimized()` - Result collection
-
----
-
-**Author**: Sivaprasad Murali  
-**License**: PostgreSQL License  
-**Last Updated**: December 2025

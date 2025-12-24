@@ -261,17 +261,6 @@
 <li class="toctree-l3"><a class="reference internal" href="api.html#session-parameters">Session Parameters</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="api.html#data-types">Data Types</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="api.html#supported-input-types">Supported Input Types</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="api.html#text-types">Text Types</a></li>
-<li class="toctree-l4"><a class="reference internal" href="api.html#numeric-types">Numeric Types</a></li>
-<li class="toctree-l4"><a class="reference internal" href="api.html#date-time-types">Date/Time Types</a></li>
-<li class="toctree-l4"><a class="reference internal" href="api.html#boolean-type">Boolean Type</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#unsupported-types">Unsupported Types</a></li>
-</ul>
-</li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#system-views">System Views</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="api.html#pg-index">pg_index</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#pg-stat-user-indexes">pg_stat_user_indexes</a></li>
@@ -324,7 +313,6 @@
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#multi-column-support">Multi-Column Support</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#architecture">Architecture</a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#query-execution">Query Execution</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#type-conversion">Type Conversion</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#crud-operations">CRUD Operations</a><ul>
@@ -360,11 +348,6 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#comparison-to-other-approaches">Comparison to Other Approaches</a></li>
-<li class="toctree-l2"><a class="reference internal" href="architecture.html#references">References</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#papers-techniques">Papers &amp; Techniques</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#postgresql-documentation">PostgreSQL Documentation</a></li>
-</ul>
-</li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#appendix-code-navigation">Appendix: Code Navigation</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#important-functions">Important Functions</a></li>
 </ul>
@@ -437,11 +420,6 @@
 <li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-1-user-search-with-email-domain">Pattern 1: User Search with Email Domain</a></li>
 <li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-2-product-search-with-multiple-attributes">Pattern 2: Product Search with Multiple Attributes</a></li>
 <li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-3-log-analysis">Pattern 3: Log Analysis</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#type-conversion-support">Type Conversion Support</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#supported-types">Supported Types</a></li>
-<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#type-conversion-details">Type Conversion Details</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#performance-characteristics">Performance Characteristics</a><ul>
@@ -791,7 +769,6 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#hardware-considerations">Hardware Considerations</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#memory-requirements">Memory Requirements</a></li>
-<li class="toctree-l3"><a class="reference internal" href="performance.html#ssd-vs-hdd">SSD vs. HDD</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#cpu-considerations">CPU Considerations</a></li>
 </ul>
 </li>
@@ -869,7 +846,6 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="faq.html#index-creation">Index Creation</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-do-i-create-a-biscuit-index">How do I create a Biscuit index?</a></li>
-<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-on-non-text-columns">Can I use Biscuit on non-text columns?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-long-does-index-creation-take">How long does index creation take?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-create-partial-biscuit-indexes">Can I create partial Biscuit indexes?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-many-columns-can-i-index">How many columns can I index?</a></li>
@@ -906,7 +882,6 @@
 <li class="toctree-l3"><a class="reference internal" href="faq.html#does-biscuit-work-with-replication">Does Biscuit work with replication?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-in-read-replicas">Can I use Biscuit in read replicas?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-does-biscuit-handle-null-values">How does Biscuit handle NULL values?</a></li>
-<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-with-json-columns">Can I use Biscuit with JSON columns?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#does-biscuit-support-multi-byte-characters-unicode">Does Biscuit support multi-byte characters (Unicode)?</a></li>
 </ul>
 </li>

@@ -347,20 +347,6 @@ Example:
 
 ---
 
-### SSD vs. HDD
-
-Biscuit benefits greatly from SSDs:
-
-| Storage | Index Build | Query Speed | Recommendation |
-|---------|-------------|-------------|----------------|
-| HDD | 2-5x slower | 1.5-3x slower | Not recommended |
-| SATA SSD | Baseline | Baseline | Good |
-| NVMe SSD | 2x faster | 1.5x faster | Excellent |
-
-**Why?** Random access during index build and TID sorting
-
----
-
 ### CPU Considerations
 
 Biscuit is CPU-bound for:

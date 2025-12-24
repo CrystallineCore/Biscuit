@@ -261,42 +261,6 @@ WHERE level LIKE 'ERROR'              -- Exact (fastest)
 
 ---
 
-## Type Conversion Support
-
-Biscuit supports multiple data types through automatic text conversion:
-
-### Supported Types
-
-```sql
-CREATE INDEX idx_orders ON orders 
-USING biscuit (
-    customer_name,      -- TEXT
-    order_id,           -- INTEGER → sortable text
-    created_at,         -- TIMESTAMP → sortable text
-    total_amount,       -- NUMERIC → sortable text
-    status              -- VARCHAR
-);
-
--- Query with type conversion
-SELECT * FROM orders 
-WHERE created_at::TEXT LIKE '2024-01%'
-  AND total_amount::TEXT LIKE '1%'
-  AND customer_name LIKE '%Smith%';
-```
-
-### Type Conversion Details
-
-| Type | Conversion | Example |
-|------|------------|---------|
-| INTEGER | Zero-padded with sign | `+0000000042` |
-| FLOAT | Scientific notation | `1.500000e+02` |
-| DATE | Zero-padded days | `+0018628` |
-| TIMESTAMP | Microsecond precision | `00001704067200000000` |
-| BOOLEAN | 't' or 'f' | `t` |
-
-**Note**: Conversions are sortable and comparable!
-
----
 
 ## Performance Characteristics
 

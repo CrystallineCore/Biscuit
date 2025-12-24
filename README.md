@@ -5,60 +5,30 @@
 [![Read the Docs](https://img.shields.io/badge/Read%20the%20Docs-8CA1AF?logo=readthedocs&logoColor=fff)](https://biscuit.readthedocs.io/)
 
 
-**Biscuit** is a specialized PostgreSQL index access method (IAM) designed for blazing-fast pattern matching on `LIKE` and `ILIKE` queries, with native support for multi-column searches. It eliminates the recheck overhead of trigram indexes while delivering significant performance improvements on wildcard-heavy queries. It stands for _Bitmap Indexed Searching with Comprehensive Union and Intersection Techniques_.
+**Biscuit** is a specialized PostgreSQL index access method (IAM) designed for blazing-fast pattern matching on `LIKE` and `ILIKE` queries, with native support for multi-column searches. It eliminates the recheck overhead of trigram indexes while delivering significant performance improvements on wildcard-heavy queries. It stands for _**B**itmap **I**ndexed **S**earching with **C**omprehensive **U**nion and **I**ntersection **T**echniques_.
 
 ---
 
-## Version 2.1.4
+## What's new in v2.1.5?
 
-### 🛠️ Build & Packaging
+### 🔧 Improvements
 
-* Improved Makefile detection logic for CRoaring bitmap support by checking multiple common installation paths, increasing portability across systems and build environments.
+**Removed arbitrary limits on multi-column indexes**
 
+*  Biscuit no longer enforces hard-coded limits when creating indexes over multiple columns, allowing more flexible index definitions.
 
-### ✨ New Features
+### 🛡️ Safety & Correctness
 
-#### Build and configuration introspection
+**Restricted indexing to text-based datatypes**
 
-Added SQL functions to inspect Biscuit build-time configuration, useful for debugging,
-reproducibility, and deployment verification.
+* Support for non-text datatypes has been removed. Biscuit now explicitly enforces text-only columns to ensure correct operator semantics, planner behavior, and index consistency.
 
-* **`biscuit_version() → text`**    
+**Explicit error for expression indexing**
 
-Returns the Biscuit extension version string.
+*  Biscuit now raises a clear error when users attempt to create an index on an expression (e.g., `lower(col)`), which is not currently supported.
+  This prevents silent misconfiguration and enforces Biscuit’s column-based indexing semantics.
 
-* **`biscuit_build_info() → table`**    
-
-Returns detailed build-time configuration information.
-
-* **`biscuit_build_info_json() → text`**    
-
-Returns build configuration as a JSON string for automation and scripting.
-
-#### Roaring Bitmap support introspection
-
-Added built-in SQL functions to inspect CRoaring bitmap support in Biscuit.
-
-* **`biscuit_has_roaring() → boolean`**    
-
-Checks whether the extension was compiled with CRoaring bitmap support.
-
-* **`biscuit_roaring_version() → text`** 
-
-Returns the CRoaring library version if available.
-
-#### Diagnostic views
-
-Added a built-in diagnostic view for quick inspection of Biscuit status
-and configuration.
-
-* **`biscuit_status`**  
-  A single-row view providing an overview of:
-  - extension version
-  - CRoaring enablement
-  - bitmap backend in use
-  - total number of Biscuit indexes
-  - combined on-disk index size
+> **Note:** Biscuit currently indexes **base columns only**. This may be revisited in future versions.
 
 ---
 
@@ -66,7 +36,7 @@ and configuration.
 
 ### **Requirements**
 - Build tools: `gcc`, `make`, `pg_config`
-- Optional: CRoaring library for enhanced performance
+- Recommended: CRoaring library for enhanced performance
 
 ### **From Source**
 
@@ -118,26 +88,7 @@ SELECT * FROM products
 WHERE name LIKE '%widget%' 
   AND description LIKE '%blue%'
   AND category LIKE 'electronics%'
-ORDER BY score DESC 
 LIMIT 10;
-```
-
-### **Supported Data Types**
-
-Biscuit automatically converts various types to searchable text:
-
-```sql
--- Text types (native)
-CREATE INDEX ON logs USING biscuit(message);
-
--- Numeric types (converted to sortable strings)
-CREATE INDEX ON events USING biscuit(user_id, event_code);
-
--- Date/Time types (converted to sortable timestamps)
-CREATE INDEX ON orders USING biscuit(order_date, customer_name);
-
--- Boolean (converted to 't'/'f')
-CREATE INDEX ON flags USING biscuit(is_active, status);
 ```
 
 ---
@@ -146,7 +97,7 @@ CREATE INDEX ON flags USING biscuit(is_active, status);
 
 ### **Core Concept: Bitmap Position Indices**
 
-Biscuit builds **two types of character-position bitmaps** for every string:
+Biscuit builds the following bitmaps for every string:
 
 #### **1. Positive Indices (Forward)**
 Tracks which records have character `c` at position `p`:
@@ -298,7 +249,7 @@ if (result.empty()) return empty;  // Don't process remaining chars
 Fast paths for common cases:
 - **Exact**: `'abc'` → Check position 0-2 and length = 3
 - **Prefix**: `'abc%'` → Check position 0-2 and length ≥ 3
-- **Suffix**: `'%xyz'` → Check negative positions -3 to -1
+- **Suffix**: `'%xyz'` → Check negative positions -3 to -1 and length ≥ 3
 - **Substring**: `'%abc%'` → Check all positions, OR results
 
 ### **5. Skip Unnecessary Length Operations**
@@ -535,8 +486,7 @@ CREATE INDEX idx_tickets ON tickets
 SELECT * FROM tickets 
 WHERE subject LIKE '%refund%'
   AND customer_name LIKE 'John%'
-  AND status = 'open'
-ORDER BY created_at DESC;
+  AND status = 'open';
 ```
 
 ### **4. Code Search / Documentation**
@@ -606,7 +556,7 @@ Limit
 - Biscuit filters candidates extremely fast 
 - Result set is small after filtering
 - Sorting 100-1000 rows in memory is negligible (<1ms)
-- **Net result**: Still much faster than pg_trgm with recheck overhead
+- **Net result**: Still much faster than pg_trgm with recheck overhead in many cases
 
 ### **Memory Usage**
 
@@ -625,11 +575,8 @@ Biscuit stores bitmaps in memory:
 
 | Feature                  | Biscuit                     | pg_trgm (GIN)        |
 |--------------------------|------------------------------|----------------------|
-| **Wildcard patterns**    | ✔ Native, exact              | ✔ Approximate        |
-| **Recheck overhead**     | ✔ None (deterministic)       | ✗ Always required    |
-| **Multi-column**         | ✔ Optimized                  | ⚠️ Via btree_gist     |
-| **Aggregate queries**    | ✔ Optimized                  | ✗ Same cost          |
-| **ORDER BY + LIMIT**     | ✔ Works well                 | ✔ Ordered scans       |
+| **Wildcard patterns**    | ✔ Native              | ✔ Approximate        |
+| **Recheck overhead**     | ✔ None (deterministic)       | ✗ Required    |
 | **Regex support**        | ✗ No                         | ✔ Yes                |
 | **Similarity search**    | ✗ No                         | ✔ Yes                |
 | **ILIKE support**        | ✔ Full       | ✔ Native             |
@@ -774,7 +721,7 @@ Contributions are welcome! Please:
 
 - [ ] Implement `amcanorder` for native sorted scans
 - [ ] Add statistics collection for better cost estimation
-- [ ] Support for more data types (JSON, arrays)
+- [ ] Support for more data types 
 - [ ] Parallel index build
 - [ ] Index compression options
 
@@ -794,11 +741,12 @@ Sivaprasad Murali
 
 ---
 
+
 ## **Acknowledgments**
 
-- PostgreSQL community for the extensible index AM framework
-- CRoaring library for efficient bitmap operations
-- Inspired by the need for faster LIKE query performance in production systems
+* The PostgreSQL community for the extensible index access method (AM) framework
+* **B-tree** and **pg_trgm** indexes that shaped the design space for pattern matching in PostgreSQL
+* The **CRoaring** library for efficient compressed bitmap operations
 
 ---
 

@@ -171,27 +171,6 @@ See [Quick Start Tutorial](quickstart.md) for examples.
 
 ---
 
-### Can I use Biscuit on non-text columns?
-
-**Yes!** Biscuit supports automatic type conversion for:
-- Integers (SMALLINT, INTEGER, BIGINT)
-- Floats (REAL, DOUBLE PRECISION)
-- Dates (DATE, TIMESTAMP, TIMESTAMPTZ)
-- Booleans (BOOLEAN)
-
-**Example**:
-```sql
--- Index a date column
-CREATE INDEX idx_created ON orders USING biscuit (created_at);
-
--- Query by year-month
-SELECT * FROM orders WHERE created_at::TEXT LIKE '2024-01%';
-```
-
-See [API Reference - Data Types](api.md#data-types) for details.
-
----
-
 ### How long does index creation take?
 
 Build time varies significantly based on:
@@ -350,7 +329,7 @@ PostgreSQL will use bitmap OR to combine results.
 
 ### Does Biscuit support regular expressions?
 
-**No.** Biscuit only supports SQL LIKE patterns (`%`, `_`).
+**No.** Biscuit only supports SQL LIKE/ILIKE patterns (`%`, `_`).
 
 For regex, use:
 - PostgreSQL's `~` operator with GIN trigram index
@@ -694,21 +673,6 @@ WHERE middle_name IS NULL
    OR middle_name LIKE '%pattern%'
 ```
 
----
-
-### Can I use Biscuit with JSON columns?
-
-**Yes**, with expression index:
-
-```sql
--- Index a JSON field
-CREATE INDEX idx_json_name ON products 
-USING biscuit ((data->>'name'));
-
--- Query
-SELECT * FROM products 
-WHERE (data->>'name') LIKE '%laptop%';
-```
 
 ---
 
@@ -874,7 +838,7 @@ Performance characteristics vary significantly based on:
 - Different optimization characteristics
 
 **Biscuit**:
-- Optimized for LIKE pattern matching
+- Optimized for LIKE/ILIKE pattern matching
 - Bitmap-based approach
 - In-memory index structures
 - Multi-column query optimization

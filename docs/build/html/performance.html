@@ -230,11 +230,21 @@
 <li class="toctree-l3"><a class="reference internal" href="api.html#multi-column-queries">Multi-Column Queries</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="api.html#diagnostic-functions">Diagnostic Functions</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="api.html#build-diagnostic-functions">Build Diagnostic Functions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-has-roaring">biscuit_has_roaring()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-version">biscuit_version()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-roaring-version">biscuit_roaring_version()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-build-info">biscuit_build_info()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-build-info-json">biscuit_build_info_json()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-check-config">biscuit_check_config()</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-stats">biscuit_index_stats()</a></li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-memory-size"><code class="docutils literal notranslate"><span class="pre">biscuit_index_memory_size()</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-size-pretty"><code class="docutils literal notranslate"><span class="pre">biscuit_size_pretty()</span></code></a></li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-memory-usage"><code class="docutils literal notranslate"><span class="pre">biscuit_memory_usage</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-memory-size">biscuit_index_memory_size()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-size-pretty">biscuit_size_pretty()</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api.html#diagnostic-views">Diagnostic Views</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-status">biscuit_status</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-memory-usage">biscuit_memory_usage</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#notes">Notes</a></li>
 </ul>
 </li>
@@ -251,17 +261,6 @@
 <li class="toctree-l3"><a class="reference internal" href="api.html#session-parameters">Session Parameters</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="api.html#data-types">Data Types</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="api.html#supported-input-types">Supported Input Types</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="api.html#text-types">Text Types</a></li>
-<li class="toctree-l4"><a class="reference internal" href="api.html#numeric-types">Numeric Types</a></li>
-<li class="toctree-l4"><a class="reference internal" href="api.html#date-time-types">Date/Time Types</a></li>
-<li class="toctree-l4"><a class="reference internal" href="api.html#boolean-type">Boolean Type</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#unsupported-types">Unsupported Types</a></li>
-</ul>
-</li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#system-views">System Views</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="api.html#pg-index">pg_index</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#pg-stat-user-indexes">pg_stat_user_indexes</a></li>
@@ -273,6 +272,7 @@
 <li class="toctree-l3"><a class="reference internal" href="api.html#error-data-type-x-is-not-supported-for-biscuit-index">ERROR: data type X is not supported for biscuit index</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#error-could-not-open-relation-with-oid">ERROR: could not open relation with OID</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#warning-biscuit-index-cache-miss">WARNING: Biscuit: Index cache miss</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#issue-biscuit-has-roaring-returns-false">ISSUE: biscuit_has_roaring() returns false</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#next-steps">Next Steps</a></li>
@@ -313,7 +313,6 @@
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#multi-column-support">Multi-Column Support</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#architecture">Architecture</a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#query-execution">Query Execution</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#type-conversion">Type Conversion</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#crud-operations">CRUD Operations</a><ul>
@@ -349,11 +348,6 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#comparison-to-other-approaches">Comparison to Other Approaches</a></li>
-<li class="toctree-l2"><a class="reference internal" href="architecture.html#references">References</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#papers-techniques">Papers &amp; Techniques</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#postgresql-documentation">PostgreSQL Documentation</a></li>
-</ul>
-</li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#appendix-code-navigation">Appendix: Code Navigation</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#important-functions">Important Functions</a></li>
 </ul>
@@ -428,11 +422,6 @@
 <li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-3-log-analysis">Pattern 3: Log Analysis</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#type-conversion-support">Type Conversion Support</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#supported-types">Supported Types</a></li>
-<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#type-conversion-details">Type Conversion Details</a></li>
-</ul>
-</li>
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#performance-characteristics">Performance Characteristics</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="multicolumn.html#query-complexity-vs-performance">Query Complexity vs. Performance</a></li>
 <li class="toctree-l3"><a class="reference internal" href="multicolumn.html#early-termination-example">Early Termination Example</a></li>
@@ -454,9 +443,12 @@
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#next-steps">Next Steps</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="benchmark.html">Biscuit vs. Trigram vs. B-tree</a><ul>
+<li class="toctree-l1"><a class="reference internal" href="benchmark.html">Biscuit Performance Benchmark — Fallback Bitmaps</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="benchmark.html#executive-summary">Executive Summary</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="benchmark.html#key-findings">Key Findings</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark.html#key-findings">Key Findings</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark.html#summary">Summary:</a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="benchmark.html#introduction">Introduction</a><ul>
@@ -592,6 +584,145 @@
 <li class="toctree-l2"><a class="reference internal" href="benchmark.html#statistical-methods">Statistical Methods</a></li>
 </ul>
 </li>
+<li class="toctree-l1"><a class="reference internal" href="benchmark_roaring.html">Biscuit Performance Benchmark — Roaring Bitmaps</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#executive-summary">Executive Summary</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#key-findings">Key Findings</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#introduction">Introduction</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#problem-statement">Problem Statement</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#research-questions">Research Questions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#benchmark-scope">Benchmark Scope</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#methodology">Methodology</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#design-principles">Design Principles</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#complete-isolation">1. Complete Isolation</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#cache-state-control">2. Cache State Control</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#forced-index-usage">3. Forced Index Usage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#statistical-rigor">4. Statistical Rigor</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#randomization">5. Randomization</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#comprehensive-metrics">6. Comprehensive Metrics</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#test-environment">Test Environment</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#dataset">Dataset</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#hardware-configuration">Hardware Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#software-stack">Software Stack</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#database-configuration">Database Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#dataset-characteristics">Dataset Characteristics</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#query-coverage-analysis">Query Coverage Analysis</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#overview">Overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#coverage-by-pattern-structure">Coverage by Pattern Structure</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#basic-wildcard-patterns-24-queries">1. Basic Wildcard Patterns (24 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#underscore-wildcards-12-queries">2. Underscore Wildcards (12 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#case-insensitive-patterns-ilike-20-queries">3. Case-Insensitive Patterns (ILIKE) (20 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#negation-patterns-not-like-not-ilike-16-queries">4. Negation Patterns (NOT LIKE / NOT ILIKE) (16 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#boolean-combinations-48-queries">5. Boolean Combinations (48 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#edge-cases-and-special-patterns-20-queries">6. Edge Cases and Special Patterns (20 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#real-world-query-patterns-20-queries">7. Real-World Query Patterns (20 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#selectivity-spectrum-10-queries">8. Selectivity Spectrum (10 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#special-characters-escaping-4-queries">9. Special Characters &amp; Escaping (4 queries)</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#order-by-limit-pagination-4-queries">10. ORDER BY + LIMIT (Pagination) (4 queries)</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#coverage-summary-table">Coverage Summary Table</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#selectivity-distribution">Selectivity Distribution</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#performance-results">Performance Results</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#overall-performance-summary-warm-cache">Overall Performance Summary (Warm Cache)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#cold-cache-vs-warm-cache">Cold Cache vs. Warm Cache</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#cache-hit-ratios">Cache Hit Ratios</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#statistical-significance-testing">Statistical Significance Testing</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#statistical-analysis">Statistical Analysis</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#distribution-analysis">Distribution Analysis</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#execution-time-distributions">Execution Time Distributions</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#consistency-analysis-coefficient-of-variation">Consistency Analysis (Coefficient of Variation)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#outlier-analysis">Outlier Analysis</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#pattern-specific-performance">Pattern-Specific Performance</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#by-wildcard-pattern-type-warm-cache">By Wildcard Pattern Type (Warm Cache)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#by-selectivity-level-estimated-from-available-data">By Selectivity Level (Estimated from available data)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#correctness-verification">Correctness Verification</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#dual-level-verification-protocol">Dual-Level Verification Protocol</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#level-1-cross-index-consistency">Level 1: Cross-Index Consistency</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#level-2-cross-iteration-consistency">Level 2: Cross-Iteration Consistency</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#overall-verification-summary">Overall Verification Summary</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#correctness-implications">Correctness Implications</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#index-usage-analysis">Index Usage Analysis</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#query-execution-strategy-breakdown">Query Execution Strategy Breakdown</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#execution-plan-analysis">Execution Plan Analysis</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#biscuit-dominant-index-scan-usage">Biscuit: Dominant Index Scan Usage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#trigram-bitmap-heavy-approach">Trigram: Bitmap-Heavy Approach</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#b-tree-sequential-scan-dominant">B-tree: Sequential Scan Dominant</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#buffer-i-o-analysis">Buffer I/O Analysis</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#roaring-bitmap-optimization-impact">Roaring Bitmap Optimization Impact</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#storage-comparison">Storage Comparison</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#performance-impact-analysis">Performance Impact Analysis</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#roaring-bitmap-benefits-summary">Roaring Bitmap Benefits Summary</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#why-roaring-bitmaps-work-well-for-biscuit">Why Roaring Bitmaps Work Well for Biscuit</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#real-world-scenarios">Real-World Scenarios</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#scenario-1-user-search-autocomplete">Scenario 1: User Search / Autocomplete</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#scenario-2-geographic-filtering">Scenario 2: Geographic Filtering</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#scenario-3-content-moderation">Scenario 3: Content Moderation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#scenario-4-analytics-dashboard">Scenario 4: Analytics Dashboard</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#trade-off-analysis">Trade-off Analysis</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#performance-vs-storage">Performance vs. Storage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#decision-matrix">Decision Matrix</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#total-cost-of-ownership-5-year-estimate">Total Cost of Ownership (5-Year Estimate)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#limitations-and-future-work">Limitations and Future Work</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#current-limitations">Current Limitations</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#write-performance-not-tested">1. Write Performance Not Tested</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#single-hardware-configuration">2. Single Hardware Configuration</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#id1">3. Forced Index Usage</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#single-dataset-size">4. Single Dataset Size</a></li>
+<li class="toctree-l4"><a class="reference internal" href="benchmark_roaring.html#no-concurrency-testing">5. No Concurrency Testing</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#recommendations-for-practitioners">Recommendations for Practitioners</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#conclusions">Conclusions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#summary-of-findings">Summary of Findings</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#practical-recommendations">Practical Recommendations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#research-contributions">Research Contributions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#final-verdict">Final Verdict</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#statistical-methods">Statistical Methods</a></li>
+<li class="toctree-l2"><a class="reference internal" href="benchmark_roaring.html#appendix-verification-checklist">Appendix: Verification Checklist</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#publication-readiness-assessment">Publication Readiness Assessment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="benchmark_roaring.html#data-quality-summary">Data Quality Summary</a></li>
+</ul>
+</li>
+</ul>
+</li>
 <li class="toctree-l1"><a class="reference internal" href="benchmark_env.html">Benchmark Environment</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#system-overview">System Overview</a></li>
 <li class="toctree-l2"><a class="reference internal" href="benchmark_env.html#benchmark-configuration">Benchmark Configuration</a></li>
@@ -638,7 +769,6 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#hardware-considerations">Hardware Considerations</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#memory-requirements">Memory Requirements</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#ssd-vs-hdd">SSD vs. HDD</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#cpu-considerations">CPU Considerations</a></li>
 </ul>
 </li>
@@ -716,7 +846,6 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="faq.html#index-creation">Index Creation</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-do-i-create-a-biscuit-index">How do I create a Biscuit index?</a></li>
-<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-on-non-text-columns">Can I use Biscuit on non-text columns?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-long-does-index-creation-take">How long does index creation take?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-create-partial-biscuit-indexes">Can I create partial Biscuit indexes?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-many-columns-can-i-index">How many columns can I index?</a></li>
@@ -753,7 +882,6 @@
 <li class="toctree-l3"><a class="reference internal" href="faq.html#does-biscuit-work-with-replication">Does Biscuit work with replication?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-in-read-replicas">Can I use Biscuit in read replicas?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-does-biscuit-handle-null-values">How does Biscuit handle NULL values?</a></li>
-<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-with-json-columns">Can I use Biscuit with JSON columns?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#does-biscuit-support-multi-byte-characters-unicode">Does Biscuit support multi-byte characters (Unicode)?</a></li>
 </ul>
 </li>
@@ -1132,38 +1260,6 @@ CRUD Statistics:
 <li><p>Medium dataset (100K-1M rows): 4GB+ RAM recommended</p></li>
 <li><p>Large dataset (&gt;1M rows): 16GB+ RAM recommended</p></li>
 </ul>
-</section>
-<hr class="docutils" />
-<section id="ssd-vs-hdd">
-<h3>SSD vs. HDD<a class="headerlink" href="#ssd-vs-hdd" title="Link to this heading"></a></h3>
-<p>Biscuit benefits greatly from SSDs:</p>
-<table class="docutils align-default">
-<thead>
-<tr class="row-odd"><th class="head"><p>Storage</p></th>
-<th class="head"><p>Index Build</p></th>
-<th class="head"><p>Query Speed</p></th>
-<th class="head"><p>Recommendation</p></th>
-</tr>
-</thead>
-<tbody>
-<tr class="row-even"><td><p>HDD</p></td>
-<td><p>2-5x slower</p></td>
-<td><p>1.5-3x slower</p></td>
-<td><p>Not recommended</p></td>
-</tr>
-<tr class="row-odd"><td><p>SATA SSD</p></td>
-<td><p>Baseline</p></td>
-<td><p>Baseline</p></td>
-<td><p>Good</p></td>
-</tr>
-<tr class="row-even"><td><p>NVMe SSD</p></td>
-<td><p>2x faster</p></td>
-<td><p>1.5x faster</p></td>
-<td><p>Excellent</p></td>
-</tr>
-</tbody>
-</table>
-<p><strong>Why?</strong> Random access during index build and TID sorting</p>
 </section>
 <hr class="docutils" />
 <section id="cpu-considerations">

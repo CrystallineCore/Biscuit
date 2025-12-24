@@ -356,8 +356,6 @@ biscuit_cache_insert(Oid indexoid, BiscuitIndex *idx)
  static void
  biscuit_cleanup_index(BiscuitIndex *idx)
  {
-     int ch, col, j;
-     
      if (!idx)
          return;
      
@@ -3222,12 +3220,33 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
         idx->column_data_cache = (char ***)palloc(natts * sizeof(char **));
         
         for (col = 0; col < natts; col++) {
+            if (indexInfo->ii_IndexAttrNumbers[col] == 0) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                        errmsg("biscuit indexes do not support expressions"),
+                        errdetail("Expression found in column %d", col + 1),
+                        errhint("Index the column directly instead of casting it. "
+                                "For example, use 'CREATE INDEX ... ON table(text_column)' "
+                                "instead of 'CREATE INDEX ... ON table((int_column::text))'.")));
+            }
             AttrNumber col_attnum = indexInfo->ii_IndexAttrNumbers[col];
-            Form_pg_attribute col_attr = TupleDescAttr(heap->rd_att, col_attnum - 1);
             
-            idx->column_types[col] = col_attr->atttypid;
-            getTypeOutputInfo(col_attr->atttypid, &typoutput, &typIsVarlena);
-            fmgr_info(typoutput, &idx->output_funcs[col]);
+            /* Handle expression indexes (col_attnum == 0) */
+            if (col_attnum == 0) {
+                /* Expression index - get type from index tuple descriptor */
+                Form_pg_attribute idx_attr = TupleDescAttr(index->rd_att, col);
+                
+                idx->column_types[col] = idx_attr->atttypid;
+                getTypeOutputInfo(idx_attr->atttypid, &typoutput, &typIsVarlena);
+                fmgr_info(typoutput, &idx->output_funcs[col]);
+            } else {
+                /* Regular column - get type from heap tuple descriptor */
+                Form_pg_attribute col_attr = TupleDescAttr(heap->rd_att, col_attnum - 1);
+                
+                idx->column_types[col] = col_attr->atttypid;
+                getTypeOutputInfo(col_attr->atttypid, &typoutput, &typIsVarlena);
+                fmgr_info(typoutput, &idx->output_funcs[col]);
+            }
             
             idx->column_data_cache[col] = 
                 (char **)palloc(idx->capacity * sizeof(char *));
@@ -3292,7 +3311,26 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
             /* Index each column separately with BOTH case-sensitive and case-insensitive */
             for (col = 0; col < natts; col++) {
                 AttrNumber col_attnum = indexInfo->ii_IndexAttrNumbers[col];
-                value = slot_getattr(slot, col_attnum, &isnull);
+                
+                /* For expression indexes, evaluate the expression */
+                if (col_attnum == 0) {
+                    /* Expression column - use FormIndexDatum to evaluate */
+                    FormIndexDatum(indexInfo, slot, NULL, &value, &isnull);
+                    
+                    /* FormIndexDatum returns values for ALL columns, get this one */
+                    Datum *values = (Datum *)palloc(natts * sizeof(Datum));
+                    bool *isnulls = (bool *)palloc(natts * sizeof(bool));
+                    
+                    FormIndexDatum(indexInfo, slot, NULL, values, isnulls);
+                    value = values[col];
+                    isnull = isnulls[col];
+                    
+                    pfree(values);
+                    pfree(isnulls);
+                } else {
+                    /* Regular column */
+                    value = slot_getattr(slot, col_attnum, &isnull);
+                }
                 
                 if (isnull) {
                     idx->column_data_cache[col][idx->num_records] = pstrdup("");
@@ -3463,6 +3501,14 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
     
     int natts = indexInfo->ii_NumIndexAttrs;
     
+    /* Block expression indexes */
+    if (indexInfo->ii_IndexAttrNumbers[0] == 0) {
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("biscuit indexes do not support expressions"),
+                 errhint("Index the column directly instead of using an expression.")));
+    }
+
     /* Route to multi-column builder if needed */
     if (natts > 1) {
         return biscuit_build_multicolumn(heap, index, indexInfo);
@@ -3880,7 +3926,26 @@ static BiscuitIndex* biscuit_load_index(Relation index)
             
             for (col = 0; col < natts; col++) {
                 AttrNumber col_attnum = index->rd_index->indkey.values[col];
-                Datum value = slot_getattr(slot, col_attnum, &isnull);
+                Datum value;
+                
+                /* Handle expression indexes */
+                if (col_attnum == 0) {
+                    /* Expression - need to evaluate it */
+                    IndexInfo *indexInfo = BuildIndexInfo(index);
+                    Datum *values = (Datum *)palloc(natts * sizeof(Datum));
+                    bool *isnulls = (bool *)palloc(natts * sizeof(bool));
+                    
+                    FormIndexDatum(indexInfo, slot, NULL, values, isnulls);
+                    value = values[col];
+                    isnull = isnulls[col];
+                    
+                    pfree(values);
+                    pfree(isnulls);
+                    pfree(indexInfo);
+                } else {
+                    /* Regular column */
+                    value = slot_getattr(slot, col_attnum, &isnull);
+                }
                 ColumnIndex *cidx = &idx->column_indices[col];
                 char *col_str;
                 int col_len;
@@ -6258,7 +6323,7 @@ biscuit_columnindex_memory_usage(const ColumnIndex *col_idx)
         return 0;
     
     /* FIX 13: Add sanity check on max_length */
-    if (col_idx->max_length < 0 || col_idx->max_length > 1000000) {
+    if (col_idx->max_length < 0 ) {
         elog(WARNING, "Invalid max_length in ColumnIndex: %d", col_idx->max_length);
         return 0;
     }
@@ -6280,7 +6345,7 @@ biscuit_columnindex_memory_usage(const ColumnIndex *col_idx)
     /* Length bitmaps (shared for both case-sensitive and case-insensitive) */
     if (col_idx->length_bitmaps) {
         /* FIX 14: Bounds check before loop */
-        for (i = 0; i <= col_idx->max_length && i < 1000000; i++) {
+        for (i = 0; i <= col_idx->max_length; i++) {
             total += biscuit_roaring_memory_usage(col_idx->length_bitmaps[i]);
         }
         total += (col_idx->max_length + 1) * sizeof(RoaringBitmap *);
@@ -6288,7 +6353,7 @@ biscuit_columnindex_memory_usage(const ColumnIndex *col_idx)
     
     if (col_idx->length_ge_bitmaps) {
         /* FIX 15: Bounds check before loop */
-        for (i = 0; i <= col_idx->max_length && i < 1000000; i++) {
+        for (i = 0; i <= col_idx->max_length; i++) {
             total += biscuit_roaring_memory_usage(col_idx->length_ge_bitmaps[i]);
         }
         total += (col_idx->max_length + 1) * sizeof(RoaringBitmap *);
@@ -6379,7 +6444,7 @@ biscuit_index_memory_size(PG_FUNCTION_ARGS)
         /* CRITICAL FIX: Single-column uses SHARED length bitmaps for both LIKE and ILIKE */
         /* Only count them ONCE, not twice! */
         if (idx->length_bitmaps_legacy) {
-            if (idx->max_length_legacy > 0 && idx->max_length_legacy < 1000000) {
+            if (idx->max_length_legacy > 0) {
                 metadata_bytes += idx->max_length_legacy * sizeof(RoaringBitmap *);
                 for (i = 0; i < idx->max_length_legacy; i++) {
                     if (idx->length_bitmaps_legacy[i]) {
@@ -6390,7 +6455,7 @@ biscuit_index_memory_size(PG_FUNCTION_ARGS)
         }
 
         if (idx->length_ge_bitmaps_legacy) {
-            if (idx->max_length_legacy > 0 && idx->max_length_legacy < 1000000) {
+            if (idx->max_length_legacy > 0) {
                 metadata_bytes += idx->max_length_legacy * sizeof(RoaringBitmap *);
                 for (i = 0; i < idx->max_length_legacy; i++) {
                     if (idx->length_ge_bitmaps_legacy[i]) {
@@ -6405,13 +6470,7 @@ biscuit_index_memory_size(PG_FUNCTION_ARGS)
     }
     /* ==================== MULTI-COLUMN INDEX ==================== */
     else if (idx->num_columns > 1) {  /* FIX 8: Add explicit check */
-        /* FIX 9: Sanity check on num_columns */
-        if (idx->num_columns > 100) {
-            elog(WARNING, "Suspiciously large num_columns: %d", idx->num_columns);
-            index_close(index, AccessShareLock);
-            PG_RETURN_INT64(0);
-        }
-        
+                
         /* Column metadata arrays */
         metadata_bytes += idx->num_columns * sizeof(Oid);
         metadata_bytes += idx->num_columns * sizeof(FmgrInfo);

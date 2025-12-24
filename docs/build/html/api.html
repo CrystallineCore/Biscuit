@@ -261,17 +261,6 @@
 <li class="toctree-l3"><a class="reference internal" href="#session-parameters">Session Parameters</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="#data-types">Data Types</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#supported-input-types">Supported Input Types</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="#text-types">Text Types</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#numeric-types">Numeric Types</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#date-time-types">Date/Time Types</a></li>
-<li class="toctree-l4"><a class="reference internal" href="#boolean-type">Boolean Type</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="#unsupported-types">Unsupported Types</a></li>
-</ul>
-</li>
 <li class="toctree-l2"><a class="reference internal" href="#system-views">System Views</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#pg-index">pg_index</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#pg-stat-user-indexes">pg_stat_user_indexes</a></li>
@@ -324,7 +313,6 @@
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#multi-column-support">Multi-Column Support</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#architecture">Architecture</a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#query-execution">Query Execution</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#type-conversion">Type Conversion</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#crud-operations">CRUD Operations</a><ul>
@@ -360,11 +348,6 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#comparison-to-other-approaches">Comparison to Other Approaches</a></li>
-<li class="toctree-l2"><a class="reference internal" href="architecture.html#references">References</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#papers-techniques">Papers &amp; Techniques</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#postgresql-documentation">PostgreSQL Documentation</a></li>
-</ul>
-</li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#appendix-code-navigation">Appendix: Code Navigation</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#important-functions">Important Functions</a></li>
 </ul>
@@ -437,11 +420,6 @@
 <li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-1-user-search-with-email-domain">Pattern 1: User Search with Email Domain</a></li>
 <li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-2-product-search-with-multiple-attributes">Pattern 2: Product Search with Multiple Attributes</a></li>
 <li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-3-log-analysis">Pattern 3: Log Analysis</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#type-conversion-support">Type Conversion Support</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#supported-types">Supported Types</a></li>
-<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#type-conversion-details">Type Conversion Details</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#performance-characteristics">Performance Characteristics</a><ul>
@@ -791,7 +769,6 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#hardware-considerations">Hardware Considerations</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#memory-requirements">Memory Requirements</a></li>
-<li class="toctree-l3"><a class="reference internal" href="performance.html#ssd-vs-hdd">SSD vs. HDD</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#cpu-considerations">CPU Considerations</a></li>
 </ul>
 </li>
@@ -869,7 +846,6 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="faq.html#index-creation">Index Creation</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-do-i-create-a-biscuit-index">How do I create a Biscuit index?</a></li>
-<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-on-non-text-columns">Can I use Biscuit on non-text columns?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-long-does-index-creation-take">How long does index creation take?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-create-partial-biscuit-indexes">Can I create partial Biscuit indexes?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-many-columns-can-i-index">How many columns can I index?</a></li>
@@ -906,7 +882,6 @@
 <li class="toctree-l3"><a class="reference internal" href="faq.html#does-biscuit-work-with-replication">Does Biscuit work with replication?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-in-read-replicas">Can I use Biscuit in read replicas?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-does-biscuit-handle-null-values">How does Biscuit handle NULL values?</a></li>
-<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-with-json-columns">Can I use Biscuit with JSON columns?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#does-biscuit-support-multi-byte-characters-unicode">Does Biscuit support multi-byte characters (Unicode)?</a></li>
 </ul>
 </li>
@@ -1036,7 +1011,7 @@
 <h3>CREATE INDEX<a class="headerlink" href="#create-index" title="Link to this heading"></a></h3>
 <p>Creates a Biscuit index on one or more columns.</p>
 <p><strong>Syntax</strong>:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="k">UNIQUE</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="n">CONCURRENTLY</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="n">index_name</span>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="n">CONCURRENTLY</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="n">index_name</span>
 <span class="w">    </span><span class="k">ON</span><span class="w"> </span><span class="k">table_name</span>
 <span class="w">    </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="w"> </span><span class="k">column_name</span><span class="w"> </span><span class="p">[,</span><span class="w"> </span><span class="p">...]</span><span class="w"> </span><span class="p">)</span>
 <span class="w">    </span><span class="p">[</span><span class="w"> </span><span class="k">WITH</span><span class="w"> </span><span class="p">(</span><span class="w"> </span><span class="n">storage_parameter</span><span class="w"> </span><span class="p">[</span><span class="o">=</span><span class="w"> </span><span class="n">value</span><span class="p">]</span><span class="w"> </span><span class="p">[,</span><span class="w"> </span><span class="p">...</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">]</span>
@@ -1056,11 +1031,6 @@
 <p><strong>Supported Column Types</strong>:</p>
 <ul class="simple">
 <li><p><code class="docutils literal notranslate"><span class="pre">TEXT</span></code>, <code class="docutils literal notranslate"><span class="pre">VARCHAR</span></code>, <code class="docutils literal notranslate"><span class="pre">CHAR</span></code> - Direct indexing</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">INTEGER</span></code>, <code class="docutils literal notranslate"><span class="pre">BIGINT</span></code>, <code class="docutils literal notranslate"><span class="pre">SMALLINT</span></code> - Converted to sortable text</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">FLOAT</span></code>, <code class="docutils literal notranslate"><span class="pre">DOUBLE</span> <span class="pre">PRECISION</span></code> - Converted to scientific notation</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">DATE</span></code> - Converted to sortable integer</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">TIMESTAMP</span></code>, <code class="docutils literal notranslate"><span class="pre">TIMESTAMPTZ</span></code> - Converted to microseconds</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">BOOLEAN</span></code> - Converted to ‘t’ or ‘f’</p></li>
 </ul>
 <p><strong>Examples</strong>:</p>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Single column index</span>
@@ -1079,14 +1049,6 @@
 <span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_active_products</span><span class="w"> </span>
 <span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
 <span class="k">WHERE</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;active&#39;</span><span class="p">;</span>
-
-<span class="c1">-- Index with type conversion</span>
-<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_orders_date</span><span class="w"> </span>
-<span class="k">ON</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">created_at</span><span class="p">);</span>
-
-<span class="c1">-- Index on expression</span>
-<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products_lower</span><span class="w"> </span>
-<span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="k">LOWER</span><span class="p">(</span><span class="n">name</span><span class="p">));</span>
 </pre></div>
 </div>
 </section>
@@ -1339,7 +1301,7 @@ make<span class="w"> </span>clean<span class="w"> </span><span class="o">&amp;&a
 <p><strong>Output</strong>:</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span> <span class="n">extension_version</span> <span class="o">|</span> <span class="n">roaring_version</span> <span class="o">|</span> <span class="n">performance_mode</span>
 <span class="o">-------------------+-----------------+------------------</span>
- <span class="mf">1.0.0</span>             <span class="o">|</span> <span class="mf">2.0.4</span>           <span class="o">|</span> <span class="n">Optimal</span>
+ <span class="mf">2.1.5</span>            <span class="o">|</span> <span class="mf">2.0.4</span>           <span class="o">|</span> <span class="n">Optimal</span>
 </pre></div>
 </div>
 </section>
@@ -1741,7 +1703,6 @@ Formatted memory usage (bytes, KB, MB, or GB).</p>
 <span class="k">SET</span><span class="w"> </span><span class="n">maintenance_work_mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;1GB&#39;</span><span class="p">;</span>
 </pre></div>
 </div>
-<p><strong>Recommendation</strong>: 1GB minimum for large indexes</p>
 </section>
 <hr class="docutils" />
 <section id="effective-cache-size">
@@ -1752,7 +1713,6 @@ Formatted memory usage (bytes, KB, MB, or GB).</p>
 <span class="n">effective_cache_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;12GB&#39;</span>
 </pre></div>
 </div>
-<p><strong>Recommendation</strong>: 75% of system RAM</p>
 </section>
 <hr class="docutils" />
 <section id="enable-seqscan">
@@ -1804,121 +1764,6 @@ Formatted memory usage (bytes, KB, MB, or GB).</p>
 
 <span class="c1">-- Reset all to defaults</span>
 <span class="k">RESET</span><span class="w"> </span><span class="k">ALL</span><span class="p">;</span>
-</pre></div>
-</div>
-</section>
-</section>
-<hr class="docutils" />
-<section id="data-types">
-<h2>Data Types<a class="headerlink" href="#data-types" title="Link to this heading"></a></h2>
-<section id="supported-input-types">
-<h3>Supported Input Types<a class="headerlink" href="#supported-input-types" title="Link to this heading"></a></h3>
-<p>Biscuit indexes can be created on these column types:</p>
-<section id="text-types">
-<h4>Text Types<a class="headerlink" href="#text-types" title="Link to this heading"></a></h4>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Direct support (no conversion)</span>
-<span class="nb">TEXT</span>
-<span class="nb">VARCHAR</span><span class="p">(</span><span class="n">n</span><span class="p">)</span>
-<span class="nb">CHAR</span><span class="p">(</span><span class="n">n</span><span class="p">)</span>
-<span class="n">NAME</span>
-</pre></div>
-</div>
-<p><strong>Storage</strong>: As-is, up to 256 characters</p>
-<p><strong>Example</strong>:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_text</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">table1</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">text_column</span><span class="p">);</span>
-</pre></div>
-</div>
-</section>
-<hr class="docutils" />
-<section id="numeric-types">
-<h4>Numeric Types<a class="headerlink" href="#numeric-types" title="Link to this heading"></a></h4>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Converted to sortable text</span>
-<span class="nb">SMALLINT</span><span class="p">,</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">,</span><span class="w"> </span><span class="nb">BIGINT</span>
-<span class="nb">NUMERIC</span><span class="p">,</span><span class="w"> </span><span class="nb">DECIMAL</span>
-<span class="nb">REAL</span><span class="p">,</span><span class="w"> </span><span class="n">DOUBLE</span><span class="w"> </span><span class="k">PRECISION</span>
-</pre></div>
-</div>
-<p><strong>Storage Format</strong>:</p>
-<ul class="simple">
-<li><p>Integers: <code class="docutils literal notranslate"><span class="pre">+0000000042</span></code> (sign + zero-padded)</p></li>
-<li><p>Floats: <code class="docutils literal notranslate"><span class="pre">1.234567e+02</span></code> (scientific notation)</p></li>
-</ul>
-<p><strong>Example</strong>:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_price</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">price</span><span class="p">);</span>
-
-<span class="c1">-- Query with pattern</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">price</span><span class="p">::</span><span class="nb">TEXT</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;1%&#39;</span><span class="p">;</span>
-</pre></div>
-</div>
-<p><strong>Use Cases</strong>:</p>
-<ul class="simple">
-<li><p>Price ranges: <code class="docutils literal notranslate"><span class="pre">WHERE</span> <span class="pre">price::TEXT</span> <span class="pre">LIKE</span> <span class="pre">'1%'</span></code> (100-199)</p></li>
-<li><p>ID prefixes: <code class="docutils literal notranslate"><span class="pre">WHERE</span> <span class="pre">id::TEXT</span> <span class="pre">LIKE</span> <span class="pre">'2024%'</span></code></p></li>
-</ul>
-</section>
-<hr class="docutils" />
-<section id="date-time-types">
-<h4>Date/Time Types<a class="headerlink" href="#date-time-types" title="Link to this heading"></a></h4>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Converted to sortable integers</span>
-<span class="nb">DATE</span>
-<span class="k">TIMESTAMP</span>
-<span class="n">TIMESTAMPTZ</span>
-<span class="k">TIME</span>
-</pre></div>
-</div>
-<p><strong>Storage Format</strong>:</p>
-<ul class="simple">
-<li><p>DATE: Days since epoch (zero-padded)</p></li>
-<li><p>TIMESTAMP: Microseconds since epoch</p></li>
-</ul>
-<p><strong>Example</strong>:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_created</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">created_at</span><span class="p">);</span>
-
-<span class="c1">-- Query by year-month</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">created_at</span><span class="p">::</span><span class="nb">TEXT</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;2024-01%&#39;</span><span class="p">;</span>
-
-<span class="c1">-- Query by year</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">created_at</span><span class="p">::</span><span class="nb">TEXT</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;2024%&#39;</span><span class="p">;</span>
-</pre></div>
-</div>
-</section>
-<hr class="docutils" />
-<section id="boolean-type">
-<h4>Boolean Type<a class="headerlink" href="#boolean-type" title="Link to this heading"></a></h4>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="nb">BOOLEAN</span>
-</pre></div>
-</div>
-<p><strong>Storage</strong>: <code class="docutils literal notranslate"><span class="pre">'t'</span></code> or <code class="docutils literal notranslate"><span class="pre">'f'</span></code></p>
-<p><strong>Example</strong>:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_active</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">is_active</span><span class="p">);</span>
-
-<span class="c1">-- Query</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">is_active</span><span class="p">::</span><span class="nb">TEXT</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;t&#39;</span><span class="p">;</span>
-</pre></div>
-</div>
-<p><strong>Note</strong>: B-tree is more efficient for boolean columns</p>
-</section>
-</section>
-<hr class="docutils" />
-<section id="unsupported-types">
-<h3>Unsupported Types<a class="headerlink" href="#unsupported-types" title="Link to this heading"></a></h3>
-<p>These types cannot be indexed directly:</p>
-<ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">BYTEA</span></code> - Binary data</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">JSON</span></code>, <code class="docutils literal notranslate"><span class="pre">JSONB</span></code> - Use expression index on text field</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">ARRAY</span></code> - Use expression index on array_to_string</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">GEOMETRY</span></code> (PostGIS) - Not supported</p></li>
-</ul>
-<p><strong>Workarounds</strong>:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- JSON field</span>
-<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_json</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">table1</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">((</span><span class="k">data</span><span class="o">-&gt;&gt;</span><span class="s1">&#39;name&#39;</span><span class="p">));</span>
-
-<span class="c1">-- Array</span>
-<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_array</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">table1</span><span class="w"> </span>
-<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">array_to_string</span><span class="p">(</span><span class="n">tags</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;,&#39;</span><span class="p">));</span>
-
-<span class="c1">-- UUID</span>
-<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_uuid</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">table1</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">id</span><span class="p">::</span><span class="nb">TEXT</span><span class="p">);</span>
 </pre></div>
 </div>
 </section>
