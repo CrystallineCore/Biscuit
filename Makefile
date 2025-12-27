@@ -1,7 +1,7 @@
 # Makefile for biscuit PostgreSQL extension
 
 EXTENSION = biscuit
-EXTVERSION = 2.1.5
+EXTVERSION = 2.2.0
 MODULE_big = biscuit
 OBJS = src/biscuit.o
 DATA = sql/biscuit--1.0.sql

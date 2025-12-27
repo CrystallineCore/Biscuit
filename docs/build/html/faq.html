@@ -280,48 +280,61 @@
 <li class="toctree-l1"><a class="reference internal" href="architecture.html">Biscuit Index Architecture</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#overview">Overview</a></li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#core-design-principles">Core Design Principles</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#position-based-character-indexing">1. <strong>Position-Based Character Indexing</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#utf-8-character-level-position-based-indexing">1. <strong>UTF-8 Character-Level Position-Based Indexing</strong></a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#dual-indexing-forward-reverse">2. <strong>Dual Indexing (Forward + Reverse)</strong></a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#roaring-bitmap-compression">3. <strong>Roaring Bitmap Compression</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#case-sensitive-case-insensitive-support">4. <strong>Case-Sensitive + Case-Insensitive Support</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#dual-case-sensitivity-architecture">4. <strong>Dual Case Sensitivity Architecture</strong></a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#index-structure">Index Structure</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#main-index-object">Main Index Object</a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#character-index-structure">Character Index Structure</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#length-bitmaps">Length Bitmaps</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#length-bitmaps-dual-architecture">Length Bitmaps (Dual Architecture)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="architecture.html#utf-8-character-handling">UTF-8 Character Handling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#character-counting">Character Counting</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#multi-byte-character-indexing">Multi-Byte Character Indexing</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#query-processing">Query Processing</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#pattern-analysis">1. <strong>Pattern Analysis</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#query-optimization">2. <strong>Query Optimization</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#fast-paths">3. <strong>Fast Paths</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#utf-8-aware-pattern-analysis">1. <strong>UTF-8-Aware Pattern Analysis</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#query-optimization-multi-column">2. <strong>Query Optimization (Multi-Column)</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#fast-paths-utf-8-aware">3. <strong>Fast Paths (UTF-8-Aware)</strong></a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#windowed-matching-complex-patterns">4. <strong>Windowed Matching (Complex Patterns)</strong></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="architecture.html#ilike-implementation">ILIKE Implementation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#architecture">Architecture</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#case-folding">Case Folding</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#data-flow">Data Flow</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#performance-optimizations">Performance Optimizations</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#skip-wildcard-intersections">1. <strong>Skip Wildcard Intersections</strong></a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#early-termination">2. <strong>Early Termination</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#tid-sorting-for-sequential-i-o">3. <strong>TID Sorting for Sequential I/O</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#skip-sorting-for-aggregates">4. <strong>Skip Sorting for Aggregates</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#parallel-tid-collection">5. <strong>Parallel TID Collection</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#direct-bitmap-iteration">6. <strong>Direct Bitmap Iteration</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#character-vs-byte-length-separation">3. <strong>Character vs. Byte Length Separation</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#tid-sorting-for-sequential-i-o">4. <strong>TID Sorting for Sequential I/O</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#skip-sorting-for-aggregates">5. <strong>Skip Sorting for Aggregates</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#parallel-tid-collection">6. <strong>Parallel TID Collection</strong></a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#limit-aware-collection">7. <strong>LIMIT-Aware Collection</strong></a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#multi-column-support">Multi-Column Support</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#architecture">Architecture</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#id1">Architecture</a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#query-execution">Query Execution</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#strategy-routing">Strategy Routing</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#crud-operations">CRUD Operations</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#insert">Insert</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#delete-lazy">Delete (Lazy)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#delete-lazy-cleanup">Delete (Lazy + Cleanup)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#update">Update</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#memory-management">Memory Management</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#cache-strategy">Cache Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#size-calculation">Size Calculation</a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#cleanup">Cleanup</a></li>
 </ul>
 </li>
@@ -330,25 +343,17 @@
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#rebuild-strategy">Rebuild Strategy</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="architecture.html#concurrency-mvcc">Concurrency &amp; MVCC</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#isolation">Isolation</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#locking">Locking</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#tombstones">Tombstones</a></li>
-</ul>
-</li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#limitations-tradeoffs">Limitations &amp; Tradeoffs</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#what-biscuit-does-well">What Biscuit Does Well</a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#what-biscuit-doesnt-do">What Biscuit Doesn’t Do</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="architecture.html#future-enhancements">Future Enhancements</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#potential-improvements">Potential Improvements</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#research-directions">Research Directions</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="architecture.html#comparison-to-other-approaches">Comparison to Other Approaches</a></li>
-<li class="toctree-l2"><a class="reference internal" href="architecture.html#appendix-code-navigation">Appendix: Code Navigation</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#important-functions">Important Functions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="architecture.html#code-navigation">Code Navigation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#critical-utf-8-functions">Critical UTF-8 Functions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#index-build">Index Build</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#id2">Query Processing</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#crud">CRUD</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#diagnostics">Diagnostics</a></li>
 </ul>
 </li>
 </ul>
@@ -1564,7 +1569,7 @@ sudo<span class="w"> </span>make<span class="w"> </span>install
 <hr class="docutils" />
 <section id="does-biscuit-support-multi-byte-characters-unicode">
 <h3>Does Biscuit support multi-byte characters (Unicode)?<a class="headerlink" href="#does-biscuit-support-multi-byte-characters-unicode" title="Link to this heading"></a></h3>
-<p><strong>Yes but with caveats</strong>, UTF-8 is supported but not completely tested:</p>
+<p><strong>Yes</strong>, Biscuit supports UTF-8 encoding:</p>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Japanese, Chinese, Arabic, emoji, etc.</span>
 <span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">);</span>
 
@@ -1572,7 +1577,6 @@ sudo<span class="w"> </span>make<span class="w"> </span>install
 <span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%日本%&#39;</span><span class="p">;</span>
 </pre></div>
 </div>
-<p><strong>Note</strong>: Each multi-byte character counts toward the 256 character limit.</p>
 </section>
 </section>
 <hr class="docutils" />

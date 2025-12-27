@@ -678,7 +678,7 @@ WHERE middle_name IS NULL
 
 ### Does Biscuit support multi-byte characters (Unicode)?
 
-**Yes but with caveats**, UTF-8 is supported but not completely tested:
+**Yes**, Biscuit supports UTF-8 encoding:
 
 ```sql
 -- Japanese, Chinese, Arabic, emoji, etc.
@@ -687,8 +687,6 @@ CREATE INDEX idx_name ON products USING biscuit (name);
 -- Query with multi-byte characters
 SELECT * FROM products WHERE name LIKE '%日本%';
 ```
-
-**Note**: Each multi-byte character counts toward the 256 character limit.
 
 ---
 

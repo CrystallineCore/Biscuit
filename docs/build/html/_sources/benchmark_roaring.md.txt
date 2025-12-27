@@ -1,6 +1,6 @@
 # Biscuit Performance Benchmark — Roaring Bitmaps
 
-**A rigorous, publication-grade performance analysis with Roaring Bitmaps optimization**
+**A rigorous, publication-grade performance analysis with Roaring Bitmaps optimization** (as of v2.1.3)
 > Refer Benchmark Environment section to know more about the configurations of the system used to generate these results. 
 
 ---

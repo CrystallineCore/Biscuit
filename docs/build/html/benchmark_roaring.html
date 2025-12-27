@@ -237,17 +237,13 @@
 <li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-build-info">biscuit_build_info()</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-build-info-json">biscuit_build_info_json()</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-check-config">biscuit_check_config()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-stats">biscuit_index_stats()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-memory-size">biscuit_index_memory_size()</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-size-pretty">biscuit_size_pretty()</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#diagnostic-views">Diagnostic Views</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-status">biscuit_status</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="api.html#troubleshooting-guide">Troubleshooting Guide</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="api.html#issue-biscuit-has-roaring-returns-false">Issue: biscuit_has_roaring() returns false</a></li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-stats">biscuit_index_stats()</a></li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-index-memory-size">biscuit_index_memory_size()</a></li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-size-pretty">biscuit_size_pretty()</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#biscuit-memory-usage">biscuit_memory_usage</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#notes">Notes</a></li>
 </ul>
@@ -265,17 +261,6 @@
 <li class="toctree-l3"><a class="reference internal" href="api.html#session-parameters">Session Parameters</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="api.html#data-types">Data Types</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="api.html#supported-input-types">Supported Input Types</a><ul>
-<li class="toctree-l4"><a class="reference internal" href="api.html#text-types">Text Types</a></li>
-<li class="toctree-l4"><a class="reference internal" href="api.html#numeric-types">Numeric Types</a></li>
-<li class="toctree-l4"><a class="reference internal" href="api.html#date-time-types">Date/Time Types</a></li>
-<li class="toctree-l4"><a class="reference internal" href="api.html#boolean-type">Boolean Type</a></li>
-</ul>
-</li>
-<li class="toctree-l3"><a class="reference internal" href="api.html#unsupported-types">Unsupported Types</a></li>
-</ul>
-</li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#system-views">System Views</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="api.html#pg-index">pg_index</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#pg-stat-user-indexes">pg_stat_user_indexes</a></li>
@@ -287,6 +272,7 @@
 <li class="toctree-l3"><a class="reference internal" href="api.html#error-data-type-x-is-not-supported-for-biscuit-index">ERROR: data type X is not supported for biscuit index</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#error-could-not-open-relation-with-oid">ERROR: could not open relation with OID</a></li>
 <li class="toctree-l3"><a class="reference internal" href="api.html#warning-biscuit-index-cache-miss">WARNING: Biscuit: Index cache miss</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api.html#issue-biscuit-has-roaring-returns-false">ISSUE: biscuit_has_roaring() returns false</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="api.html#next-steps">Next Steps</a></li>
@@ -295,49 +281,61 @@
 <li class="toctree-l1"><a class="reference internal" href="architecture.html">Biscuit Index Architecture</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#overview">Overview</a></li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#core-design-principles">Core Design Principles</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#position-based-character-indexing">1. <strong>Position-Based Character Indexing</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#utf-8-character-level-position-based-indexing">1. <strong>UTF-8 Character-Level Position-Based Indexing</strong></a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#dual-indexing-forward-reverse">2. <strong>Dual Indexing (Forward + Reverse)</strong></a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#roaring-bitmap-compression">3. <strong>Roaring Bitmap Compression</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#case-sensitive-case-insensitive-support">4. <strong>Case-Sensitive + Case-Insensitive Support</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#dual-case-sensitivity-architecture">4. <strong>Dual Case Sensitivity Architecture</strong></a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#index-structure">Index Structure</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#main-index-object">Main Index Object</a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#character-index-structure">Character Index Structure</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#length-bitmaps">Length Bitmaps</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#length-bitmaps-dual-architecture">Length Bitmaps (Dual Architecture)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="architecture.html#utf-8-character-handling">UTF-8 Character Handling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#character-counting">Character Counting</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#multi-byte-character-indexing">Multi-Byte Character Indexing</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#query-processing">Query Processing</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#pattern-analysis">1. <strong>Pattern Analysis</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#query-optimization">2. <strong>Query Optimization</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#fast-paths">3. <strong>Fast Paths</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#utf-8-aware-pattern-analysis">1. <strong>UTF-8-Aware Pattern Analysis</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#query-optimization-multi-column">2. <strong>Query Optimization (Multi-Column)</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#fast-paths-utf-8-aware">3. <strong>Fast Paths (UTF-8-Aware)</strong></a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#windowed-matching-complex-patterns">4. <strong>Windowed Matching (Complex Patterns)</strong></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="architecture.html#ilike-implementation">ILIKE Implementation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#architecture">Architecture</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#case-folding">Case Folding</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#data-flow">Data Flow</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#performance-optimizations">Performance Optimizations</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#skip-wildcard-intersections">1. <strong>Skip Wildcard Intersections</strong></a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#early-termination">2. <strong>Early Termination</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#tid-sorting-for-sequential-i-o">3. <strong>TID Sorting for Sequential I/O</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#skip-sorting-for-aggregates">4. <strong>Skip Sorting for Aggregates</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#parallel-tid-collection">5. <strong>Parallel TID Collection</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#direct-bitmap-iteration">6. <strong>Direct Bitmap Iteration</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#character-vs-byte-length-separation">3. <strong>Character vs. Byte Length Separation</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#tid-sorting-for-sequential-i-o">4. <strong>TID Sorting for Sequential I/O</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#skip-sorting-for-aggregates">5. <strong>Skip Sorting for Aggregates</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#parallel-tid-collection">6. <strong>Parallel TID Collection</strong></a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#limit-aware-collection">7. <strong>LIMIT-Aware Collection</strong></a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#multi-column-support">Multi-Column Support</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#architecture">Architecture</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#id1">Architecture</a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#query-execution">Query Execution</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#type-conversion">Type Conversion</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#strategy-routing">Strategy Routing</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#crud-operations">CRUD Operations</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#insert">Insert</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#delete-lazy">Delete (Lazy)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#delete-lazy-cleanup">Delete (Lazy + Cleanup)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#update">Update</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#memory-management">Memory Management</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#cache-strategy">Cache Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#size-calculation">Size Calculation</a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#cleanup">Cleanup</a></li>
 </ul>
 </li>
@@ -346,30 +344,17 @@
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#rebuild-strategy">Rebuild Strategy</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="architecture.html#concurrency-mvcc">Concurrency &amp; MVCC</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#isolation">Isolation</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#locking">Locking</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#tombstones">Tombstones</a></li>
-</ul>
-</li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#limitations-tradeoffs">Limitations &amp; Tradeoffs</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#what-biscuit-does-well">What Biscuit Does Well</a></li>
 <li class="toctree-l3"><a class="reference internal" href="architecture.html#what-biscuit-doesnt-do">What Biscuit Doesn’t Do</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="architecture.html#future-enhancements">Future Enhancements</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#potential-improvements">Potential Improvements</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#research-directions">Research Directions</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="architecture.html#comparison-to-other-approaches">Comparison to Other Approaches</a></li>
-<li class="toctree-l2"><a class="reference internal" href="architecture.html#references">References</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#papers-techniques">Papers &amp; Techniques</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#postgresql-documentation">PostgreSQL Documentation</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="architecture.html#appendix-code-navigation">Appendix: Code Navigation</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#important-functions">Important Functions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="architecture.html#code-navigation">Code Navigation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#critical-utf-8-functions">Critical UTF-8 Functions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#index-build">Index Build</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#id2">Query Processing</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#crud">CRUD</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#diagnostics">Diagnostics</a></li>
 </ul>
 </li>
 </ul>
@@ -440,11 +425,6 @@
 <li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-1-user-search-with-email-domain">Pattern 1: User Search with Email Domain</a></li>
 <li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-2-product-search-with-multiple-attributes">Pattern 2: Product Search with Multiple Attributes</a></li>
 <li class="toctree-l3"><a class="reference internal" href="multicolumn.html#pattern-3-log-analysis">Pattern 3: Log Analysis</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="multicolumn.html#type-conversion-support">Type Conversion Support</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#supported-types">Supported Types</a></li>
-<li class="toctree-l3"><a class="reference internal" href="multicolumn.html#type-conversion-details">Type Conversion Details</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="multicolumn.html#performance-characteristics">Performance Characteristics</a><ul>
@@ -794,7 +774,6 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#hardware-considerations">Hardware Considerations</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#memory-requirements">Memory Requirements</a></li>
-<li class="toctree-l3"><a class="reference internal" href="performance.html#ssd-vs-hdd">SSD vs. HDD</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#cpu-considerations">CPU Considerations</a></li>
 </ul>
 </li>
@@ -872,7 +851,6 @@
 </li>
 <li class="toctree-l2"><a class="reference internal" href="faq.html#index-creation">Index Creation</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-do-i-create-a-biscuit-index">How do I create a Biscuit index?</a></li>
-<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-on-non-text-columns">Can I use Biscuit on non-text columns?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-long-does-index-creation-take">How long does index creation take?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-create-partial-biscuit-indexes">Can I create partial Biscuit indexes?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-many-columns-can-i-index">How many columns can I index?</a></li>
@@ -909,7 +887,6 @@
 <li class="toctree-l3"><a class="reference internal" href="faq.html#does-biscuit-work-with-replication">Does Biscuit work with replication?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-in-read-replicas">Can I use Biscuit in read replicas?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#how-does-biscuit-handle-null-values">How does Biscuit handle NULL values?</a></li>
-<li class="toctree-l3"><a class="reference internal" href="faq.html#can-i-use-biscuit-with-json-columns">Can I use Biscuit with JSON columns?</a></li>
 <li class="toctree-l3"><a class="reference internal" href="faq.html#does-biscuit-support-multi-byte-characters-unicode">Does Biscuit support multi-byte characters (Unicode)?</a></li>
 </ul>
 </li>
@@ -965,7 +942,7 @@
              
   <section id="biscuit-performance-benchmark-roaring-bitmaps">
 <h1>Biscuit Performance Benchmark — Roaring Bitmaps<a class="headerlink" href="#biscuit-performance-benchmark-roaring-bitmaps" title="Link to this heading"></a></h1>
-<p><strong>A rigorous, publication-grade performance analysis with Roaring Bitmaps optimization</strong></p>
+<p><strong>A rigorous, publication-grade performance analysis with Roaring Bitmaps optimization</strong> (as of v2.1.3)</p>
 <blockquote>
 <div><p>Refer Benchmark Environment section to know more about the configurations of the system used to generate these results.</p>
 </div></blockquote>

@@ -9,26 +9,47 @@
 
 ---
 
-## What's new in v2.1.5?
+## What's new in 2.2.0?
 
-### 🔧 Improvements
+### ✨ Major Changes
 
-**Removed arbitrary limits on multi-column indexes**
+**Switched from byte-based to character-based indexing**
 
-*  Biscuit no longer enforces hard-coded limits when creating indexes over multiple columns, allowing more flexible index definitions.
+* Biscuit now indexes **Unicode characters instead of raw UTF-8 bytes**.
+* Eliminates incorrect behavior caused by multi-byte UTF-8 sequences being treated as independent index entries.
+* Index structure now aligns with PostgreSQL’s character semantics rather than byte-level representation.
 
-### 🛡️ Safety & Correctness
+### 🛠️ UTF-8 & Internationalization Improvements
 
-**Restricted indexing to text-based datatypes**
+**Enhanced UTF-8 compatibility**
 
-* Support for non-text datatypes has been removed. Biscuit now explicitly enforces text-only columns to ensure correct operator semantics, planner behavior, and index consistency.
+* Improved handling of multi-byte UTF-8 characters (e.g., accented Latin characters, non-Latin scripts).
+* Index lookups, comparisons, and filtering now operate on logical characters rather than byte fragments.
 
-**Explicit error for expression indexing**
+**Correct UTF-8 support for `ILIKE`**
 
-*  Biscuit now raises a clear error when users attempt to create an index on an expression (e.g., `lower(col)`), which is not currently supported.
-  This prevents silent misconfiguration and enforces Biscuit’s column-based indexing semantics.
+* `ILIKE` now works reliably with UTF-8 text, including case-insensitive matching on multi-byte characters.
+* Fixes previously incorrect matches and missed results in non-ASCII datasets.
 
-> **Note:** Biscuit currently indexes **base columns only**. This may be revisited in future versions.
+### 🐛 CRUD Correctness Fixes
+
+**Resolved multiple CRUD-related bugs**
+
+* Fixed inconsistencies during **INSERT**, **UPDATE**, and **DELETE** operations that could leave the index in an incorrect state.
+* Ensured index entries are properly added, updated, and removed in sync with heap tuples.
+* Improved stability under mixed read/write workloads.
+
+### 🛡️ Correctness & Planner Consistency
+
+* Improved alignment between Biscuit’s index behavior and PostgreSQL’s text semantics.
+* Reduced false positives during pattern matching and eliminated character-splitting artifacts.
+* More predictable planner behavior due to improved index consistency.
+
+### 🔧 Internal Refactoring
+
+* Refactored index layout and lookup logic to support character-aware traversal.
+* Hardened UTF-8 decoding paths and edge-case handling.
+* Simplified internal invariants for better maintainability and debugging.
 
 ---
 
@@ -649,62 +670,6 @@ SET log_min_messages = DEBUG1;
 -- Now run queries to see Biscuit's internal logs
 SELECT * FROM test WHERE name LIKE '%pattern%';
 ```
-
----
-
-##  **Architecture Details**
-
-### **Index Structure**
-
-```
-BiscuitIndex
-├── num_columns: int
-├── column_indices[]: ColumnIndex[]
-│   ├── pos_idx[256]: CharIndex    // Forward position bitmaps
-│   │   └── entries[]: PosEntry[]
-│   │       ├── pos: int
-│   │       └── bitmap: RoaringBitmap
-│   ├── neg_idx[256]: CharIndex    // Backward position bitmaps
-│   ├── char_cache[256]: RoaringBitmap  // Character existence
-│   ├── length_bitmaps[]: RoaringBitmap[]  // Exact lengths
-│   └── length_ge_bitmaps[]: RoaringBitmap[]  // Min lengths
-├── insensitive_column_indices[]: ColumnIndex[]
-│   ├── insensitive_pos_idx[256]: CharIndex    // Forward position bitmaps
-│   │   └── entries[]: PosEntry[]
-│   │       ├── pos: int
-│   │       └── bitmap: RoaringBitmap
-│   ├── insensitive_neg_idx[256]: CharIndex    // Backward position bitmaps
-│   └── insensitive_char_cache[256]: RoaringBitmap  // Character existence
-├── tids[]: ItemPointerData[]      // Record TIDs
-├── column_data_cache[][]: char**  // Cached string data
-└── tombstones: RoaringBitmap      // Deleted records
-```
-
-### **Query Execution Flow**
-
-```
-1. biscuit_rescan()
-   ├─> Parse LIKE pattern into parts
-   ├─> Analyze pattern selectivity (multi-column)
-   ├─> Reorder predicates by priority
-   └─> For each predicate:
-       ├─> biscuit_query_column_pattern()
-       │   ├─> Check fast paths (empty, %, pure wildcards)
-       │   ├─> Match pattern parts using bitmaps
-       │   └─> Return candidate bitmap
-       └─> Intersect with previous candidates
-
-2. biscuit_collect_tids_optimized()
-   ├─> Detect aggregate vs. regular query
-   ├─> Estimate LIMIT hint
-   ├─> Collect TIDs from final bitmap
-   ├─> Sort if needed (skip for aggregates)
-   └─> Apply LIMIT early termination
-
-3. biscuit_gettuple() or biscuit_getbitmap()
-   └─> Return results to PostgreSQL executor
-```
-
 
 ---
 

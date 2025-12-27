@@ -281,48 +281,61 @@
 <li class="toctree-l1 current"><a class="current reference internal" href="#">Biscuit Index Architecture</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="#overview">Overview</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#core-design-principles">Core Design Principles</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#position-based-character-indexing">1. <strong>Position-Based Character Indexing</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#utf-8-character-level-position-based-indexing">1. <strong>UTF-8 Character-Level Position-Based Indexing</strong></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#dual-indexing-forward-reverse">2. <strong>Dual Indexing (Forward + Reverse)</strong></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#roaring-bitmap-compression">3. <strong>Roaring Bitmap Compression</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#case-sensitive-case-insensitive-support">4. <strong>Case-Sensitive + Case-Insensitive Support</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#dual-case-sensitivity-architecture">4. <strong>Dual Case Sensitivity Architecture</strong></a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#index-structure">Index Structure</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#main-index-object">Main Index Object</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#character-index-structure">Character Index Structure</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#length-bitmaps">Length Bitmaps</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#length-bitmaps-dual-architecture">Length Bitmaps (Dual Architecture)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#utf-8-character-handling">UTF-8 Character Handling</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#character-counting">Character Counting</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#multi-byte-character-indexing">Multi-Byte Character Indexing</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#query-processing">Query Processing</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#pattern-analysis">1. <strong>Pattern Analysis</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#query-optimization">2. <strong>Query Optimization</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#fast-paths">3. <strong>Fast Paths</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#utf-8-aware-pattern-analysis">1. <strong>UTF-8-Aware Pattern Analysis</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#query-optimization-multi-column">2. <strong>Query Optimization (Multi-Column)</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#fast-paths-utf-8-aware">3. <strong>Fast Paths (UTF-8-Aware)</strong></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#windowed-matching-complex-patterns">4. <strong>Windowed Matching (Complex Patterns)</strong></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#ilike-implementation">ILIKE Implementation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#architecture">Architecture</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#case-folding">Case Folding</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#data-flow">Data Flow</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#performance-optimizations">Performance Optimizations</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#skip-wildcard-intersections">1. <strong>Skip Wildcard Intersections</strong></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#early-termination">2. <strong>Early Termination</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#tid-sorting-for-sequential-i-o">3. <strong>TID Sorting for Sequential I/O</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#skip-sorting-for-aggregates">4. <strong>Skip Sorting for Aggregates</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#parallel-tid-collection">5. <strong>Parallel TID Collection</strong></a></li>
-<li class="toctree-l3"><a class="reference internal" href="#direct-bitmap-iteration">6. <strong>Direct Bitmap Iteration</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#character-vs-byte-length-separation">3. <strong>Character vs. Byte Length Separation</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#tid-sorting-for-sequential-i-o">4. <strong>TID Sorting for Sequential I/O</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#skip-sorting-for-aggregates">5. <strong>Skip Sorting for Aggregates</strong></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#parallel-tid-collection">6. <strong>Parallel TID Collection</strong></a></li>
 <li class="toctree-l3"><a class="reference internal" href="#limit-aware-collection">7. <strong>LIMIT-Aware Collection</strong></a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#multi-column-support">Multi-Column Support</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#architecture">Architecture</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id1">Architecture</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#query-execution">Query Execution</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#strategy-routing">Strategy Routing</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#crud-operations">CRUD Operations</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#insert">Insert</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#delete-lazy">Delete (Lazy)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#delete-lazy-cleanup">Delete (Lazy + Cleanup)</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#update">Update</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#memory-management">Memory Management</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#cache-strategy">Cache Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#size-calculation">Size Calculation</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#cleanup">Cleanup</a></li>
 </ul>
 </li>
@@ -331,25 +344,17 @@
 <li class="toctree-l3"><a class="reference internal" href="#rebuild-strategy">Rebuild Strategy</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="#concurrency-mvcc">Concurrency &amp; MVCC</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#isolation">Isolation</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#locking">Locking</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#tombstones">Tombstones</a></li>
-</ul>
-</li>
 <li class="toctree-l2"><a class="reference internal" href="#limitations-tradeoffs">Limitations &amp; Tradeoffs</a><ul>
 <li class="toctree-l3"><a class="reference internal" href="#what-biscuit-does-well">What Biscuit Does Well</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#what-biscuit-doesnt-do">What Biscuit Doesn’t Do</a></li>
 </ul>
 </li>
-<li class="toctree-l2"><a class="reference internal" href="#future-enhancements">Future Enhancements</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#potential-improvements">Potential Improvements</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#research-directions">Research Directions</a></li>
-</ul>
-</li>
-<li class="toctree-l2"><a class="reference internal" href="#comparison-to-other-approaches">Comparison to Other Approaches</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#appendix-code-navigation">Appendix: Code Navigation</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#important-functions">Important Functions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#code-navigation">Code Navigation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#critical-utf-8-functions">Critical UTF-8 Functions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#index-build">Index Build</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#id2">Query Processing</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#crud">CRUD</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#diagnostics">Diagnostics</a></li>
 </ul>
 </li>
 </ul>
@@ -939,22 +944,27 @@
 <h1>Biscuit Index Architecture<a class="headerlink" href="#biscuit-index-architecture" title="Link to this heading"></a></h1>
 <section id="overview">
 <h2>Overview<a class="headerlink" href="#overview" title="Link to this heading"></a></h2>
-<p>Biscuit is a PostgreSQL index access method (AM) optimized for pattern matching operations (<code class="docutils literal notranslate"><span class="pre">LIKE</span></code>, <code class="docutils literal notranslate"><span class="pre">ILIKE</span></code>, <code class="docutils literal notranslate"><span class="pre">NOT</span> <span class="pre">LIKE</span></code>, <code class="docutils literal notranslate"><span class="pre">NOT</span> <span class="pre">ILIKE</span></code>). It uses compressed bitmap indices with character-position indexing to achieve faster query performance on pattern matching workloads.</p>
+<p>Biscuit is a PostgreSQL index access method (AM) optimized for pattern matching operations (<code class="docutils literal notranslate"><span class="pre">LIKE</span></code>, <code class="docutils literal notranslate"><span class="pre">ILIKE</span></code>, <code class="docutils literal notranslate"><span class="pre">NOT</span> <span class="pre">LIKE</span></code>, <code class="docutils literal notranslate"><span class="pre">NOT</span> <span class="pre">ILIKE</span></code>). It uses compressed bitmap indices with <strong>UTF-8-aware character-position indexing</strong> to achieve faster query performance on pattern matching workloads.</p>
 </section>
 <section id="core-design-principles">
 <h2>Core Design Principles<a class="headerlink" href="#core-design-principles" title="Link to this heading"></a></h2>
-<section id="position-based-character-indexing">
-<h3>1. <strong>Position-Based Character Indexing</strong><a class="headerlink" href="#position-based-character-indexing" title="Link to this heading"></a></h3>
-<p>Instead of traditional B-tree or GIN approaches, Biscuit maintains bitmaps for each character at each position:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>String: &quot;hello&quot;
-Position 0: &#39;h&#39; → bitmap of record IDs
-Position 1: &#39;e&#39; → bitmap of record IDs  
-Position 2: &#39;l&#39; → bitmap of record IDs
-Position 3: &#39;l&#39; → bitmap of record IDs
-Position 4: &#39;o&#39; → bitmap of record IDs
+<section id="utf-8-character-level-position-based-indexing">
+<h3>1. <strong>UTF-8 Character-Level Position-Based Indexing</strong><a class="headerlink" href="#utf-8-character-level-position-based-indexing" title="Link to this heading"></a></h3>
+<p>Biscuit indexes strings at the <strong>character level</strong>, not byte level, correctly handling multi-byte UTF-8 sequences:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>String: &quot;café&quot; = [63 61 66 C3 A9] (5 bytes)
+Character 0: &#39;c&#39; → bitmap of record IDs
+Character 1: &#39;a&#39; → bitmap of record IDs  
+Character 2: &#39;f&#39; → bitmap of record IDs
+Character 3: &#39;é&#39; (bytes C3 A9) → bitmap of record IDs
 </pre></div>
 </div>
-<p>This enables O(1) lookup for any character at any position, making pattern matching extremely fast.</p>
+<p><strong>Key Innovation</strong>: Multi-byte UTF-8 characters are indexed with <strong>ALL their bytes at the SAME character position</strong>. This enables correct pattern matching for international text while maintaining O(1) character lookup.</p>
+<p><strong>Why this matters:</strong></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">'café'</span></code> has 4 <strong>characters</strong> but 5 <strong>bytes</strong></p></li>
+<li><p>Pattern <code class="docutils literal notranslate"><span class="pre">'caf_'</span></code> (4 characters) should match <code class="docutils literal notranslate"><span class="pre">'café'</span></code></p></li>
+<li><p>Character counts are used for length filters, not byte counts</p></li>
+</ul>
 </section>
 <section id="dual-indexing-forward-reverse">
 <h3>2. <strong>Dual Indexing (Forward + Reverse)</strong><a class="headerlink" href="#dual-indexing-forward-reverse" title="Link to this heading"></a></h3>
@@ -965,8 +975,8 @@ Position 4: &#39;o&#39; → bitmap of record IDs
 </ul>
 <p>This allows anchored patterns to be resolved instantly:</p>
 <ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">'abc%'</span></code> → Query positive index at positions 0, 1, 2</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">'%xyz'</span></code> → Query negative index at positions -3, -2, -1</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">'abc%'</span></code> → Query positive index at character positions 0, 1, 2</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">'%xyz'</span></code> → Query negative index at character positions -3, -2, -1</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">'abc%xyz'</span></code> → Query both indices and intersect results</p></li>
 </ul>
 </section>
@@ -977,30 +987,40 @@ Position 4: &#39;o&#39; → bitmap of record IDs
 <li><p><strong>Run-length encoding</strong> for consecutive IDs</p></li>
 <li><p><strong>Array containers</strong> for sparse data</p></li>
 <li><p><strong>Bitmap containers</strong> for dense data</p></li>
-<li><p>Typical compression: 10-100x vs. raw bitmaps</p></li>
 </ul>
 </section>
-<section id="case-sensitive-case-insensitive-support">
-<h3>4. <strong>Case-Sensitive + Case-Insensitive Support</strong><a class="headerlink" href="#case-sensitive-case-insensitive-support" title="Link to this heading"></a></h3>
-<p>Each column maintains <strong>two parallel index structures</strong>:</p>
+<section id="dual-case-sensitivity-architecture">
+<h3>4. <strong>Dual Case Sensitivity Architecture</strong><a class="headerlink" href="#dual-case-sensitivity-architecture" title="Link to this heading"></a></h3>
+<p>Each column maintains <strong>two completely separate index structures</strong> with their own length bitmaps:</p>
 <div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">ColumnIndex</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="c1">// Case-sensitive (LIKE, NOT LIKE)</span>
-<span class="w">    </span><span class="n">CharIndex</span><span class="w"> </span><span class="n">pos_idx</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span><span class="w">        </span><span class="c1">// Forward positions</span>
-<span class="w">    </span><span class="n">CharIndex</span><span class="w"> </span><span class="n">neg_idx</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span><span class="w">        </span><span class="c1">// Reverse positions</span>
-<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">char_cache</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span>
+<span class="w">    </span><span class="c1">// ==================== CASE-SENSITIVE (LIKE, NOT LIKE) ====================</span>
+<span class="w">    </span><span class="n">CharIndex</span><span class="w"> </span><span class="n">pos_idx</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span><span class="w">               </span><span class="c1">// Forward character positions</span>
+<span class="w">    </span><span class="n">CharIndex</span><span class="w"> </span><span class="n">neg_idx</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span><span class="w">               </span><span class="c1">// Reverse character positions</span>
+<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">char_cache</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span><span class="w">       </span><span class="c1">// Character presence cache</span>
+<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">**</span><span class="n">length_bitmaps</span><span class="p">;</span><span class="w">       </span><span class="c1">// Exact length (based on original string)</span>
+<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">**</span><span class="n">length_ge_bitmaps</span><span class="p">;</span><span class="w">    </span><span class="c1">// Length &gt;= N (based on original string)</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">max_length</span><span class="p">;</span><span class="w">                       </span><span class="c1">// Max character count (original)</span>
 <span class="w">    </span>
-<span class="w">    </span><span class="c1">// Case-insensitive (ILIKE, NOT ILIKE)</span>
-<span class="w">    </span><span class="n">CharIndex</span><span class="w"> </span><span class="n">pos_idx_lower</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span><span class="w">  </span><span class="c1">// Lowercase forward</span>
-<span class="w">    </span><span class="n">CharIndex</span><span class="w"> </span><span class="n">neg_idx_lower</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span><span class="w">  </span><span class="c1">// Lowercase reverse</span>
-<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">char_cache_lower</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span>
-<span class="w">    </span>
-<span class="w">    </span><span class="c1">// Shared length metadata</span>
-<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">**</span><span class="n">length_bitmaps</span><span class="p">;</span><span class="w">    </span><span class="c1">// Exact length</span>
-<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">**</span><span class="n">length_ge_bitmaps</span><span class="p">;</span><span class="w"> </span><span class="c1">// Length &gt;= N</span>
+<span class="w">    </span><span class="c1">// ==================== CASE-INSENSITIVE (ILIKE, NOT ILIKE) ====================</span>
+<span class="w">    </span><span class="n">CharIndex</span><span class="w"> </span><span class="n">pos_idx_lower</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span><span class="w">         </span><span class="c1">// Lowercase forward positions</span>
+<span class="w">    </span><span class="n">CharIndex</span><span class="w"> </span><span class="n">neg_idx_lower</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span><span class="w">         </span><span class="c1">// Lowercase reverse positions</span>
+<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">char_cache_lower</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span><span class="w"> </span><span class="c1">// Lowercase character cache</span>
+<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">**</span><span class="n">length_bitmaps_lower</span><span class="p">;</span><span class="w">    </span><span class="c1">// Exact length (lowercase string)</span>
+<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">**</span><span class="n">length_ge_bitmaps_lower</span><span class="p">;</span><span class="w"> </span><span class="c1">// Length &gt;= N (lowercase string)</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">max_length_lower</span><span class="p">;</span><span class="w">                 </span><span class="c1">// Max character count (lowercase)</span>
 <span class="p">}</span><span class="w"> </span><span class="n">ColumnIndex</span><span class="p">;</span>
 </pre></div>
 </div>
-<p>Lowercase data is stored separately, enabling fast ILIKE queries without runtime case conversion.</p>
+<p><strong>Critical Design Decision</strong>: Case-sensitive and case-insensitive indices have <strong>separate length bitmaps</strong> because lowercasing can change character counts (e.g., German <code class="docutils literal notranslate"><span class="pre">'ß'</span></code> → <code class="docutils literal notranslate"><span class="pre">'ss'</span></code>).</p>
+<p><strong>Why separate data caches?</strong></p>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Original data (for LIKE)</span>
+<span class="n">data_cache</span><span class="p">[</span><span class="n">rec_idx</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">&quot;Café&quot;</span><span class="p">;</span><span class="w">  </span><span class="c1">// 4 characters</span>
+
+<span class="c1">// Lowercase data (for ILIKE)</span>
+<span class="n">data_cache_lower</span><span class="p">[</span><span class="n">rec_idx</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">biscuit_str_tolower</span><span class="p">(</span><span class="s">&quot;Café&quot;</span><span class="p">);</span><span class="w">  </span><span class="c1">// &quot;café&quot;, still 4 chars</span>
+</pre></div>
+</div>
+<p>Lowercase conversion is done <strong>once during index build</strong> using PostgreSQL’s locale-aware <code class="docutils literal notranslate"><span class="pre">lower()</span></code> function, making ILIKE queries as fast as LIKE.</p>
 </section>
 </section>
 <hr class="docutils" />
@@ -1009,16 +1029,17 @@ Position 4: &#39;o&#39; → bitmap of record IDs
 <section id="main-index-object">
 <h3>Main Index Object<a class="headerlink" href="#main-index-object" title="Link to this heading"></a></h3>
 <div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">BiscuitIndex</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="c1">// Multi-column support</span>
+<span class="w">    </span><span class="c1">// ==================== MULTI-COLUMN SUPPORT ====================</span>
 <span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">num_columns</span><span class="p">;</span>
 <span class="w">    </span><span class="n">Oid</span><span class="w"> </span><span class="o">*</span><span class="n">column_types</span><span class="p">;</span>
 <span class="w">    </span><span class="n">FmgrInfo</span><span class="w"> </span><span class="o">*</span><span class="n">output_funcs</span><span class="p">;</span>
-<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">***</span><span class="n">column_data_cache</span><span class="p">;</span><span class="w">  </span><span class="c1">// [col][record]</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">***</span><span class="n">column_data_cache</span><span class="p">;</span><span class="w">      </span><span class="c1">// [col][record] - original data</span>
 <span class="w">    </span>
 <span class="w">    </span><span class="c1">// Per-column indices (multi-column mode)</span>
-<span class="w">    </span><span class="n">ColumnIndex</span><span class="w"> </span><span class="o">*</span><span class="n">column_indices</span><span class="p">;</span>
+<span class="w">    </span><span class="n">ColumnIndex</span><span class="w"> </span><span class="o">*</span><span class="n">column_indices</span><span class="p">;</span><span class="w">    </span><span class="c1">// Each column has dual indices</span>
 <span class="w">    </span>
-<span class="w">    </span><span class="c1">// Legacy single-column indices (backward compatibility)</span>
+<span class="w">    </span><span class="c1">// ==================== SINGLE-COLUMN LEGACY (BACKWARD COMPAT) ====================</span>
+<span class="w">    </span><span class="c1">// Case-sensitive</span>
 <span class="w">    </span><span class="n">CharIndex</span><span class="w"> </span><span class="n">pos_idx_legacy</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span>
 <span class="w">    </span><span class="n">CharIndex</span><span class="w"> </span><span class="n">neg_idx_legacy</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span>
 <span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">char_cache_legacy</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span>
@@ -1026,26 +1047,30 @@ Position 4: &#39;o&#39; → bitmap of record IDs
 <span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">**</span><span class="n">length_ge_bitmaps_legacy</span><span class="p">;</span>
 <span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">max_length_legacy</span><span class="p">;</span>
 <span class="w">    </span>
-<span class="w">    </span><span class="c1">// Case-insensitive single-column</span>
+<span class="w">    </span><span class="c1">// Case-insensitive</span>
 <span class="w">    </span><span class="n">CharIndex</span><span class="w"> </span><span class="n">pos_idx_lower</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span>
 <span class="w">    </span><span class="n">CharIndex</span><span class="w"> </span><span class="n">neg_idx_lower</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span>
 <span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">char_cache_lower</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span>
-<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">**</span><span class="n">data_cache_lower</span><span class="p">;</span>
+<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">**</span><span class="n">length_bitmaps_lower</span><span class="p">;</span>
+<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">**</span><span class="n">length_ge_bitmaps_lower</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">max_length_lower</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">**</span><span class="n">data_cache_lower</span><span class="p">;</span><span class="w">        </span><span class="c1">// Lowercase data cache</span>
 <span class="w">    </span>
-<span class="w">    </span><span class="c1">// Record storage</span>
-<span class="w">    </span><span class="n">ItemPointerData</span><span class="w"> </span><span class="o">*</span><span class="n">tids</span><span class="p">;</span><span class="w">       </span><span class="c1">// Heap tuple IDs</span>
-<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">**</span><span class="n">data_cache</span><span class="p">;</span><span class="w">           </span><span class="c1">// Original strings</span>
+<span class="w">    </span><span class="c1">// ==================== RECORD STORAGE ====================</span>
+<span class="w">    </span><span class="n">ItemPointerData</span><span class="w"> </span><span class="o">*</span><span class="n">tids</span><span class="p">;</span><span class="w">          </span><span class="c1">// Heap tuple IDs</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">**</span><span class="n">data_cache</span><span class="p">;</span><span class="w">              </span><span class="c1">// Original strings (case-sensitive)</span>
 <span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">num_records</span><span class="p">;</span>
 <span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">capacity</span><span class="p">;</span>
-<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">max_len</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">max_len</span><span class="p">;</span><span class="w">                    </span><span class="c1">// Max character count (case-sensitive)</span>
 <span class="w">    </span>
-<span class="w">    </span><span class="c1">// CRUD support</span>
-<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">tombstones</span><span class="p">;</span><span class="w">   </span><span class="c1">// Deleted records</span>
-<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="o">*</span><span class="n">free_list</span><span class="p">;</span><span class="w">         </span><span class="c1">// Reusable slots</span>
+<span class="w">    </span><span class="c1">// ==================== CRUD SUPPORT ====================</span>
+<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">tombstones</span><span class="p">;</span><span class="w">      </span><span class="c1">// Deleted records</span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="o">*</span><span class="n">free_list</span><span class="p">;</span><span class="w">            </span><span class="c1">// Reusable slots</span>
 <span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">free_count</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">free_capacity</span><span class="p">;</span>
 <span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">tombstone_count</span><span class="p">;</span>
 <span class="w">    </span>
-<span class="w">    </span><span class="c1">// Statistics</span>
+<span class="w">    </span><span class="c1">// ==================== STATISTICS ====================</span>
 <span class="w">    </span><span class="n">int64</span><span class="w"> </span><span class="n">insert_count</span><span class="p">;</span>
 <span class="w">    </span><span class="n">int64</span><span class="w"> </span><span class="n">update_count</span><span class="p">;</span>
 <span class="w">    </span><span class="n">int64</span><span class="w"> </span><span class="n">delete_count</span><span class="p">;</span>
@@ -1056,8 +1081,8 @@ Position 4: &#39;o&#39; → bitmap of record IDs
 <section id="character-index-structure">
 <h3>Character Index Structure<a class="headerlink" href="#character-index-structure" title="Link to this heading"></a></h3>
 <div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">pos</span><span class="p">;</span><span class="w">                </span><span class="c1">// Position (or negative offset)</span>
-<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">bitmap</span><span class="p">;</span><span class="w">  </span><span class="c1">// Record IDs matching this char/pos</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">pos</span><span class="p">;</span><span class="w">                        </span><span class="c1">// Character position (or negative offset)</span>
+<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">bitmap</span><span class="p">;</span><span class="w">          </span><span class="c1">// Record IDs matching this char/pos</span>
 <span class="p">}</span><span class="w"> </span><span class="n">PosEntry</span><span class="p">;</span>
 
 <span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
@@ -1067,56 +1092,156 @@ Position 4: &#39;o&#39; → bitmap of record IDs
 <span class="p">}</span><span class="w"> </span><span class="n">CharIndex</span><span class="p">;</span>
 </pre></div>
 </div>
-<p>Each character (0-255) has a <code class="docutils literal notranslate"><span class="pre">CharIndex</span></code> containing all positions where it appears.</p>
+<p>Each character (0-255) has a <code class="docutils literal notranslate"><span class="pre">CharIndex</span></code> containing all <strong>character positions</strong> where it appears.</p>
 </section>
-<section id="length-bitmaps">
-<h3>Length Bitmaps<a class="headerlink" href="#length-bitmaps" title="Link to this heading"></a></h3>
-<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Exact length queries: &quot;___&quot; (3 underscores)</span>
-<span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">length_bitmaps</span><span class="p">[</span><span class="n">max_len</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">];</span>
+<section id="length-bitmaps-dual-architecture">
+<h3>Length Bitmaps (Dual Architecture)<a class="headerlink" href="#length-bitmaps-dual-architecture" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// ==================== CASE-SENSITIVE LENGTH BITMAPS ====================</span>
+<span class="c1">// Exact length queries: &quot;___&quot; (3 underscores)</span>
+<span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">length_bitmaps</span><span class="p">[</span><span class="n">max_length</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">];</span>
 
 <span class="c1">// Range length queries: &quot;%___&quot; (length &gt;= 3)</span>
-<span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">length_ge_bitmaps</span><span class="p">[</span><span class="n">max_len</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">];</span>
+<span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">length_ge_bitmaps</span><span class="p">[</span><span class="n">max_length</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">];</span>
+
+<span class="c1">// ==================== CASE-INSENSITIVE LENGTH BITMAPS (SEPARATE!) ====================</span>
+<span class="c1">// Exact lowercase length: ILIKE &#39;___&#39;</span>
+<span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">length_bitmaps_lower</span><span class="p">[</span><span class="n">max_length_lower</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">];</span>
+
+<span class="c1">// Lowercase length range: ILIKE &#39;%___&#39;</span>
+<span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">length_ge_bitmaps_lower</span><span class="p">[</span><span class="n">max_length_lower</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">];</span>
 </pre></div>
 </div>
-<p>These enable instant resolution of pure wildcard patterns.</p>
+<p><strong>Why separate?</strong> Lowercasing can change character counts:</p>
+<ul class="simple">
+<li><p>German: <code class="docutils literal notranslate"><span class="pre">'ß'</span></code> (1 char) → <code class="docutils literal notranslate"><span class="pre">'ss'</span></code> (2 chars)</p></li>
+<li><p>Turkish: <code class="docutils literal notranslate"><span class="pre">'İ'</span></code> (1 char) → <code class="docutils literal notranslate"><span class="pre">'i̇'</span></code> (potentially 2 chars depending on locale)</p></li>
+</ul>
+<p>Each set of length bitmaps is populated based on the <strong>actual character count</strong> of the indexed strings (original or lowercase).</p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="utf-8-character-handling">
+<h2>UTF-8 Character Handling<a class="headerlink" href="#utf-8-character-handling" title="Link to this heading"></a></h2>
+<section id="character-counting">
+<h3>Character Counting<a class="headerlink" href="#character-counting" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="k">static</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span>
+<span class="nf">biscuit_utf8_char_count</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">str</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">byte_len</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">char_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">pos</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">byte_len</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">char_len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">biscuit_utf8_char_length</span><span class="p">((</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">char</span><span class="p">)</span><span class="n">str</span><span class="p">[</span><span class="n">pos</span><span class="p">]);</span>
+<span class="w">        </span>
+<span class="w">        </span><span class="c1">// Safety: Don&#39;t read past buffer</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">pos</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">char_len</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">byte_len</span><span class="p">)</span>
+<span class="w">            </span><span class="n">char_len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">byte_len</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">pos</span><span class="p">;</span>
+<span class="w">        </span>
+<span class="w">        </span><span class="n">pos</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">char_len</span><span class="p">;</span>
+<span class="w">        </span><span class="n">char_count</span><span class="o">++</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">char_count</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p><strong>Example:</strong></p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>&quot;café&quot; = [0x63 0x61 0x66 0xC3 0xA9]
+         &#39;c&#39;  &#39;a&#39;  &#39;f&#39;  &#39;é&#39; (multi-byte)
+         
+byte_len = 5
+char_count = 4  ✓ Correct!
+</pre></div>
+</div>
+</section>
+<section id="multi-byte-character-indexing">
+<h3>Multi-Byte Character Indexing<a class="headerlink" href="#multi-byte-character-indexing" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Index UTF-8 character at character position</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">byte_pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">char_pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+
+<span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">byte_pos</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">byte_len</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="n">first_byte</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">str</span><span class="p">[</span><span class="n">byte_pos</span><span class="p">];</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">char_len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">biscuit_utf8_char_length</span><span class="p">(</span><span class="n">first_byte</span><span class="p">);</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// ✓ CRITICAL: Index ALL bytes at SAME character position</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">b</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">b</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">char_len</span><span class="p">;</span><span class="w"> </span><span class="n">b</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="n">byte_val</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">str</span><span class="p">[</span><span class="n">byte_pos</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">b</span><span class="p">];</span>
+<span class="w">        </span>
+<span class="w">        </span><span class="c1">// Positive position</span>
+<span class="w">        </span><span class="n">bitmap</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_pos_bitmap</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">byte_val</span><span class="p">,</span><span class="w"> </span><span class="n">char_pos</span><span class="p">);</span>
+<span class="w">        </span><span class="n">bitmap_add</span><span class="p">(</span><span class="n">bitmap</span><span class="p">,</span><span class="w"> </span><span class="n">rec_idx</span><span class="p">);</span>
+<span class="w">        </span>
+<span class="w">        </span><span class="c1">// Negative position</span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">remaining_chars</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">utf8_char_count</span><span class="p">(</span><span class="n">str</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">byte_pos</span><span class="p">,</span><span class="w"> </span><span class="n">byte_len</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">byte_pos</span><span class="p">);</span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">neg_offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">-</span><span class="n">remaining_chars</span><span class="p">;</span>
+<span class="w">        </span><span class="n">bitmap</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_neg_bitmap</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">byte_val</span><span class="p">,</span><span class="w"> </span><span class="n">neg_offset</span><span class="p">);</span>
+<span class="w">        </span><span class="n">bitmap_add</span><span class="p">(</span><span class="n">bitmap</span><span class="p">,</span><span class="w"> </span><span class="n">rec_idx</span><span class="p">);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="n">byte_pos</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">char_len</span><span class="p">;</span>
+<span class="w">    </span><span class="n">char_pos</span><span class="o">++</span><span class="p">;</span><span class="w">  </span><span class="c1">// Increment ONCE per character</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p><strong>Example: Indexing “café”</strong></p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>char_pos=0: &#39;c&#39; (0x63) → pos_bitmap[0x63][0]
+char_pos=1: &#39;a&#39; (0x61) → pos_bitmap[0x61][1]
+char_pos=2: &#39;f&#39; (0x66) → pos_bitmap[0x66][2]
+char_pos=3: &#39;é&#39; (0xC3 0xA9) → pos_bitmap[0xC3][3] AND pos_bitmap[0xA9][3]
+                              ^^^^^^^^^^^^^^^^^^    ^^^^^^^^^^^^^^^^^^
+                              Both bytes at SAME position!
+</pre></div>
+</div>
+<p>This ensures that pattern <code class="docutils literal notranslate"><span class="pre">'caf_'</span></code> correctly matches <code class="docutils literal notranslate"><span class="pre">'café'</span></code> by checking character position 3, not byte position 3.</p>
 </section>
 </section>
 <hr class="docutils" />
 <section id="query-processing">
 <h2>Query Processing<a class="headerlink" href="#query-processing" title="Link to this heading"></a></h2>
-<section id="pattern-analysis">
-<h3>1. <strong>Pattern Analysis</strong><a class="headerlink" href="#pattern-analysis" title="Link to this heading"></a></h3>
+<section id="utf-8-aware-pattern-analysis">
+<h3>1. <strong>UTF-8-Aware Pattern Analysis</strong><a class="headerlink" href="#utf-8-aware-pattern-analysis" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">ParsedPattern</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">**</span><span class="n">parts</span><span class="p">;</span><span class="w">              </span><span class="c1">// Pattern parts split by %</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="o">*</span><span class="n">part_lens</span><span class="p">;</span><span class="w">            </span><span class="c1">// CHARACTER counts (for length filters)</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="o">*</span><span class="n">part_byte_lens</span><span class="p">;</span><span class="w">       </span><span class="c1">// BYTE lengths (for string operations)</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">part_count</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">starts_percent</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">ends_percent</span><span class="p">;</span>
+<span class="p">}</span><span class="w"> </span><span class="n">ParsedPattern</span><span class="p">;</span>
+</pre></div>
+</div>
+<p><strong>Critical Fix</strong>: Store both character counts and byte lengths:</p>
+<ul class="simple">
+<li><p><strong>Character counts</strong> used for length filters (<code class="docutils literal notranslate"><span class="pre">length_ge_bitmaps</span></code>)</p></li>
+<li><p><strong>Byte lengths</strong> used for string operations (<code class="docutils literal notranslate"><span class="pre">memcmp</span></code>, offsets)</p></li>
+</ul>
+</section>
+<section id="query-optimization-multi-column">
+<h3>2. <strong>Query Optimization (Multi-Column)</strong><a class="headerlink" href="#query-optimization-multi-column" title="Link to this heading"></a></h3>
 <div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span>
 <span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">column_index</span><span class="p">;</span>
 <span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">pattern</span><span class="p">;</span>
+<span class="w">    </span><span class="n">ScanKey</span><span class="w"> </span><span class="n">scan_key</span><span class="p">;</span>
 <span class="w">    </span>
-<span class="w">    </span><span class="c1">// Pattern characteristics</span>
+<span class="w">    </span><span class="c1">// Pattern analysis</span>
 <span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">has_percent</span><span class="p">;</span>
 <span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">is_prefix</span><span class="p">;</span><span class="w">      </span><span class="c1">// &#39;abc%&#39;</span>
 <span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">is_suffix</span><span class="p">;</span><span class="w">      </span><span class="c1">// &#39;%abc&#39;</span>
 <span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">is_exact</span><span class="p">;</span><span class="w">       </span><span class="c1">// &#39;abc&#39;</span>
 <span class="w">    </span><span class="kt">bool</span><span class="w"> </span><span class="n">is_substring</span><span class="p">;</span><span class="w">   </span><span class="c1">// &#39;%abc%&#39;</span>
 <span class="w">    </span>
-<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">concrete_chars</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">concrete_chars</span><span class="p">;</span><span class="w">       </span><span class="c1">// UTF-8 character count</span>
 <span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">underscore_count</span><span class="p">;</span>
 <span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">percent_count</span><span class="p">;</span>
 <span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">partition_count</span><span class="p">;</span>
-<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">anchor_strength</span><span class="p">;</span><span class="w"> </span><span class="c1">// 0-100</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">anchor_strength</span><span class="p">;</span><span class="w">      </span><span class="c1">// 0-100</span>
 <span class="w">    </span>
-<span class="w">    </span><span class="kt">double</span><span class="w"> </span><span class="n">selectivity_score</span><span class="p">;</span>
-<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">priority</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">double</span><span class="w"> </span><span class="n">selectivity_score</span><span class="p">;</span><span class="w"> </span><span class="c1">// Lower = more selective</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">priority</span><span class="p">;</span><span class="w">             </span><span class="c1">// Execution order</span>
 <span class="p">}</span><span class="w"> </span><span class="n">QueryPredicate</span><span class="p">;</span>
 </pre></div>
 </div>
-<p>Each pattern is analyzed to determine:</p>
-<ul class="simple">
-<li><p><strong>Type</strong>: Exact, prefix, suffix, substring, or complex</p></li>
-<li><p><strong>Selectivity</strong>: Estimated result set size</p></li>
-<li><p><strong>Priority</strong>: Execution order (most selective first)</p></li>
-</ul>
-</section>
-<section id="query-optimization">
-<h3>2. <strong>Query Optimization</strong><a class="headerlink" href="#query-optimization" title="Link to this heading"></a></h3>
 <p>The query optimizer reorders predicates to minimize candidates:</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">Priority</span> <span class="n">Tiers</span><span class="p">:</span>
 <span class="mi">0</span><span class="o">-</span><span class="mi">10</span><span class="p">:</span>  <span class="n">Exact</span> <span class="n">matches</span><span class="p">,</span> <span class="n">many</span> <span class="n">underscores</span>
@@ -1128,16 +1253,14 @@ Position 4: &#39;o&#39; → bitmap of record IDs
 </pre></div>
 </div>
 </section>
-<section id="fast-paths">
-<h3>3. <strong>Fast Paths</strong><a class="headerlink" href="#fast-paths" title="Link to this heading"></a></h3>
-<p>Biscuit recognizes and optimizes common patterns:</p>
+<section id="fast-paths-utf-8-aware">
+<h3>3. <strong>Fast Paths (UTF-8-Aware)</strong><a class="headerlink" href="#fast-paths-utf-8-aware" title="Link to this heading"></a></h3>
 <p><strong>Empty Pattern (<code class="docutils literal notranslate"><span class="pre">''</span></code>):</strong></p>
 <div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Returns only zero-length strings</span>
 <span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">length_bitmaps</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
 <span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">copy</span><span class="p">(</span><span class="n">length_bitmaps</span><span class="p">[</span><span class="mi">0</span><span class="p">]);</span>
 </pre></div>
 </div>
-<p>Instant lookup—just return the pre-computed bitmap of empty strings.</p>
 <p><strong>Universal Match (<code class="docutils literal notranslate"><span class="pre">'%'</span></code>):</strong></p>
 <div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Matches everything except deleted records</span>
 <span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_records</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span>
@@ -1145,88 +1268,232 @@ Position 4: &#39;o&#39; → bitmap of record IDs
 <span class="w">        </span><span class="n">add_to_result</span><span class="p">(</span><span class="n">i</span><span class="p">);</span>
 </pre></div>
 </div>
-<p>No filtering needed, just skip tombstones. Linear scan of the record list.</p>
 <p><strong>Pure Underscore Wildcards (<code class="docutils literal notranslate"><span class="pre">'___'</span></code>):</strong></p>
-<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Exact length constraint: 3 characters</span>
-<span class="k">return</span><span class="w"> </span><span class="n">copy</span><span class="p">(</span><span class="n">length_bitmaps</span><span class="p">[</span><span class="mi">3</span><span class="p">]);</span>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Exact CHARACTER length constraint: 3 characters</span>
+<span class="k">return</span><span class="w"> </span><span class="n">copy</span><span class="p">(</span><span class="n">length_bitmaps</span><span class="p">[</span><span class="mi">3</span><span class="p">]);</span><span class="w">  </span><span class="c1">// Uses CHARACTER counts!</span>
 </pre></div>
 </div>
-<p>Each underscore (<code class="docutils literal notranslate"><span class="pre">_</span></code>) matches exactly one character, so <code class="docutils literal notranslate"><span class="pre">'___'</span></code> means “any string of length 3”. Direct bitmap lookup.</p>
-<p><strong>Length Range (<code class="docutils literal notranslate"><span class="pre">'%___'</span></code> or <code class="docutils literal notranslate"><span class="pre">'___%%'</span></code>):</strong></p>
-<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Any string with length &gt;= 3</span>
-<span class="k">return</span><span class="w"> </span><span class="n">copy</span><span class="p">(</span><span class="n">length_ge_bitmaps</span><span class="p">[</span><span class="mi">3</span><span class="p">]);</span>
+<p><strong>Character Length Range (<code class="docutils literal notranslate"><span class="pre">'%___'</span></code>):</strong></p>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Any string with CHARACTER length &gt;= 3</span>
+<span class="k">return</span><span class="w"> </span><span class="n">copy</span><span class="p">(</span><span class="n">length_ge_bitmaps</span><span class="p">[</span><span class="mi">3</span><span class="p">]);</span><span class="w">  </span><span class="c1">// Uses CHARACTER counts!</span>
 </pre></div>
 </div>
-<p>The <code class="docutils literal notranslate"><span class="pre">%</span></code> can match zero or more characters, and underscores require at least 3 characters. The <code class="docutils literal notranslate"><span class="pre">length_ge_bitmaps</span></code> stores cumulative counts: <code class="docutils literal notranslate"><span class="pre">length_ge[3]</span></code> contains all records with length ≥ 3.</p>
 <p><strong>Exact Match (<code class="docutils literal notranslate"><span class="pre">'abc'</span></code>):</strong></p>
-<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Must match at position 0 with exact length 3</span>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Must match at character position 0 with exact CHARACTER length 3</span>
 <span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pos_bitmap</span><span class="p">[</span><span class="sc">&#39;a&#39;</span><span class="p">][</span><span class="mi">0</span><span class="p">];</span>
 <span class="n">result</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="n">pos_bitmap</span><span class="p">[</span><span class="sc">&#39;b&#39;</span><span class="p">][</span><span class="mi">1</span><span class="p">];</span>
 <span class="n">result</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="n">pos_bitmap</span><span class="p">[</span><span class="sc">&#39;c&#39;</span><span class="p">][</span><span class="mi">2</span><span class="p">];</span>
-<span class="n">result</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="n">length_bitmaps</span><span class="p">[</span><span class="mi">3</span><span class="p">];</span><span class="w">  </span><span class="c1">// Enforce exact length</span>
+<span class="n">result</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="n">length_bitmaps</span><span class="p">[</span><span class="mi">3</span><span class="p">];</span><span class="w">  </span><span class="c1">// CHARACTER length = 3</span>
 </pre></div>
 </div>
-<p>Three bitmap intersections (one per character) plus a length check. If any character doesn’t match, the intersection becomes empty immediately (early termination).</p>
 <p><strong>Prefix Match (<code class="docutils literal notranslate"><span class="pre">'abc%'</span></code>):</strong></p>
-<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Must start with &#39;abc&#39;, any length &gt;= 3</span>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Must start with &#39;abc&#39;, any CHARACTER length &gt;= 3</span>
 <span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pos_bitmap</span><span class="p">[</span><span class="sc">&#39;a&#39;</span><span class="p">][</span><span class="mi">0</span><span class="p">];</span>
 <span class="n">result</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="n">pos_bitmap</span><span class="p">[</span><span class="sc">&#39;b&#39;</span><span class="p">][</span><span class="mi">1</span><span class="p">];</span>
 <span class="n">result</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="n">pos_bitmap</span><span class="p">[</span><span class="sc">&#39;c&#39;</span><span class="p">][</span><span class="mi">2</span><span class="p">];</span>
-<span class="c1">// No exact length constraint—trailing % allows any length</span>
+<span class="c1">// No exact length constraint</span>
 </pre></div>
 </div>
-<p>Same as exact match but without enforcing a specific length. Strings like <code class="docutils literal notranslate"><span class="pre">&quot;abc&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;abcd&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;abcxyz&quot;</span></code> all match.</p>
 <p><strong>Suffix Match (<code class="docutils literal notranslate"><span class="pre">'%abc'</span></code>):</strong></p>
-<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Must end with &#39;abc&#39;, any length &gt;= 3</span>
-<span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">neg_bitmap</span><span class="p">[</span><span class="sc">&#39;a&#39;</span><span class="p">][</span><span class="mi">-3</span><span class="p">];</span><span class="w">  </span><span class="c1">// 3rd from end</span>
-<span class="n">result</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="n">neg_bitmap</span><span class="p">[</span><span class="sc">&#39;b&#39;</span><span class="p">][</span><span class="mi">-2</span><span class="p">];</span><span class="w">  </span><span class="c1">// 2nd from end</span>
-<span class="n">result</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="n">neg_bitmap</span><span class="p">[</span><span class="sc">&#39;c&#39;</span><span class="p">][</span><span class="mi">-1</span><span class="p">];</span><span class="w">  </span><span class="c1">// Last character</span>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Must end with &#39;abc&#39;, any CHARACTER length &gt;= 3</span>
+<span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">neg_bitmap</span><span class="p">[</span><span class="sc">&#39;a&#39;</span><span class="p">][</span><span class="mi">-3</span><span class="p">];</span><span class="w">  </span><span class="c1">// 3rd CHARACTER from end</span>
+<span class="n">result</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="n">neg_bitmap</span><span class="p">[</span><span class="sc">&#39;b&#39;</span><span class="p">][</span><span class="mi">-2</span><span class="p">];</span><span class="w">  </span><span class="c1">// 2nd CHARACTER from end</span>
+<span class="n">result</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="n">neg_bitmap</span><span class="p">[</span><span class="sc">&#39;c&#39;</span><span class="p">][</span><span class="mi">-1</span><span class="p">];</span><span class="w">  </span><span class="c1">// Last CHARACTER</span>
 </pre></div>
 </div>
-<p>Uses <strong>negative indexing</strong> to anchor at the end. The negative index bitmaps are pre-computed during index build. Strings like <code class="docutils literal notranslate"><span class="pre">&quot;abc&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;xyzabc&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;123abc&quot;</span></code> all match.</p>
-<p><strong>Substring Match (<code class="docutils literal notranslate"><span class="pre">'%abc%'</span></code>):</strong></p>
-<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Can appear anywhere in the string</span>
+<p><strong>Substring Match (<code class="docutils literal notranslate"><span class="pre">'%abc%'</span></code> or <code class="docutils literal notranslate"><span class="pre">'%café%'</span></code>):</strong></p>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// CRITICAL FIX: UTF-8-aware substring search</span>
+<span class="c1">// Strategy:</span>
+<span class="c1">// 1. Get candidates using first byte of pattern</span>
+<span class="c1">// 2. Validate UTF-8 boundaries with character-aware matching</span>
+
 <span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">empty_bitmap</span><span class="p">();</span>
-<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">pos</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">max_len</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span><span class="w"> </span><span class="n">pos</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="n">match</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pos_bitmap</span><span class="p">[</span><span class="sc">&#39;a&#39;</span><span class="p">][</span><span class="n">pos</span><span class="p">];</span>
-<span class="w">    </span><span class="n">match</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="n">pos_bitmap</span><span class="p">[</span><span class="sc">&#39;b&#39;</span><span class="p">][</span><span class="n">pos</span><span class="o">+</span><span class="mi">1</span><span class="p">];</span>
-<span class="w">    </span><span class="n">match</span><span class="w"> </span><span class="o">&amp;=</span><span class="w"> </span><span class="n">pos_bitmap</span><span class="p">[</span><span class="sc">&#39;c&#39;</span><span class="p">][</span><span class="n">pos</span><span class="o">+</span><span class="mi">2</span><span class="p">];</span>
-<span class="w">    </span><span class="n">result</span><span class="w"> </span><span class="o">|=</span><span class="w"> </span><span class="n">match</span><span class="p">;</span><span class="w">  </span><span class="c1">// Union across all positions</span>
+
+<span class="c1">// Get candidates (fast filter)</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">char_cache</span><span class="p">[</span><span class="n">first_byte</span><span class="p">])</span>
+<span class="w">    </span><span class="n">candidates</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">copy</span><span class="p">(</span><span class="n">char_cache</span><span class="p">[</span><span class="n">first_byte</span><span class="p">]);</span>
+
+<span class="c1">// Apply CHARACTER length filter (not byte length!)</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">pattern_char_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">utf8_char_count</span><span class="p">(</span><span class="n">pattern</span><span class="p">,</span><span class="w"> </span><span class="n">pattern_byte_len</span><span class="p">);</span>
+<span class="n">length_filter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_length_ge</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">pattern_char_count</span><span class="p">);</span>
+<span class="n">bitmap_and</span><span class="p">(</span><span class="n">candidates</span><span class="p">,</span><span class="w"> </span><span class="n">length_filter</span><span class="p">);</span>
+
+<span class="c1">// Validate each candidate (correct but slower)</span>
+<span class="k">for</span><span class="w"> </span><span class="n">each</span><span class="w"> </span><span class="n">candidate</span><span class="w"> </span><span class="n">rec_idx</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">haystack</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">data_cache</span><span class="p">[</span><span class="n">rec_idx</span><span class="p">];</span>
+<span class="w">    </span><span class="n">haystack_char_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">utf8_char_count</span><span class="p">(</span><span class="n">haystack</span><span class="p">);</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// Try matching at each CHARACTER position</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">char_pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">char_pos</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">haystack_char_count</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">pattern_char_count</span><span class="p">;</span><span class="w"> </span><span class="n">char_pos</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="c1">// Convert character position to byte offset</span>
+<span class="w">        </span><span class="n">byte_offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">utf8_char_to_byte_offset</span><span class="p">(</span><span class="n">haystack</span><span class="p">,</span><span class="w"> </span><span class="n">char_pos</span><span class="p">);</span>
+<span class="w">        </span>
+<span class="w">        </span><span class="c1">// Match pattern bytes at this position</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">match_utf8_pattern</span><span class="p">(</span><span class="n">haystack</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">byte_offset</span><span class="p">,</span><span class="w"> </span><span class="n">pattern</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">bitmap_add</span><span class="p">(</span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="n">rec_idx</span><span class="p">);</span>
+<span class="w">            </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
 <span class="p">}</span>
 </pre></div>
 </div>
-<p>This is the worst case—must check every possible starting position. For a 100-character max string, this means up to 98 intersections (positions 0 through 97). However:</p>
+<p><strong>Why substring is slow:</strong></p>
 <ul class="simple">
-<li><p>Bitmap operations are extremely fast (CPU vectorized)</p></li>
-<li><p>Early termination if <code class="docutils literal notranslate"><span class="pre">max_len</span> <span class="pre">-</span> <span class="pre">pattern_len</span></code> is small</p></li>
-<li><p>Results are unioned incrementally, so empty intermediate results don’t hurt</p></li>
+<li><p>Must validate UTF-8 character boundaries</p></li>
+<li><p>Cannot rely solely on byte-level bitmap intersections</p></li>
+<li><p>Uses hybrid approach: bitmap filtering + validation</p></li>
 </ul>
-<p><strong>Why is this still fast?</strong>
-Even with O(m) complexity, Roaring bitmap operations are <strong>faster</strong> than string scanning. For a 1M record table.</p>
-<p>The bitmap approach wins by avoiding per-record string operations entirely.</p>
 </section>
 <section id="windowed-matching-complex-patterns">
 <h3>4. <strong>Windowed Matching (Complex Patterns)</strong><a class="headerlink" href="#windowed-matching-complex-patterns" title="Link to this heading"></a></h3>
-<p>For patterns like <code class="docutils literal notranslate"><span class="pre">'abc%def%ghi'</span></code>, Biscuit uses recursive windowed matching:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="mf">1.</span> <span class="n">Match</span> <span class="n">first</span> <span class="n">part</span> <span class="s1">&#39;abc&#39;</span> <span class="n">at</span> <span class="n">position</span> <span class="mi">0</span>
-<span class="mf">2.</span> <span class="n">For</span> <span class="n">each</span> <span class="n">match</span><span class="p">,</span> <span class="k">try</span> <span class="s1">&#39;def&#39;</span> <span class="n">at</span> <span class="n">positions</span> <span class="mf">3.</span><span class="o">..</span><span class="n">max_pos</span>
-<span class="mf">3.</span> <span class="n">For</span> <span class="n">each</span> <span class="n">match</span><span class="p">,</span> <span class="k">try</span> <span class="s1">&#39;ghi&#39;</span> <span class="n">at</span> <span class="n">valid</span> <span class="n">positions</span>
-<span class="mf">4.</span> <span class="n">Last</span> <span class="n">part</span> <span class="n">anchored</span> <span class="n">to</span> <span class="n">end</span> <span class="k">if</span> <span class="n">no</span> <span class="n">trailing</span> <span class="o">%</span>
+<p>For patterns like <code class="docutils literal notranslate"><span class="pre">'abc%def%ghi'</span></code>, Biscuit uses UTF-8-aware recursive windowed matching:</p>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="k">static</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span>
+<span class="nf">biscuit_recursive_windowed_match</span><span class="p">(</span>
+<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="n">BiscuitIndex</span><span class="w"> </span><span class="o">*</span><span class="n">idx</span><span class="p">,</span>
+<span class="w">    </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">**</span><span class="n">parts</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="o">*</span><span class="n">part_lens</span><span class="p">,</span><span class="w">      </span><span class="c1">// CHARACTER counts</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">part_count</span><span class="p">,</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">ends_percent</span><span class="p">,</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">part_idx</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">min_pos</span><span class="p">,</span><span class="w">               </span><span class="c1">// CHARACTER position</span>
+<span class="w">    </span><span class="n">RoaringBitmap</span><span class="w"> </span><span class="o">*</span><span class="n">current_candidates</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">max_len</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="c1">// Base case: all parts matched</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">part_idx</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">part_count</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">bitmap_or</span><span class="p">(</span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="n">current_candidates</span><span class="p">);</span>
+<span class="w">        </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// Calculate remaining CHARACTER length needed</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">remaining_chars</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">part_idx</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">part_count</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span>
+<span class="w">        </span><span class="n">remaining_chars</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">part_lens</span><span class="p">[</span><span class="n">i</span><span class="p">];</span><span class="w">  </span><span class="c1">// CHARACTER counts</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// Last part without trailing % must match at end</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">part_idx</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">part_count</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">ends_percent</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">end_match</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">match_part_at_end</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">parts</span><span class="p">[</span><span class="n">part_idx</span><span class="p">]);</span>
+<span class="w">        </span><span class="n">bitmap_and</span><span class="p">(</span><span class="n">end_match</span><span class="p">,</span><span class="w"> </span><span class="n">current_candidates</span><span class="p">);</span>
+<span class="w">        </span>
+<span class="w">        </span><span class="c1">// CHARACTER length constraint</span>
+<span class="w">        </span><span class="n">min_length</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">min_pos</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">part_lens</span><span class="p">[</span><span class="n">part_idx</span><span class="p">];</span>
+<span class="w">        </span><span class="n">length_filter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_length_ge</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">min_length</span><span class="p">);</span>
+<span class="w">        </span><span class="n">bitmap_and</span><span class="p">(</span><span class="n">end_match</span><span class="p">,</span><span class="w"> </span><span class="n">length_filter</span><span class="p">);</span>
+<span class="w">        </span>
+<span class="w">        </span><span class="n">bitmap_or</span><span class="p">(</span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="n">end_match</span><span class="p">);</span>
+<span class="w">        </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// Try all valid CHARACTER positions</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">current_part_chars</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">part_lens</span><span class="p">[</span><span class="n">part_idx</span><span class="p">];</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">max_pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">max_len</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">current_part_chars</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">remaining_chars</span><span class="p">;</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">char_pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">min_pos</span><span class="p">;</span><span class="w"> </span><span class="n">char_pos</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">max_pos</span><span class="p">;</span><span class="w"> </span><span class="n">char_pos</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">part_match</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">match_part_at_pos</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">parts</span><span class="p">[</span><span class="n">part_idx</span><span class="p">],</span><span class="w"> </span><span class="n">char_pos</span><span class="p">);</span>
+<span class="w">        </span><span class="n">next_candidates</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bitmap_copy</span><span class="p">(</span><span class="n">current_candidates</span><span class="p">);</span>
+<span class="w">        </span><span class="n">bitmap_and</span><span class="p">(</span><span class="n">next_candidates</span><span class="p">,</span><span class="w"> </span><span class="n">part_match</span><span class="p">);</span>
+<span class="w">        </span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">bitmap_is_empty</span><span class="p">(</span><span class="n">next_candidates</span><span class="p">))</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="c1">// Recurse with next CHARACTER position</span>
+<span class="w">            </span><span class="n">recurse</span><span class="p">(</span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">parts</span><span class="p">,</span><span class="w"> </span><span class="n">part_lens</span><span class="p">,</span><span class="w"> </span><span class="n">part_count</span><span class="p">,</span>
+<span class="w">                    </span><span class="n">ends_percent</span><span class="p">,</span><span class="w"> </span><span class="n">part_idx</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span>
+<span class="w">                    </span><span class="n">char_pos</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">current_part_chars</span><span class="p">,</span><span class="w">  </span><span class="c1">// CHARACTER arithmetic</span>
+<span class="w">                    </span><span class="n">next_candidates</span><span class="p">,</span><span class="w"> </span><span class="n">max_len</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="p">}</span>
 </pre></div>
 </div>
-<p>This avoids brute-force string scanning by leveraging bitmap intersections.</p>
+<p><strong>Key invariant:</strong> All position arithmetic uses <strong>character offsets</strong>, not byte offsets.</p>
 </section>
 </section>
+<hr class="docutils" />
+<section id="ilike-implementation">
+<h2>ILIKE Implementation<a class="headerlink" href="#ilike-implementation" title="Link to this heading"></a></h2>
+<section id="architecture">
+<h3>Architecture<a class="headerlink" href="#architecture" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// ILIKE query processing</span>
+<span class="k">static</span><span class="w"> </span><span class="n">RoaringBitmap</span><span class="o">*</span><span class="w"> </span>
+<span class="nf">biscuit_query_pattern_ilike</span><span class="p">(</span><span class="n">BiscuitIndex</span><span class="w"> </span><span class="o">*</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">pattern</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="c1">// Step 1: Convert pattern to lowercase ONCE</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">pattern_lower</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">biscuit_str_tolower</span><span class="p">(</span><span class="n">pattern</span><span class="p">,</span><span class="w"> </span><span class="n">strlen</span><span class="p">(</span><span class="n">pattern</span><span class="p">));</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// Step 2: Parse lowercase pattern</span>
+<span class="w">    </span><span class="n">ParsedPattern</span><span class="w"> </span><span class="o">*</span><span class="n">parsed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">biscuit_parse_pattern</span><span class="p">(</span><span class="n">pattern_lower</span><span class="p">);</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// Step 3: Query lowercase indices</span>
+<span class="w">    </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">match_using_lowercase_indices</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">parsed</span><span class="p">);</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// Cleanup</span>
+<span class="w">    </span><span class="n">free_parsed_pattern</span><span class="p">(</span><span class="n">parsed</span><span class="p">);</span>
+<span class="w">    </span><span class="n">pfree</span><span class="p">(</span><span class="n">pattern_lower</span><span class="p">);</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">result</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="case-folding">
+<h3>Case Folding<a class="headerlink" href="#case-folding" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="k">static</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span>
+<span class="nf">biscuit_str_tolower</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">str</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">len</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="w">    </span><span class="n">text</span><span class="w"> </span><span class="o">*</span><span class="n">input</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cstring_to_text_with_len</span><span class="p">(</span><span class="n">str</span><span class="p">,</span><span class="w"> </span><span class="n">len</span><span class="p">);</span>
+<span class="w">    </span><span class="n">Oid</span><span class="w"> </span><span class="n">collation</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_typcollation</span><span class="p">(</span><span class="n">TEXTOID</span><span class="p">);</span><span class="w">  </span><span class="c1">// Database default</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="n">text</span><span class="w"> </span><span class="o">*</span><span class="n">result_text</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">DatumGetTextP</span><span class="p">(</span>
+<span class="w">        </span><span class="n">DirectFunctionCall2Coll</span><span class="p">(</span>
+<span class="w">            </span><span class="n">lower</span><span class="p">,</span><span class="w">              </span><span class="c1">// PostgreSQL&#39;s locale-aware lower()</span>
+<span class="w">            </span><span class="n">collation</span><span class="p">,</span>
+<span class="w">            </span><span class="n">PointerGetDatum</span><span class="p">(</span><span class="n">input</span><span class="p">),</span>
+<span class="w">            </span><span class="n">collation</span>
+<span class="w">        </span><span class="p">)</span>
+<span class="w">    </span><span class="p">);</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">*</span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">text_to_cstring</span><span class="p">(</span><span class="n">result_text</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">result</span><span class="p">;</span><span class="w">  </span><span class="c1">// Allocated with palloc</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p><strong>Why use PostgreSQL’s <code class="docutils literal notranslate"><span class="pre">lower()</span></code>?</strong></p>
+<ul class="simple">
+<li><p>Locale-aware (handles Turkish İ/i, German ß, etc.)</p></li>
+<li><p>Consistent with database collation</p></li>
+<li><p>Stable across index builds</p></li>
+</ul>
+</section>
+<section id="data-flow">
+<h3>Data Flow<a class="headerlink" href="#data-flow" title="Link to this heading"></a></h3>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>Index Build:
+1. Original: &quot;Café&quot; → data_cache[idx] = &quot;Café&quot;
+2. Lowercase: &quot;Café&quot; → data_cache_lower[idx] = biscuit_str_tolower(&quot;Café&quot;) = &quot;café&quot;
+3. Index both:
+   - pos_idx[...] indexes &quot;Café&quot; (case-sensitive)
+   - pos_idx_lower[...] indexes &quot;café&quot; (case-insensitive)
+
+LIKE Query:
+&quot;WHERE col LIKE &#39;Caf%&#39;&quot;
+→ Query pos_idx with &quot;Caf%&quot; → Matches &quot;Café&quot; ✓
+
+ILIKE Query:
+&quot;WHERE col ILIKE &#39;caf%&#39;&quot;
+→ Convert pattern: &quot;caf%&quot; → &quot;caf%&quot;
+→ Query pos_idx_lower with &quot;caf%&quot; → Matches &quot;café&quot; ✓
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
 <section id="performance-optimizations">
 <h2>Performance Optimizations<a class="headerlink" href="#performance-optimizations" title="Link to this heading"></a></h2>
 <section id="skip-wildcard-intersections">
 <h3>1. <strong>Skip Wildcard Intersections</strong><a class="headerlink" href="#skip-wildcard-intersections" title="Link to this heading"></a></h3>
-<p><code class="docutils literal notranslate"><span class="pre">'_'</span></code> wildcards match everything at a position, so they’re skipped during bitmap AND operations:</p>
+<p><code class="docutils literal notranslate"><span class="pre">'_'</span></code> wildcards match everything at a character position, so they’re skipped:</p>
 <div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">part_len</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">part</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;_&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">continue</span><span class="p">;</span><span class="w">  </span><span class="c1">// Skip wildcard</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">part</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;_&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">char_pos</span><span class="o">++</span><span class="p">;</span><span class="w">  </span><span class="c1">// Skip wildcard, advance CHARACTER position</span>
+<span class="w">        </span><span class="k">continue</span><span class="p">;</span>
+<span class="w">    </span><span class="p">}</span>
 <span class="w">    </span>
-<span class="w">    </span><span class="n">bm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_pos_bitmap</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">part</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="w"> </span><span class="n">pos</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="p">);</span>
+<span class="w">    </span><span class="n">bm</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">get_pos_bitmap</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">part</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="w"> </span><span class="n">char_pos</span><span class="p">);</span>
 <span class="w">    </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bitmap_and</span><span class="p">(</span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="n">bm</span><span class="p">);</span>
+<span class="w">    </span><span class="n">char_pos</span><span class="o">++</span><span class="p">;</span>
 <span class="p">}</span>
 </pre></div>
 </div>
@@ -1240,8 +1507,28 @@ Even with O(m) complexity, Roaring bitmap operations are <strong>faster</strong>
 </pre></div>
 </div>
 </section>
+<section id="character-vs-byte-length-separation">
+<h3>3. <strong>Character vs. Byte Length Separation</strong><a class="headerlink" href="#character-vs-byte-length-separation" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">ParsedPattern</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="o">**</span><span class="n">parts</span><span class="p">;</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="o">*</span><span class="n">part_lens</span><span class="p">;</span><span class="w">         </span><span class="c1">// ✓ CHARACTER counts (for length filters)</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="o">*</span><span class="n">part_byte_lens</span><span class="p">;</span><span class="w">    </span><span class="c1">// ✓ BYTE lengths (for string operations)</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">part_count</span><span class="p">;</span>
+<span class="p">}</span><span class="w"> </span><span class="n">ParsedPattern</span><span class="p">;</span>
+
+<span class="c1">// Parsing:</span>
+<span class="n">part_lens</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">utf8_char_count</span><span class="p">(</span><span class="n">part</span><span class="p">,</span><span class="w"> </span><span class="n">part_byte_len</span><span class="p">);</span><span class="w">  </span><span class="c1">// Characters</span>
+<span class="n">part_byte_lens</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">part_byte_len</span><span class="p">;</span><span class="w">                    </span><span class="c1">// Bytes</span>
+</pre></div>
+</div>
+<p><strong>Why both?</strong></p>
+<ul class="simple">
+<li><p><strong>Character counts</strong> for length filters: <code class="docutils literal notranslate"><span class="pre">length_ge_bitmaps[char_count]</span></code></p></li>
+<li><p><strong>Byte lengths</strong> for memory operations: <code class="docutils literal notranslate"><span class="pre">memcmp(str,</span> <span class="pre">part,</span> <span class="pre">byte_len)</span></code></p></li>
+</ul>
+</section>
 <section id="tid-sorting-for-sequential-i-o">
-<h3>3. <strong>TID Sorting for Sequential I/O</strong><a class="headerlink" href="#tid-sorting-for-sequential-i-o" title="Link to this heading"></a></h3>
+<h3>4. <strong>TID Sorting for Sequential I/O</strong><a class="headerlink" href="#tid-sorting-for-sequential-i-o" title="Link to this heading"></a></h3>
 <p>Results are sorted by (block, offset) to enable sequential heap scans:</p>
 <div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">count</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">5000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
 <span class="w">    </span><span class="n">qsort</span><span class="p">(</span><span class="n">tids</span><span class="p">,</span><span class="w"> </span><span class="n">count</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">ItemPointer</span><span class="p">),</span><span class="w"> </span><span class="n">compare_tids</span><span class="p">);</span>
@@ -1252,7 +1539,7 @@ Even with O(m) complexity, Roaring bitmap operations are <strong>faster</strong>
 </div>
 </section>
 <section id="skip-sorting-for-aggregates">
-<h3>4. <strong>Skip Sorting for Aggregates</strong><a class="headerlink" href="#skip-sorting-for-aggregates" title="Link to this heading"></a></h3>
+<h3>5. <strong>Skip Sorting for Aggregates</strong><a class="headerlink" href="#skip-sorting-for-aggregates" title="Link to this heading"></a></h3>
 <p><code class="docutils literal notranslate"><span class="pre">COUNT(*)</span></code> and <code class="docutils literal notranslate"><span class="pre">EXISTS</span></code> queries don’t need sorted TIDs:</p>
 <div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="kt">bool</span><span class="w"> </span><span class="n">is_aggregate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">!</span><span class="n">scan</span><span class="o">-&gt;</span><span class="n">xs_want_itup</span><span class="p">;</span>
 <span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">is_aggregate</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
@@ -1263,26 +1550,12 @@ Even with O(m) complexity, Roaring bitmap operations are <strong>faster</strong>
 </div>
 </section>
 <section id="parallel-tid-collection">
-<h3>5. <strong>Parallel TID Collection</strong><a class="headerlink" href="#parallel-tid-collection" title="Link to this heading"></a></h3>
+<h3>6. <strong>Parallel TID Collection</strong><a class="headerlink" href="#parallel-tid-collection" title="Link to this heading"></a></h3>
 <p>Large result sets (10k+ TIDs) are collected using multiple workers:</p>
 <div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">count</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">10000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
 <span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">num_workers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">count</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">100000</span><span class="p">)</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span>
 <span class="w">    </span><span class="c1">// Distribute bitmap iteration across workers</span>
-<span class="w">    </span><span class="c1">// Each worker processes a chunk independently</span>
 <span class="p">}</span>
-</pre></div>
-</div>
-</section>
-<section id="direct-bitmap-iteration">
-<h3>6. <strong>Direct Bitmap Iteration</strong><a class="headerlink" href="#direct-bitmap-iteration" title="Link to this heading"></a></h3>
-<p>Avoid materializing arrays when possible:</p>
-<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="cp">#ifdef HAVE_ROARING</span>
-<span class="n">roaring_uint32_iterator_t</span><span class="w"> </span><span class="o">*</span><span class="n">iter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">roaring_create_iterator</span><span class="p">(</span><span class="n">bitmap</span><span class="p">);</span>
-<span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">iter</span><span class="o">-&gt;</span><span class="n">has_value</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="n">process</span><span class="p">(</span><span class="n">iter</span><span class="o">-&gt;</span><span class="n">current_value</span><span class="p">);</span>
-<span class="w">    </span><span class="n">roaring_advance_uint32_iterator</span><span class="p">(</span><span class="n">iter</span><span class="p">);</span>
-<span class="p">}</span>
-<span class="cp">#endif</span>
 </pre></div>
 </div>
 </section>
@@ -1290,9 +1563,8 @@ Even with O(m) complexity, Roaring bitmap operations are <strong>faster</strong>
 <h3>7. <strong>LIMIT-Aware Collection</strong><a class="headerlink" href="#limit-aware-collection" title="Link to this heading"></a></h3>
 <p>Stop collecting TIDs early when LIMIT is detected:</p>
 <div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="n">limit_hint</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">estimate_limit</span><span class="p">(</span><span class="n">scan</span><span class="p">);</span>
-<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">limit_hint</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">idx</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">limit_hint</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">limit_hint</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">idx</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">limit_hint</span><span class="p">)</span>
 <span class="w">    </span><span class="k">break</span><span class="p">;</span><span class="w">  </span><span class="c1">// Collected enough</span>
-<span class="p">}</span>
 </pre></div>
 </div>
 </section>
@@ -1300,34 +1572,74 @@ Even with O(m) complexity, Roaring bitmap operations are <strong>faster</strong>
 <hr class="docutils" />
 <section id="multi-column-support">
 <h2>Multi-Column Support<a class="headerlink" href="#multi-column-support" title="Link to this heading"></a></h2>
-<section id="architecture">
-<h3>Architecture<a class="headerlink" href="#architecture" title="Link to this heading"></a></h3>
-<p>Each column maintains its own independent Biscuit index:</p>
+<section id="id1">
+<h3>Architecture<a class="headerlink" href="#id1" title="Link to this heading"></a></h3>
+<p>Each column maintains its own <strong>completely independent</strong> Biscuit index:</p>
 <div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="n">BiscuitIndex</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="n">ColumnIndex</span><span class="w"> </span><span class="n">column_indices</span><span class="p">[</span><span class="n">N</span><span class="p">];</span><span class="w">  </span><span class="c1">// One per column</span>
+<span class="w">    </span><span class="n">ColumnIndex</span><span class="w"> </span><span class="n">column_indices</span><span class="p">[</span><span class="n">N</span><span class="p">];</span><span class="w">  </span><span class="c1">// Each column: dual indices + dual length bitmaps</span>
 <span class="p">}</span>
 </pre></div>
 </div>
 </section>
 <section id="query-execution">
 <h3>Query Execution<a class="headerlink" href="#query-execution" title="Link to this heading"></a></h3>
-<p>Multi-column queries use query optimization:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">WHERE</span><span class="w"> </span><span class="n">col1</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;abc%&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">col2</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%xyz&#39;</span>
+<p>Multi-column queries use intelligent predicate reordering:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">WHERE</span><span class="w"> </span><span class="n">col1</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;abc%&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">col2</span><span class="w"> </span><span class="k">ILIKE</span><span class="w"> </span><span class="s1">&#39;%xyz&#39;</span>
 </pre></div>
 </div>
 <p>Execution plan:</p>
 <ol class="arabic">
-<li><p><strong>Analyze</strong>: Score each predicate for selectivity</p></li>
-<li><p><strong>Reorder</strong>: Execute most selective first</p></li>
+<li><p><strong>Analyze</strong>: Score each predicate for selectivity</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">col1</span> <span class="s1">&#39;abc%&#39;</span><span class="p">:</span> <span class="n">priority</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span> <span class="n">selectivity</span><span class="o">=</span><span class="mf">0.15</span> <span class="p">(</span><span class="n">strong</span> <span class="n">prefix</span><span class="p">)</span>
+<span class="n">col2</span> <span class="s1">&#39;</span><span class="si">%x</span><span class="s1">yz&#39;</span><span class="p">:</span> <span class="n">priority</span><span class="o">=</span><span class="mi">30</span><span class="p">,</span> <span class="n">selectivity</span><span class="o">=</span><span class="mf">0.25</span> <span class="p">(</span><span class="n">weak</span> <span class="n">suffix</span><span class="p">)</span>
+</pre></div>
+</div>
+</li>
+<li><p><strong>Reorder</strong>: Execute most selective first</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">Execute</span> <span class="n">col1</span> <span class="n">first</span> <span class="p">(</span><span class="n">lower</span> <span class="n">priority</span> <span class="n">value</span> <span class="o">=</span> <span class="n">higher</span> <span class="n">priority</span><span class="p">)</span>
+</pre></div>
+</div>
+</li>
 <li><p><strong>Execute</strong>:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">candidates</span> <span class="o">=</span> <span class="n">query_column</span><span class="p">(</span><span class="n">col1</span><span class="p">,</span> <span class="s1">&#39;abc%&#39;</span><span class="p">)</span>
-<span class="n">candidates</span> <span class="o">=</span> <span class="n">intersect</span><span class="p">(</span><span class="n">candidates</span><span class="p">,</span> <span class="n">query_column</span><span class="p">(</span><span class="n">col2</span><span class="p">,</span> <span class="s1">&#39;</span><span class="si">%x</span><span class="s1">yz&#39;</span><span class="p">))</span>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Execute col1 LIKE (case-sensitive indices)</span>
+<span class="n">candidates</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">query_column_pattern</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">col1_idx</span><span class="p">,</span><span class="w"> </span><span class="err">&#39;</span><span class="n">abc</span><span class="o">%</span><span class="err">&#39;</span><span class="p">);</span>
+
+<span class="c1">// Execute col2 ILIKE (case-insensitive indices)</span>
+<span class="n">col2_result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">query_column_pattern_ilike</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">col2_idx</span><span class="p">,</span><span class="w"> </span><span class="err">&#39;</span><span class="o">%</span><span class="n">xyz</span><span class="err">&#39;</span><span class="p">);</span>
+
+<span class="c1">// Intersect</span>
+<span class="n">bitmap_and</span><span class="p">(</span><span class="n">candidates</span><span class="p">,</span><span class="w"> </span><span class="n">col2_result</span><span class="p">);</span>
 </pre></div>
 </div>
 </li>
 <li><p><strong>Filter tombstones</strong>: Remove deleted records</p></li>
 <li><p><strong>Collect TIDs</strong>: Convert bitmap to tuple IDs</p></li>
 </ol>
+</section>
+<section id="strategy-routing">
+<h3>Strategy Routing<a class="headerlink" href="#strategy-routing" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Route based on scan key strategy</span>
+<span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">key</span><span class="o">-&gt;</span><span class="n">sk_strategy</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">BISCUIT_LIKE_STRATEGY</span><span class="p">:</span>
+<span class="w">        </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">query_column_pattern</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">col_idx</span><span class="p">,</span><span class="w"> </span><span class="n">pattern</span><span class="p">);</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">BISCUIT_NOT_LIKE_STRATEGY</span><span class="p">:</span>
+<span class="w">        </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">query_column_pattern</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">col_idx</span><span class="p">,</span><span class="w"> </span><span class="n">pattern</span><span class="p">);</span>
+<span class="w">        </span><span class="n">bitmap_invert</span><span class="p">(</span><span class="n">result</span><span class="p">);</span><span class="w">  </span><span class="c1">// Negate</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">BISCUIT_ILIKE_STRATEGY</span><span class="p">:</span>
+<span class="w">        </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">query_column_pattern_ilike</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">col_idx</span><span class="p">,</span><span class="w"> </span><span class="n">pattern</span><span class="p">);</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="w">        </span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">BISCUIT_NOT_ILIKE_STRATEGY</span><span class="p">:</span>
+<span class="w">        </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">query_column_pattern_ilike</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">col_idx</span><span class="p">,</span><span class="w"> </span><span class="n">pattern</span><span class="p">);</span>
+<span class="w">        </span><span class="n">bitmap_invert</span><span class="p">(</span><span class="n">result</span><span class="p">);</span><span class="w">  </span><span class="c1">// Negate</span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
 </section>
 </section>
 <hr class="docutils" />
@@ -1347,27 +1659,78 @@ Even with O(m) complexity, Roaring bitmap operations are <strong>faster</strong>
 <span class="w">    </span><span class="n">tids</span><span class="p">[</span><span class="n">rec_idx</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">ht_ctid</span><span class="p">;</span>
 <span class="w">    </span><span class="n">data_cache</span><span class="p">[</span><span class="n">rec_idx</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">copy_string</span><span class="p">(</span><span class="n">value</span><span class="p">);</span>
 <span class="w">    </span>
-<span class="w">    </span><span class="c1">// 3. Update all indices</span>
-<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">pos</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">len</span><span class="p">;</span><span class="w"> </span><span class="n">pos</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<span class="w">        </span><span class="n">add_to_pos_bitmap</span><span class="p">(</span><span class="n">str</span><span class="p">[</span><span class="n">pos</span><span class="p">],</span><span class="w"> </span><span class="n">pos</span><span class="p">,</span><span class="w"> </span><span class="n">rec_idx</span><span class="p">);</span>
-<span class="w">        </span><span class="n">add_to_neg_bitmap</span><span class="p">(</span><span class="n">str</span><span class="p">[</span><span class="n">pos</span><span class="p">],</span><span class="w"> </span><span class="o">-</span><span class="p">(</span><span class="n">len</span><span class="o">-</span><span class="n">pos</span><span class="p">),</span><span class="w"> </span><span class="n">rec_idx</span><span class="p">);</span>
+<span class="w">    </span><span class="c1">// 3. Create lowercase version</span>
+<span class="w">    </span><span class="n">data_cache_lower</span><span class="p">[</span><span class="n">rec_idx</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">biscuit_str_tolower</span><span class="p">(</span><span class="n">value</span><span class="p">,</span><span class="w"> </span><span class="n">strlen</span><span class="p">(</span><span class="n">value</span><span class="p">));</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// 4. Update case-sensitive indices</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">byte_pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="n">char_pos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">byte_pos</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">byte_len</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="kt">int</span><span class="w"> </span><span class="n">char_len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">utf8_char_length</span><span class="p">(</span><span class="n">str</span><span class="p">[</span><span class="n">byte_pos</span><span class="p">]);</span>
+<span class="w">        </span>
+<span class="w">        </span><span class="c1">// Index ALL bytes at SAME character position</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">b</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">b</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">char_len</span><span class="p">;</span><span class="w"> </span><span class="n">b</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">add_to_pos_bitmap</span><span class="p">(</span><span class="n">str</span><span class="p">[</span><span class="n">byte_pos</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">b</span><span class="p">],</span><span class="w"> </span><span class="n">char_pos</span><span class="p">,</span><span class="w"> </span><span class="n">rec_idx</span><span class="p">);</span>
+<span class="w">            </span><span class="n">add_to_neg_bitmap</span><span class="p">(</span><span class="n">str</span><span class="p">[</span><span class="n">byte_pos</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">b</span><span class="p">],</span><span class="w"> </span><span class="o">-</span><span class="p">(</span><span class="n">len_chars</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">char_pos</span><span class="p">),</span><span class="w"> </span><span class="n">rec_idx</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span>
+<span class="w">        </span><span class="n">byte_pos</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">char_len</span><span class="p">;</span>
+<span class="w">        </span><span class="n">char_pos</span><span class="o">++</span><span class="p">;</span>
 <span class="w">    </span><span class="p">}</span>
-<span class="w">    </span><span class="n">add_to_length_bitmaps</span><span class="p">(</span><span class="n">len</span><span class="p">,</span><span class="w"> </span><span class="n">rec_idx</span><span class="p">);</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// 5. Update case-insensitive indices (same logic with lowercase data)</span>
+<span class="w">    </span><span class="c1">// ... (similar to step 4 but using data_cache_lower)</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// 6. Update length bitmaps (BOTH case-sensitive and case-insensitive)</span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">char_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">utf8_char_count</span><span class="p">(</span><span class="n">str</span><span class="p">,</span><span class="w"> </span><span class="n">byte_len</span><span class="p">);</span>
+<span class="w">    </span><span class="n">add_to_length_bitmaps</span><span class="p">(</span><span class="n">char_count</span><span class="p">,</span><span class="w"> </span><span class="n">rec_idx</span><span class="p">);</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">lower_char_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">utf8_char_count</span><span class="p">(</span><span class="n">data_cache_lower</span><span class="p">[</span><span class="n">rec_idx</span><span class="p">]);</span>
+<span class="w">    </span><span class="n">add_to_length_bitmaps_lower</span><span class="p">(</span><span class="n">lower_char_count</span><span class="p">,</span><span class="w"> </span><span class="n">rec_idx</span><span class="p">);</span>
 <span class="p">}</span>
 </pre></div>
 </div>
 </section>
-<section id="delete-lazy">
-<h3>Delete (Lazy)<a class="headerlink" href="#delete-lazy" title="Link to this heading"></a></h3>
+<section id="delete-lazy-cleanup">
+<h3>Delete (Lazy + Cleanup)<a class="headerlink" href="#delete-lazy-cleanup" title="Link to this heading"></a></h3>
 <div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="kt">bool</span><span class="w"> </span><span class="nf">callback</span><span class="p">(</span><span class="n">ItemPointer</span><span class="w"> </span><span class="n">tid</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="c1">// Mark as tombstone, don&#39;t remove immediately</span>
+<span class="w">    </span><span class="c1">// Step 1: Mark as tombstone (lazy delete)</span>
 <span class="w">    </span><span class="n">bitmap_add</span><span class="p">(</span><span class="n">tombstones</span><span class="p">,</span><span class="w"> </span><span class="n">rec_idx</span><span class="p">);</span>
 <span class="w">    </span><span class="n">push_free_slot</span><span class="p">(</span><span class="n">rec_idx</span><span class="p">);</span>
 <span class="w">    </span><span class="n">tombstone_count</span><span class="o">++</span><span class="p">;</span>
 <span class="w">    </span>
-<span class="w">    </span><span class="c1">// Cleanup when threshold reached</span>
+<span class="w">    </span><span class="c1">// Step 2: Periodic cleanup when threshold reached</span>
 <span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">tombstone_count</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">1000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<span class="w">        </span><span class="n">cleanup_all_bitmaps</span><span class="p">();</span>
+<span class="w">        </span><span class="c1">// Remove from ALL indices (case-sensitive + case-insensitive)</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">ch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">ch</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">256</span><span class="p">;</span><span class="w"> </span><span class="n">ch</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">pos_idx</span><span class="p">[</span><span class="n">ch</span><span class="p">].</span><span class="n">count</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="o">++</span><span class="p">)</span>
+<span class="w">                </span><span class="n">bitmap_andnot</span><span class="p">(</span><span class="n">pos_idx</span><span class="p">[</span><span class="n">ch</span><span class="p">].</span><span class="n">entries</span><span class="p">[</span><span class="n">j</span><span class="p">].</span><span class="n">bitmap</span><span class="p">,</span><span class="w"> </span><span class="n">tombstones</span><span class="p">);</span>
+<span class="w">            </span>
+<span class="w">            </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">neg_idx</span><span class="p">[</span><span class="n">ch</span><span class="p">].</span><span class="n">count</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="o">++</span><span class="p">)</span>
+<span class="w">                </span><span class="n">bitmap_andnot</span><span class="p">(</span><span class="n">neg_idx</span><span class="p">[</span><span class="n">ch</span><span class="p">].</span><span class="n">entries</span><span class="p">[</span><span class="n">j</span><span class="p">].</span><span class="n">bitmap</span><span class="p">,</span><span class="w"> </span><span class="n">tombstones</span><span class="p">);</span>
+<span class="w">            </span>
+<span class="w">            </span><span class="n">bitmap_andnot</span><span class="p">(</span><span class="n">char_cache</span><span class="p">[</span><span class="n">ch</span><span class="p">],</span><span class="w"> </span><span class="n">tombstones</span><span class="p">);</span>
+<span class="w">            </span>
+<span class="w">            </span><span class="c1">// Same for lowercase indices</span>
+<span class="w">            </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">j</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">pos_idx_lower</span><span class="p">[</span><span class="n">ch</span><span class="p">].</span><span class="n">count</span><span class="p">;</span><span class="w"> </span><span class="n">j</span><span class="o">++</span><span class="p">)</span>
+<span class="w">                </span><span class="n">bitmap_andnot</span><span class="p">(</span><span class="n">pos_idx_lower</span><span class="p">[</span><span class="n">ch</span><span class="p">].</span><span class="n">entries</span><span class="p">[</span><span class="n">j</span><span class="p">].</span><span class="n">bitmap</span><span class="p">,</span><span class="w"> </span><span class="n">tombstones</span><span class="p">);</span>
+<span class="w">            </span><span class="c1">// ... etc</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span>
+<span class="w">        </span><span class="c1">// Clean up length bitmaps (BOTH sets)</span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">max_length</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">bitmap_andnot</span><span class="p">(</span><span class="n">length_bitmaps</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="w"> </span><span class="n">tombstones</span><span class="p">);</span>
+<span class="w">            </span><span class="n">bitmap_andnot</span><span class="p">(</span><span class="n">length_ge_bitmaps</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="w"> </span><span class="n">tombstones</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">max_length_lower</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">            </span><span class="n">bitmap_andnot</span><span class="p">(</span><span class="n">length_bitmaps_lower</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="w"> </span><span class="n">tombstones</span><span class="p">);</span>
+<span class="w">            </span><span class="n">bitmap_andnot</span><span class="p">(</span><span class="n">length_ge_bitmaps_lower</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="w"> </span><span class="n">tombstones</span><span class="p">);</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">        </span>
+<span class="w">        </span><span class="c1">// Reset tombstone bitmap</span>
+<span class="w">        </span><span class="n">bitmap_free</span><span class="p">(</span><span class="n">tombstones</span><span class="p">);</span>
+<span class="w">        </span><span class="n">tombstones</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">bitmap_create</span><span class="p">();</span>
+<span class="w">        </span><span class="n">tombstone_count</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
 <span class="w">    </span><span class="p">}</span>
 <span class="p">}</span>
 </pre></div>
@@ -1377,8 +1740,8 @@ Even with O(m) complexity, Roaring bitmap operations are <strong>faster</strong>
 <h3>Update<a class="headerlink" href="#update" title="Link to this heading"></a></h3>
 <p>Updates are <strong>delete + insert</strong>:</p>
 <div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// PostgreSQL calls:</span>
-<span class="c1">// 1. bulkdelete(old_tid)</span>
-<span class="c1">// 2. insert(new_values, new_tid)</span>
+<span class="c1">// 1. bulkdelete(old_tid)  → Marks old version as tombstone</span>
+<span class="c1">// 2. insert(new_values, new_tid) → Creates new version</span>
 </pre></div>
 </div>
 </section>
@@ -1397,6 +1760,61 @@ Even with O(m) complexity, Roaring bitmap operations are <strong>faster</strong>
 
 <span class="c1">// On subsequent access:</span>
 <span class="n">idx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cache_lookup</span><span class="p">(</span><span class="n">relation_oid</span><span class="p">);</span>
+</pre></div>
+</div>
+</section>
+<section id="size-calculation">
+<h3>Size Calculation<a class="headerlink" href="#size-calculation" title="Link to this heading"></a></h3>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="n">PG_FUNCTION_INFO_V1</span><span class="p">(</span><span class="n">biscuit_index_memory_size</span><span class="p">);</span>
+
+<span class="n">Datum</span><span class="w"> </span><span class="nf">biscuit_index_memory_size</span><span class="p">(</span><span class="n">Oid</span><span class="w"> </span><span class="n">indexoid</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="n">BiscuitIndex</span><span class="w"> </span><span class="o">*</span><span class="n">idx</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">load_index</span><span class="p">(</span><span class="n">indexoid</span><span class="p">);</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">total</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// Base structure</span>
+<span class="w">    </span><span class="n">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">BiscuitIndex</span><span class="p">);</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// TID array</span>
+<span class="w">    </span><span class="n">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">capacity</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">ItemPointerData</span><span class="p">);</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// String data caches (original + lowercase)</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_records</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">strlen</span><span class="p">(</span><span class="n">data_cache</span><span class="p">[</span><span class="n">i</span><span class="p">])</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+<span class="w">        </span><span class="n">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">strlen</span><span class="p">(</span><span class="n">data_cache_lower</span><span class="p">[</span><span class="n">i</span><span class="p">])</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w">  </span><span class="c1">// Lowercase cache</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// Case-sensitive indices (256 characters)</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">ch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">ch</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">256</span><span class="p">;</span><span class="w"> </span><span class="n">ch</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">charindex_size</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pos_idx</span><span class="p">[</span><span class="n">ch</span><span class="p">]);</span>
+<span class="w">        </span><span class="n">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">charindex_size</span><span class="p">(</span><span class="o">&amp;</span><span class="n">neg_idx</span><span class="p">[</span><span class="n">ch</span><span class="p">]);</span>
+<span class="w">        </span><span class="n">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">bitmap_size</span><span class="p">(</span><span class="n">char_cache</span><span class="p">[</span><span class="n">ch</span><span class="p">]);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// Case-insensitive indices (256 characters)</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">ch</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">ch</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">256</span><span class="p">;</span><span class="w"> </span><span class="n">ch</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">charindex_size</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pos_idx_lower</span><span class="p">[</span><span class="n">ch</span><span class="p">]);</span>
+<span class="w">        </span><span class="n">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">charindex_size</span><span class="p">(</span><span class="o">&amp;</span><span class="n">neg_idx_lower</span><span class="p">[</span><span class="n">ch</span><span class="p">]);</span>
+<span class="w">        </span><span class="n">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">bitmap_size</span><span class="p">(</span><span class="n">char_cache_lower</span><span class="p">[</span><span class="n">ch</span><span class="p">]);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// Length bitmaps (BOTH sets)</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">max_length</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">bitmap_size</span><span class="p">(</span><span class="n">length_bitmaps</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+<span class="w">        </span><span class="n">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">bitmap_size</span><span class="p">(</span><span class="n">length_ge_bitmaps</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">max_length_lower</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="n">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">bitmap_size</span><span class="p">(</span><span class="n">length_bitmaps_lower</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+<span class="w">        </span><span class="n">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">bitmap_size</span><span class="p">(</span><span class="n">length_ge_bitmaps_lower</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="c1">// Tombstones + free list</span>
+<span class="w">    </span><span class="n">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">bitmap_size</span><span class="p">(</span><span class="n">tombstones</span><span class="p">);</span>
+<span class="w">    </span><span class="n">total</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">free_capacity</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="kt">uint32_t</span><span class="p">);</span>
+<span class="w">    </span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">total</span><span class="p">;</span>
+<span class="p">}</span>
 </pre></div>
 </div>
 </section>
@@ -1435,54 +1853,16 @@ Even with O(m) complexity, Roaring bitmap operations are <strong>faster</strong>
 <ol class="arabic simple">
 <li><p>Read metadata marker</p></li>
 <li><p>Scan heap table</p></li>
-<li><p>Rebuild all bitmaps in memory</p></li>
+<li><p>Rebuild <strong>all bitmaps</strong> (case-sensitive + case-insensitive) in memory</p></li>
+<li><p>Generate <strong>lowercase data cache</strong></p></li>
 <li><p>Cache in <code class="docutils literal notranslate"><span class="pre">CacheMemoryContext</span></code></p></li>
 </ol>
 <p><strong>Rationale</strong>:</p>
 <ul class="simple">
 <li><p>Bitmap serialization is complex and large</p></li>
 <li><p>Memory representation is optimal for queries</p></li>
+<li><p>Dual indices (LIKE + ILIKE) would double disk size</p></li>
 </ul>
-</section>
-</section>
-<hr class="docutils" />
-<section id="concurrency-mvcc">
-<h2>Concurrency &amp; MVCC<a class="headerlink" href="#concurrency-mvcc" title="Link to this heading"></a></h2>
-<section id="isolation">
-<h3>Isolation<a class="headerlink" href="#isolation" title="Link to this heading"></a></h3>
-<p>Biscuit respects PostgreSQL’s MVCC:</p>
-<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Index stores ALL versions</span>
-<span class="n">tids</span><span class="p">[</span><span class="n">rec_idx</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">*</span><span class="n">heap_tid</span><span class="p">;</span>
-
-<span class="c1">// Visibility checked during heap scan</span>
-<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">HeapTupleSatisfiesVisibility</span><span class="p">(</span><span class="n">tuple</span><span class="p">,</span><span class="w"> </span><span class="n">snapshot</span><span class="p">))</span>
-<span class="w">    </span><span class="k">continue</span><span class="p">;</span><span class="w">  </span><span class="c1">// Skip invisible tuple</span>
-</pre></div>
-</div>
-</section>
-<section id="locking">
-<h3>Locking<a class="headerlink" href="#locking" title="Link to this heading"></a></h3>
-<ul class="simple">
-<li><p><strong>Reads</strong>: AccessShareLock on index</p></li>
-<li><p><strong>Writes</strong>: ExclusiveLock during insert/delete</p></li>
-<li><p><strong>Vacuum</strong>: ShareLock during cleanup</p></li>
-</ul>
-</section>
-<section id="tombstones">
-<h3>Tombstones<a class="headerlink" href="#tombstones" title="Link to this heading"></a></h3>
-<p>Deleted records remain in index as tombstones until vacuum:</p>
-<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Deleted record still in bitmaps, but marked:</span>
-<span class="n">bitmap_add</span><span class="p">(</span><span class="n">tombstones</span><span class="p">,</span><span class="w"> </span><span class="n">rec_idx</span><span class="p">);</span>
-
-<span class="c1">// Filtered during query:</span>
-<span class="n">bitmap_andnot</span><span class="p">(</span><span class="n">result</span><span class="p">,</span><span class="w"> </span><span class="n">tombstones</span><span class="p">);</span>
-
-<span class="c1">// Removed during vacuum when threshold reached</span>
-<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">tombstone_count</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">1000</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="n">cleanup_all_bitmaps</span><span class="p">();</span>
-<span class="p">}</span>
-</pre></div>
-</div>
 </section>
 </section>
 <hr class="docutils" />
@@ -1491,12 +1871,14 @@ Even with O(m) complexity, Roaring bitmap operations are <strong>faster</strong>
 <section id="what-biscuit-does-well">
 <h3>What Biscuit Does Well<a class="headerlink" href="#what-biscuit-does-well" title="Link to this heading"></a></h3>
 <ul class="simple">
-<li><p>Pattern matching (<code class="docutils literal notranslate"><span class="pre">LIKE</span></code>, <code class="docutils literal notranslate"><span class="pre">ILIKE</span></code>)</p></li>
+<li><p>Pattern matching (<code class="docutils literal notranslate"><span class="pre">LIKE</span></code>, <code class="docutils literal notranslate"><span class="pre">ILIKE</span></code>, <code class="docutils literal notranslate"><span class="pre">NOT</span> <span class="pre">LIKE</span></code>, <code class="docutils literal notranslate"><span class="pre">NOT</span> <span class="pre">ILIKE</span></code>)</p></li>
+<li><p>UTF-8 multi-byte character support</p></li>
 <li><p>Prefix/suffix queries (<code class="docutils literal notranslate"><span class="pre">'abc%'</span></code>, <code class="docutils literal notranslate"><span class="pre">'%xyz'</span></code>)</p></li>
 <li><p>Complex multi-wildcard patterns</p></li>
 <li><p>Multi-column pattern searches</p></li>
-<li><p>Case-sensitive and case-insensitive</p></li>
+<li><p>Case-sensitive and case-insensitive (separate indices)</p></li>
 <li><p>Aggregates (<code class="docutils literal notranslate"><span class="pre">COUNT(*)</span></code>, <code class="docutils literal notranslate"><span class="pre">EXISTS</span></code>)</p></li>
+<li><p>International text (German, Turkish, Chinese, etc.)</p></li>
 </ul>
 </section>
 <section id="what-biscuit-doesnt-do">
@@ -1505,101 +1887,60 @@ Even with O(m) complexity, Roaring bitmap operations are <strong>faster</strong>
 <li><p><strong>Equality/range queries</strong>: Use B-tree</p></li>
 <li><p><strong>Full-text search</strong>: Use GIN with tsvector</p></li>
 <li><p><strong>Regex</strong>: Not supported</p></li>
-<li><p><strong>Very long strings</strong>: Memory usage scales with length</p></li>
+<li><p><strong>Very long strings</strong>: Memory usage scales with character length</p></li>
 <li><p><strong>Online serialization</strong>: Requires rebuild on load</p></li>
+<li><p><strong>Locale changes</strong>: Lowercase cache is locale-dependent</p></li>
 </ul>
 </section>
 </section>
 <hr class="docutils" />
-<section id="future-enhancements">
-<h2>Future Enhancements<a class="headerlink" href="#future-enhancements" title="Link to this heading"></a></h2>
-<section id="potential-improvements">
-<h3>Potential Improvements<a class="headerlink" href="#potential-improvements" title="Link to this heading"></a></h3>
-<ol class="arabic simple">
-<li><p><strong>Regex Support</strong>: Extend pattern matching to simple regex</p></li>
-<li><p><strong>Incremental Serialization</strong>: Write bitmaps to disk incrementally</p></li>
-<li><p><strong>Adaptive Compression</strong>: Choose bitmap format based on density</p></li>
-<li><p><strong>Parallel Build</strong>: Multi-threaded index construction</p></li>
-<li><p><strong>Statistics Collection</strong>: Better selectivity estimates</p></li>
-<li><p><strong>GPU Acceleration</strong>: Offload bitmap operations to GPU</p></li>
-<li><p><strong>Distributed Queries</strong>: Shard index across nodes</p></li>
-</ol>
-</section>
-<section id="research-directions">
-<h3>Research Directions<a class="headerlink" href="#research-directions" title="Link to this heading"></a></h3>
+<section id="code-navigation">
+<h2>Code Navigation<a class="headerlink" href="#code-navigation" title="Link to this heading"></a></h2>
+<section id="critical-utf-8-functions">
+<h3>Critical UTF-8 Functions<a class="headerlink" href="#critical-utf-8-functions" title="Link to this heading"></a></h3>
 <ul class="simple">
-<li><p><strong>LSM-tree Integration</strong>: Merge Biscuit with LSM for write-heavy workloads</p></li>
-<li><p><strong>Learned Indices</strong>: ML-based selectivity prediction</p></li>
-<li><p><strong>Approximate Matching</strong>: Fuzzy pattern matching with edit distance</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_utf8_char_length()</span></code> - Get UTF-8 character byte length</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_utf8_char_count()</span></code> - Count characters (not bytes)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_utf8_char_to_byte_offset()</span></code> - Convert char position to byte offset</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_str_tolower()</span></code> - Locale-aware lowercase conversion</p></li>
 </ul>
 </section>
-</section>
-<hr class="docutils" />
-<section id="comparison-to-other-approaches">
-<h2>Comparison to Other Approaches<a class="headerlink" href="#comparison-to-other-approaches" title="Link to this heading"></a></h2>
-<table class="docutils align-default">
-<thead>
-<tr class="row-odd"><th class="head"><p>Index Type</p></th>
-<th class="head"><p>Build Time</p></th>
-<th class="head"><p>Query Time</p></th>
-<th class="head"><p>Memory</p></th>
-<th class="head"><p>Pattern Support</p></th>
-</tr>
-</thead>
-<tbody>
-<tr class="row-even"><td><p><strong>Biscuit</strong></p></td>
-<td><p>Medium</p></td>
-<td><p><strong>Fast</strong></p></td>
-<td><p>Very High</p></td>
-<td><p>LIKE, ILIKE, anchored</p></td>
-</tr>
-<tr class="row-odd"><td><p><strong>B-tree</strong></p></td>
-<td><p>Fast</p></td>
-<td><p>Slow</p></td>
-<td><p>Low</p></td>
-<td><p>Prefix only (<code class="docutils literal notranslate"><span class="pre">'abc%'</span></code>)</p></td>
-</tr>
-<tr class="row-even"><td><p><strong>GIN (trigram)</strong></p></td>
-<td><p>Slow</p></td>
-<td><p>Medium</p></td>
-<td><p>High</p></td>
-<td><p>All patterns, but slower</p></td>
-</tr>
-<tr class="row-odd"><td><p><strong>Hash</strong></p></td>
-<td><p>Fast</p></td>
-<td><p>Fast</p></td>
-<td><p>Low</p></td>
-<td><p>Equality only</p></td>
-</tr>
-<tr class="row-even"><td><p><strong>Full scan</strong></p></td>
-<td><p>-</p></td>
-<td><p>Slowest</p></td>
-<td><p>-</p></td>
-<td><p>All patterns</p></td>
-</tr>
-</tbody>
-</table>
-<p><strong>When to use Biscuit:</strong></p>
+<section id="index-build">
+<h3>Index Build<a class="headerlink" href="#index-build" title="Link to this heading"></a></h3>
 <ul class="simple">
-<li><p>Pattern matching is primary workload</p></li>
-<li><p>Strings are moderate length</p></li>
-<li><p>Memory is available</p></li>
-<li><p>Need sub-ms query latency</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_build()</span></code> - Single-column index construction</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_build_multicolumn()</span></code> - Multi-column index construction</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_load_index()</span></code> - Load/rebuild index from disk</p></li>
 </ul>
 </section>
-<hr class="docutils" />
-<section id="appendix-code-navigation">
-<h2>Appendix: Code Navigation<a class="headerlink" href="#appendix-code-navigation" title="Link to this heading"></a></h2>
-<section id="important-functions">
-<h3>Important Functions<a class="headerlink" href="#important-functions" title="Link to this heading"></a></h3>
+<section id="id2">
+<h3>Query Processing<a class="headerlink" href="#id2" title="Link to this heading"></a></h3>
 <ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_build()</span></code> - Index construction</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_rescan()</span></code> - Query execution entry</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_query_pattern()</span></code> - LIKE query processing</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_query_pattern_ilike()</span></code> - ILIKE query processing</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_match_part_at_pos()</span></code> - Windowed matching core</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_rescan()</span></code> - Query execution entry (single-column)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_rescan_multicolumn()</span></code> - Query execution (multi-column)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_query_pattern()</span></code> - LIKE query (case-sensitive)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_query_pattern_ilike()</span></code> - ILIKE query (case-insensitive)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_match_part_at_pos()</span></code> - Windowed matching (forward)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_match_part_at_end()</span></code> - Windowed matching (reverse)</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">create_query_plan()</span></code> - Multi-column optimizer</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">biscuit_collect_tids_optimized()</span></code> - Result collection</p></li>
+</ul>
+</section>
+<section id="crud">
+<h3>CRUD<a class="headerlink" href="#crud" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_insert()</span></code> - Insert with dual indexing</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_bulkdelete()</span></code> - Lazy delete with cleanup</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_remove_from_all_indices()</span></code> - Remove from all bitmaps</p></li>
+</ul>
+</section>
+<section id="diagnostics">
+<h3>Diagnostics<a class="headerlink" href="#diagnostics" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_index_stats()</span></code> - Runtime statistics</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_index_memory_size()</span></code> - Memory footprint calculation</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_has_roaring()</span></code> - Check Roaring support</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">biscuit_build_info()</span></code> - Build configuration</p></li>
 </ul>
 </section>
 </section>

@@ -29,7 +29,8 @@
 #include "storage/ipc.h"           /* for on_proc_exit */
 #include "funcapi.h"
 #include "access/htup_details.h"
-
+#include "utils/formatting.h"
+#include "utils/pg_locale.h"
 /*
 #ifdef HAVE_ROARING
 #pragma message("Biscuit: compiled WITH Roaring Bitmap support")
@@ -106,7 +107,7 @@ PG_FUNCTION_INFO_V1(biscuit_version);
 Datum
 biscuit_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("2.1.4"));
+    PG_RETURN_TEXT_P(cstring_to_text("2.2.0"));
 }
 
 // Get build information - Set-Returning Function
@@ -231,7 +232,7 @@ biscuit_build_info_json(PG_FUNCTION_ARGS)
     initStringInfo(&buf);
     
     appendStringInfo(&buf, "{");
-    appendStringInfo(&buf, "\"version\": \"2.1.4\",");
+    appendStringInfo(&buf, "\"version\": \"2.2.0\",");
     
 #ifdef HAVE_ROARING
     appendStringInfo(&buf, "\"roaring_enabled\": true,");
@@ -442,7 +443,8 @@ static inline uint32_t* biscuit_roaring_to_array(const RoaringBitmap *rb, uint64
 /* ==================== NEW: ParsedPattern must be defined BEFORE forward declaration ==================== */
 typedef struct {
     char **parts;
-    int *part_lens;
+    int *part_lens;       // CHARACTER counts (for length filters)
+    int *part_byte_lens;  // BYTE lengths (for string operations)
     int part_count;
     bool starts_percent;
     bool ends_percent;
@@ -491,7 +493,7 @@ typedef BiscuitMetaPageData *BiscuitMetaPage;
 /* ==================== ENHANCED INDEX STRUCTURE ==================== */
 
 typedef struct {
-    /* Per-column Biscuit indices */
+    /* Case-sensitive */
     CharIndex pos_idx[CHAR_RANGE];
     CharIndex neg_idx[CHAR_RANGE];
     RoaringBitmap *char_cache[CHAR_RANGE];
@@ -499,10 +501,13 @@ typedef struct {
     RoaringBitmap **length_ge_bitmaps;
     int max_length;
     
-    /* NEW: Add case-insensitive fields */
+    /* Case-insensitive */
     CharIndex pos_idx_lower[CHAR_RANGE];
     CharIndex neg_idx_lower[CHAR_RANGE];
     RoaringBitmap *char_cache_lower[CHAR_RANGE];
+    RoaringBitmap **length_bitmaps_lower;      // NEW
+    RoaringBitmap **length_ge_bitmaps_lower;   // NEW
+    int max_length_lower;                       // NEW
 } ColumnIndex;
 
 typedef struct BiscuitIndex {
@@ -523,10 +528,13 @@ typedef struct BiscuitIndex {
     int max_length_legacy;
     int max_len;
 
-    /* NEW: Case-insensitive index (for ILIKE) */
+     /* Case-insensitive (ILIKE) */
     CharIndex pos_idx_lower[CHAR_RANGE];
     CharIndex neg_idx_lower[CHAR_RANGE];
     RoaringBitmap *char_cache_lower[CHAR_RANGE];
+    RoaringBitmap **length_bitmaps_lower;       // Based on LOWERCASE string length
+    RoaringBitmap **length_ge_bitmaps_lower;    // Based on LOWERCASE string length
+    int max_length_lower;
     
     /* NEW: Lowercase data cache */
     char **data_cache_lower;
@@ -566,38 +574,159 @@ typedef struct {
  * Uses the database default collation (InvalidOid), which is stable and safe
  * for index operations and does not require fcinfo.
  */
-static char* 
+/*
+ * Convert string to lowercase using PostgreSQL's locale-aware lower() function.
+ * Uses the database's default collation for consistent, index-safe behavior.
+ */
+static char *
 biscuit_str_tolower(const char *str, int len)
 {
+    text *input;
+    text *result_text;
     char *result;
-    int i;
-    
-    /* Handle empty string */
-    if (len == 0) {
+    Oid collation;
+
+    if (len == 0)
         return pstrdup("");
-    }
+
+    input = cstring_to_text_with_len(str, len);
     
-    /* Allocate result buffer (same length as input + null terminator) */
-    result = (char *)palloc(len + 1);
-    
-    /* Convert each character to lowercase */
-    for (i = 0; i < len; i++) {
-        /*
-         * pg_tolower() is PostgreSQL's internal function that converts
-         * a single character to lowercase. It handles:
-         * - ASCII letters (A-Z → a-z)
-         * - Extended ASCII (128-255) based on ctype locale
-         * - Already lowercase characters (pass through unchanged)
-         * 
-         * Cast to unsigned char to handle extended ASCII properly
-         */
-        result[i] = pg_tolower((unsigned char)str[i]);
-    }
-    
-    /* Null-terminate the string */
-    result[len] = '\0';
-    
+    /* Get the database's default collation from the system catalog */
+    collation = get_typcollation(TEXTOID);
+
+    result_text = DatumGetTextP(
+        DirectFunctionCall2Coll(
+            lower,
+            collation,
+            PointerGetDatum(input),
+            collation
+        )
+    );
+
+    result = text_to_cstring(result_text);
     return result;
+}
+
+/* ==================== UTF-8 SUPPORT FUNCTIONS ==================== */
+
+/*
+ * Get UTF-8 character length from leading byte
+ * Returns: 1-4 for valid UTF-8, 1 for invalid (treat as single byte)
+ * 
+ * UTF-8 encoding rules:
+ *   1-byte: 0xxxxxxx         (0x00-0x7F)   ASCII
+ *   2-byte: 110xxxxx 10xxxxxx (0xC0-0xDF)
+ *   3-byte: 1110xxxx 10xxxxxx 10xxxxxx (0xE0-0xEF)
+ *   4-byte: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx (0xF0-0xF7)
+ */
+static inline int 
+biscuit_utf8_char_length(unsigned char c)
+{
+    if (c < 0x80)       return 1;  // ASCII: 0xxxxxxx
+    if (c < 0xC0)       return 1;  // Invalid: continuation byte (10xxxxxx)
+    if (c < 0xE0)       return 2;  // 2-byte: 110xxxxx
+    if (c < 0xF0)       return 3;  // 3-byte: 1110xxxx
+    if (c < 0xF8)       return 4;  // 4-byte: 11110xxx
+    return 1;                      // Invalid, treat as single byte
+}
+
+/*
+ * Count UTF-8 characters in a string (not bytes)
+ * Handles invalid UTF-8 gracefully (counts invalid bytes as 1 char each)
+ * 
+ * Example:
+ *   "café" = [63 61 66 C3 A9] = 5 bytes, 4 characters
+ *   "日本"  = [E6 97 A5 E6 9C AC] = 6 bytes, 2 characters
+ */
+static int 
+biscuit_utf8_char_count(const char *str, int byte_len)
+{
+    int char_count = 0;
+    int pos = 0;
+    
+    while (pos < byte_len) {
+        int char_len = biscuit_utf8_char_length((unsigned char)str[pos]);
+        
+        // Safety: Don't read past buffer
+        if (pos + char_len > byte_len)
+            char_len = byte_len - pos;
+        
+        pos += char_len;
+        char_count++;
+    }
+    
+    return char_count;
+}
+
+/*
+ * Validate UTF-8 continuation byte
+ * Returns: true if byte matches 10xxxxxx pattern
+ */
+static inline bool 
+biscuit_utf8_is_continuation(unsigned char c)
+{
+    return (c & 0xC0) == 0x80;  // 10xxxxxx
+}
+
+/*
+ * Validate UTF-8 character at byte position
+ * Returns: true if valid, false if malformed
+ * 
+ * Checks:
+ *   1. Correct number of continuation bytes
+ *   2. Each continuation byte has 10xxxxxx pattern
+ *   3. No buffer overrun
+ */
+static bool 
+biscuit_utf8_validate_char(const char *str, int byte_pos, int byte_len)
+{
+    if (byte_pos >= byte_len)
+        return false;
+    
+    unsigned char c = (unsigned char)str[byte_pos];
+    int char_len = biscuit_utf8_char_length(c);
+    
+    // Check buffer bounds
+    if (byte_pos + char_len > byte_len)
+        return false;
+    
+    // Validate continuation bytes
+    for (int i = 1; i < char_len; i++) {
+        if (!biscuit_utf8_is_continuation((unsigned char)str[byte_pos + i]))
+            return false;
+    }
+    
+    return true;
+}
+
+/*
+ * Get byte offset of character at given character position
+ * Returns: byte offset, or -1 if char_pos out of range
+ * 
+ * Example:
+ *   str = "café" (bytes: [63 61 66 C3 A9])
+ *   char_pos 0 → byte 0 ('c')
+ *   char_pos 1 → byte 1 ('a')
+ *   char_pos 2 → byte 2 ('f')
+ *   char_pos 3 → byte 3 ('é' starts at 0xC3)
+ */
+static int
+biscuit_utf8_char_to_byte_offset(const char *str, int byte_len, int char_pos)
+{
+    int current_char = 0;
+    int byte_pos = 0;
+    
+    while (byte_pos < byte_len && current_char < char_pos) {
+        int char_len = biscuit_utf8_char_length((unsigned char)str[byte_pos]);
+        
+        if (byte_pos + char_len > byte_len)
+            return -1;  // Invalid UTF-8
+        
+        byte_pos += char_len;
+        current_char++;
+    }
+    
+    return (current_char == char_pos) ? byte_pos : -1;
 }
 /* ==================== QUERY TYPE DETECTION ==================== */
 
@@ -1503,34 +1632,147 @@ static bool biscuit_pop_free_slot(BiscuitIndex *idx, uint32_t *slot)
     return true;
 }
 
-static void biscuit_remove_from_all_indices(BiscuitIndex *idx, uint32_t rec_idx)
+/* ==================== FIXED: biscuit_remove_from_all_indices ==================== */
+/*
+ * Remove a record from ALL indices (LIKE, ILIKE, and all length bitmaps)
+ * Called during DELETE operations and tombstone cleanup
+ * 
+ * CRITICAL FIXES:
+ * 1. Use j <= max_length (not j < max_length) to include last bitmap
+ * 2. Add bounds checks before loops
+ * 3. Add NULL checks for bitmap arrays
+ * 4. Remove from BOTH case-sensitive AND case-insensitive length bitmaps
+ */
+static void 
+biscuit_remove_from_all_indices(BiscuitIndex *idx, uint32_t rec_idx)
 {
-    int ch, j;
+    int ch, j, col;
     CharIndex *pos_cidx;
     CharIndex *neg_cidx;
     
-    /* Remove from character indices */
-    for (ch = 0; ch < CHAR_RANGE; ch++)
-    {
-        pos_cidx = &idx->pos_idx_legacy[ch];  /* ADD _legacy */
+    if (!idx)
+        return;
+    
+    /* ==================== MULTI-COLUMN INDICES ==================== */
+    if (idx->num_columns > 1 && idx->column_indices) {
+        for (col = 0; col < idx->num_columns; col++) {
+            ColumnIndex *cidx = &idx->column_indices[col];
+            
+            /* Case-sensitive character indices */
+            for (ch = 0; ch < CHAR_RANGE; ch++) {
+                pos_cidx = &cidx->pos_idx[ch];
+                for (j = 0; j < pos_cidx->count; j++)
+                    biscuit_roaring_remove(pos_cidx->entries[j].bitmap, rec_idx);
+                
+                neg_cidx = &cidx->neg_idx[ch];
+                for (j = 0; j < neg_cidx->count; j++)
+                    biscuit_roaring_remove(neg_cidx->entries[j].bitmap, rec_idx);
+                
+                if (cidx->char_cache[ch])
+                    biscuit_roaring_remove(cidx->char_cache[ch], rec_idx);
+            }
+            
+            /* Case-insensitive character indices */
+            for (ch = 0; ch < CHAR_RANGE; ch++) {
+                pos_cidx = &cidx->pos_idx_lower[ch];
+                for (j = 0; j < pos_cidx->count; j++)
+                    biscuit_roaring_remove(pos_cidx->entries[j].bitmap, rec_idx);
+                
+                neg_cidx = &cidx->neg_idx_lower[ch];
+                for (j = 0; j < neg_cidx->count; j++)
+                    biscuit_roaring_remove(neg_cidx->entries[j].bitmap, rec_idx);
+                
+                if (cidx->char_cache_lower[ch])
+                    biscuit_roaring_remove(cidx->char_cache_lower[ch], rec_idx);
+            }
+            
+            /* ✅ FIX: Remove from ALL allocated length bitmaps, not just up to max_length */
+            /* The issue: max_length is the max STRING length, but arrays may be larger */
+            /* We need to check each bitmap individually */
+            
+            /* Case-sensitive length bitmaps */
+            if (cidx->length_bitmaps) {
+                /* Find actual array size by checking allocations */
+                for (j = 0; j < cidx->max_length; j++) {
+                    if (cidx->length_bitmaps[j])
+                        biscuit_roaring_remove(cidx->length_bitmaps[j], rec_idx);
+                }
+            }
+            
+            if (cidx->length_ge_bitmaps) {
+                for (j = 0; j < cidx->max_length; j++) {
+                    if (cidx->length_ge_bitmaps[j])
+                        biscuit_roaring_remove(cidx->length_ge_bitmaps[j], rec_idx);
+                }
+            }
+            
+            /* Case-insensitive length bitmaps */
+            if (cidx->length_bitmaps_lower) {
+                for (j = 0; j < cidx->max_length_lower; j++) {
+                    if (cidx->length_bitmaps_lower[j])
+                        biscuit_roaring_remove(cidx->length_bitmaps_lower[j], rec_idx);
+                }
+            }
+            
+            if (cidx->length_ge_bitmaps_lower) {
+                for (j = 0; j < cidx->max_length_lower; j++) {
+                    if (cidx->length_ge_bitmaps_lower[j])
+                        biscuit_roaring_remove(cidx->length_ge_bitmaps_lower[j], rec_idx);
+                }
+            }
+        }
+        
+        return;
+    }
+    
+    /* ==================== SINGLE-COLUMN (LEGACY) ==================== */
+    
+    /* Case-sensitive character indices */
+    for (ch = 0; ch < CHAR_RANGE; ch++) {
+        pos_cidx = &idx->pos_idx_legacy[ch];
         for (j = 0; j < pos_cidx->count; j++)
             biscuit_roaring_remove(pos_cidx->entries[j].bitmap, rec_idx);
         
-        neg_cidx = &idx->neg_idx_legacy[ch];  /* ADD _legacy */
+        neg_cidx = &idx->neg_idx_legacy[ch];
         for (j = 0; j < neg_cidx->count; j++)
             biscuit_roaring_remove(neg_cidx->entries[j].bitmap, rec_idx);
         
-        if (idx->char_cache_legacy[ch])  /* ADD _legacy */
+        if (idx->char_cache_legacy[ch])
             biscuit_roaring_remove(idx->char_cache_legacy[ch], rec_idx);
     }
     
-    /* Remove from length bitmaps */
-    for (j = 0; j < idx->max_length_legacy; j++)  /* ADD _legacy */
-    {
-        if (idx->length_bitmaps_legacy[j])  /* ADD _legacy */
-            biscuit_roaring_remove(idx->length_bitmaps_legacy[j], rec_idx);
-        if (idx->length_ge_bitmaps_legacy[j])  /* ADD _legacy */
-            biscuit_roaring_remove(idx->length_ge_bitmaps_legacy[j], rec_idx);
+    /* Case-insensitive character indices */
+    for (ch = 0; ch < CHAR_RANGE; ch++) {
+        pos_cidx = &idx->pos_idx_lower[ch];
+        for (j = 0; j < pos_cidx->count; j++)
+            biscuit_roaring_remove(pos_cidx->entries[j].bitmap, rec_idx);
+        
+        neg_cidx = &idx->neg_idx_lower[ch];
+        for (j = 0; j < neg_cidx->count; j++)
+            biscuit_roaring_remove(neg_cidx->entries[j].bitmap, rec_idx);
+        
+        if (idx->char_cache_lower[ch])
+            biscuit_roaring_remove(idx->char_cache_lower[ch], rec_idx);
+    }
+    
+    /* ✅ FIX: Use < instead of <= for array bounds */
+    /* Arrays are sized [0..max_length_legacy-1] */
+    if (idx->max_length_legacy > 0) {
+        for (j = 0; j < idx->max_length_legacy; j++) {
+            if (idx->length_bitmaps_legacy && idx->length_bitmaps_legacy[j])
+                biscuit_roaring_remove(idx->length_bitmaps_legacy[j], rec_idx);
+            if (idx->length_ge_bitmaps_legacy && idx->length_ge_bitmaps_legacy[j])
+                biscuit_roaring_remove(idx->length_ge_bitmaps_legacy[j], rec_idx);
+        }
+    }
+    
+    if (idx->max_length_lower > 0) {
+        for (j = 0; j < idx->max_length_lower; j++) {
+            if (idx->length_bitmaps_lower && idx->length_bitmaps_lower[j])
+                biscuit_roaring_remove(idx->length_bitmaps_lower[j], rec_idx);
+            if (idx->length_ge_bitmaps_lower && idx->length_ge_bitmaps_lower[j])
+                biscuit_roaring_remove(idx->length_ge_bitmaps_lower[j], rec_idx);
+        }
     }
 }
 /* ==================== ROARING BITMAP WRAPPER ==================== */
@@ -1897,11 +2139,33 @@ biscuit_set_neg_bitmap_lower(BiscuitIndex *idx, unsigned char ch, int neg_offset
 
 static RoaringBitmap* 
 biscuit_get_length_ge_lower(BiscuitIndex *idx, int min_len) {
-    if (min_len >= idx->max_length_legacy)
+    // ✅ FIX: Use the lowercase-specific max_length and bitmaps
+    if (min_len >= idx->max_length_lower)
         return biscuit_roaring_create();
-    return biscuit_roaring_copy(idx->length_ge_bitmaps_legacy[min_len]);
+    
+    // ✅ FIX: Return from lowercase bitmaps, not legacy
+    if (!idx->length_ge_bitmaps_lower || !idx->length_ge_bitmaps_lower[min_len])
+        return biscuit_roaring_create();
+        
+    return biscuit_roaring_copy(idx->length_ge_bitmaps_lower[min_len]);
 }
 
+/* Get column lowercase length >= bitmap for ILIKE */
+static RoaringBitmap* 
+biscuit_get_col_length_ge_lower(ColumnIndex *col_idx, int min_len) {
+    if (!col_idx) {
+        return biscuit_roaring_create();
+    }
+    
+    if (!col_idx->length_ge_bitmaps_lower) {
+        return biscuit_roaring_create();
+    }
+    
+    if (min_len > col_idx->max_length_lower)
+        return biscuit_roaring_create();
+    
+    return biscuit_roaring_copy(col_idx->length_ge_bitmaps_lower[min_len]);
+}
 /* ==================== PER-COLUMN BITMAP ACCESSORS ==================== */
 
 static RoaringBitmap* 
@@ -2196,22 +2460,6 @@ biscuit_set_col_neg_bitmap_lower(ColumnIndex *col_idx, unsigned char ch, int neg
     cidx->count++;
 }
 
-static RoaringBitmap* 
-biscuit_get_col_length_ge_lower(ColumnIndex *col_idx, int min_len) {
-    if (!col_idx) {
-        return biscuit_roaring_create();
-    }
-    
-    // CHANGE: Use regular length_ge_bitmaps instead
-    if (!col_idx->length_ge_bitmaps) {
-        return biscuit_roaring_create();
-    }
-    
-    if (min_len > col_idx->max_length)
-        return biscuit_roaring_create();
-    
-    return biscuit_roaring_copy(col_idx->length_ge_bitmaps[min_len]);
-}
 /* ==================== OPTIMIZED PATTERN MATCHING ==================== */
 
 static RoaringBitmap* biscuit_get_length_ge(BiscuitIndex *idx, int min_len) {
@@ -2220,204 +2468,578 @@ static RoaringBitmap* biscuit_get_length_ge(BiscuitIndex *idx, int min_len) {
     return biscuit_roaring_copy(idx->length_ge_bitmaps_legacy[min_len]);
 }
 
-/* OPTIMIZATION 1: Skip wildcards entirely, only intersect concrete characters */
-/* 
-* OPTIMIZATION 1: Skip wildcards in intersection, but still account for their positions
-* Fixed: wildcards advance position without adding constraints
-*/
-/*
-* CRITICAL FIX: '_' is NOT a wildcard to skip - it's a concrete position constraint!
-* '_' means "exactly one character at this position" - it MUST be counted for length
-* Only '%' is a true wildcard that can match zero or more characters
-*/
-
-static RoaringBitmap* biscuit_match_part_at_pos(BiscuitIndex *idx, const char *part, int part_len, int start_pos) {
-    RoaringBitmap *result = NULL;
-    RoaringBitmap *char_bm;
-    RoaringBitmap *len_filter;
-    int i, concrete_chars = 0;
-    int pos;
-    
-    /* Intersect all non-wildcard character constraints */
-    for (i = 0; i < part_len; i++) {
-        if (part[i] == '_') {
-            continue;
-        }
-        
-        concrete_chars++;
-        pos = start_pos + i;
-        char_bm = biscuit_get_pos_bitmap(idx, (unsigned char)part[i], pos);
-        
-        if (!char_bm) {
-            if (result) biscuit_roaring_free(result);
-            return biscuit_roaring_create();
-        }
-        
-        if (!result) {
-            result = biscuit_roaring_copy(char_bm);
-        } else {
-            biscuit_roaring_and_inplace(result, char_bm);
-            if (biscuit_roaring_is_empty(result))
-                return result;
-        }
-    }
-    
-    /* All wildcards case */
-    if (concrete_chars == 0) {
-        result = biscuit_get_length_ge(idx, start_pos + part_len);
-    } else {
-        len_filter = biscuit_get_length_ge(idx, start_pos + part_len);
-        biscuit_roaring_and_inplace(result, len_filter);
-        biscuit_roaring_free(len_filter);
-    }
-    
-    return result;
-}
-/*
-* Match a part at the end using negative indexing
-* Returns bitmap of records where the part matches at the string's end
-*/
-static RoaringBitmap* biscuit_match_part_at_end(BiscuitIndex *idx, const char *part, int part_len) {
-    RoaringBitmap *result = NULL;
-    RoaringBitmap *char_bm;
-    RoaringBitmap *len_filter;
-    int i, concrete_chars = 0;
-    int neg_pos;
-    
-    /* Intersect all non-wildcard character constraints */
-    for (i = 0; i < part_len; i++) {
-        if (part[i] == '_') {
-            continue;
-        }
-        
-        concrete_chars++;
-        neg_pos = -(part_len - i);
-        char_bm = biscuit_get_neg_bitmap(idx, (unsigned char)part[i], neg_pos);
-        
-        if (!char_bm) {
-            if (result) biscuit_roaring_free(result);
-            return biscuit_roaring_create();
-        }
-        
-        if (!result) {
-            result = biscuit_roaring_copy(char_bm);
-        } else {
-            biscuit_roaring_and_inplace(result, char_bm);
-            if (biscuit_roaring_is_empty(result))
-                return result;
-        }
-    }
-    
-    /* All wildcards case */
-    if (concrete_chars == 0) {
-        result = biscuit_get_length_ge(idx, part_len);
-    } else {
-        len_filter = biscuit_get_length_ge(idx, part_len);
-        biscuit_roaring_and_inplace(result, len_filter);
-        biscuit_roaring_free(len_filter);
-    }
-    
-    return result;
-}
-
-/* ==================== ILIKE PATTERN MATCHING ==================== */
+/* ==================== FIXED: UTF-8-AWARE PATTERN MATCHING ==================== */
 
 /*
- * Match pattern part at position using lowercase index
+ * Match a pattern part at a specific character position
+ * Handles multi-byte UTF-8 characters correctly
+ */
+/* ==================== CRITICAL FIX: UTF-8 Pattern Matching ==================== */
+
+/*
+ * The bug: Multi-byte UTF-8 characters weren't being matched correctly because
+ * we were trying to match ALL bytes of a character but weren't handling the
+ * bitmap intersection properly.
+ * 
+ * Example: 'café' has 'é' = [0xC3, 0xA9]
+ * - We index BOTH 0xC3 and 0xA9 at position 3
+ * - We need to find records that have BOTH bytes at position 3
+ * - The old code was doing AND between different byte positions
+ */
+
+/*
+ * FIXED: Match a pattern part at a specific character position
+ * Correctly handles multi-byte UTF-8 characters
  */
 static RoaringBitmap* 
-biscuit_match_part_at_pos_ilike(BiscuitIndex *idx, const char *part, int part_len, int start_pos) {
+biscuit_match_part_at_pos(BiscuitIndex *idx, const char *part, int part_byte_len, int start_pos) {
     RoaringBitmap *result = NULL;
-    RoaringBitmap *char_bm;
     RoaringBitmap *len_filter;
-    int i, concrete_chars = 0;
-    int pos;
+    int part_byte_pos = 0;
+    int char_pos = start_pos;
+    int concrete_chars = 0;
+    bool first_char = true;
     
-    /* Intersect all non-wildcard character constraints (lowercase) */
-    for (i = 0; i < part_len; i++) {
-        if (part[i] == '_') {
+    /* Process pattern character by character (not byte by byte) */
+    while (part_byte_pos < part_byte_len) {
+        unsigned char first_byte = (unsigned char)part[part_byte_pos];
+        
+        /* Handle underscore wildcard */
+        if (first_byte == '_') {
+            part_byte_pos++;
+            char_pos++;
             continue;
         }
         
+        /* Get UTF-8 character length */
+        int char_len = biscuit_utf8_char_length(first_byte);
+        if (part_byte_pos + char_len > part_byte_len)
+            char_len = part_byte_len - part_byte_pos;
+        
         concrete_chars++;
-        pos = start_pos + i;
-        char_bm = biscuit_get_pos_bitmap_lower(idx, (unsigned char)part[i], pos);
         
-        if (!char_bm) {
-            if (result) biscuit_roaring_free(result);
-            return biscuit_roaring_create();
-        }
-        
-        if (!result) {
-            result = biscuit_roaring_copy(char_bm);
+        /* CRITICAL FIX: For multi-byte chars, we need records that have ALL bytes */
+        if (char_len == 1) {
+            /* Single-byte character - simple case */
+            RoaringBitmap *char_bm = biscuit_get_pos_bitmap(idx, first_byte, char_pos);
+            
+            if (!char_bm) {
+                if (result) biscuit_roaring_free(result);
+                return biscuit_roaring_create();
+            }
+            
+            if (first_char) {
+                result = biscuit_roaring_copy(char_bm);
+                first_char = false;
+            } else {
+                biscuit_roaring_and_inplace(result, char_bm);
+                if (biscuit_roaring_is_empty(result)) {
+                    return result;
+                }
+            }
         } else {
-            biscuit_roaring_and_inplace(result, char_bm);
-            if (biscuit_roaring_is_empty(result))
-                return result;
+            /* Multi-byte character - MUST have ALL bytes at this position */
+            RoaringBitmap *multibyte_result = NULL;
+            int b;
+            
+            for (b = 0; b < char_len; b++) {
+                unsigned char byte_val = (unsigned char)part[part_byte_pos + b];
+                RoaringBitmap *byte_bm = biscuit_get_pos_bitmap(idx, byte_val, char_pos);
+                
+                if (!byte_bm) {
+                    if (multibyte_result) biscuit_roaring_free(multibyte_result);
+                    if (result) biscuit_roaring_free(result);
+                    return biscuit_roaring_create();
+                }
+                
+                if (b == 0) {
+                    /* First byte of multi-byte char */
+                    multibyte_result = biscuit_roaring_copy(byte_bm);
+                } else {
+                    /* Subsequent bytes - must intersect */
+                    biscuit_roaring_and_inplace(multibyte_result, byte_bm);
+                    if (biscuit_roaring_is_empty(multibyte_result)) {
+                        biscuit_roaring_free(multibyte_result);
+                        if (result) biscuit_roaring_free(result);
+                        return biscuit_roaring_create();
+                    }
+                }
+            }
+            
+            /* Now intersect this character's result with overall result */
+            if (first_char) {
+                result = multibyte_result;
+                first_char = false;
+            } else {
+                biscuit_roaring_and_inplace(result, multibyte_result);
+                biscuit_roaring_free(multibyte_result);
+                if (biscuit_roaring_is_empty(result)) {
+                    return result;
+                }
+            }
         }
+        
+        part_byte_pos += char_len;
+        char_pos++;
     }
     
     /* All wildcards case */
     if (concrete_chars == 0) {
-        result = biscuit_get_length_ge_lower(idx, start_pos + part_len);
+        int pattern_char_count = biscuit_utf8_char_count(part, part_byte_len);
+        if (result) biscuit_roaring_free(result);
+        result = biscuit_get_length_ge(idx, start_pos + pattern_char_count);
     } else {
-        len_filter = biscuit_get_length_ge_lower(idx, start_pos + part_len);
-        biscuit_roaring_and_inplace(result, len_filter);
-        biscuit_roaring_free(len_filter);
+        /* Apply length constraint */
+        int pattern_char_count = biscuit_utf8_char_count(part, part_byte_len);
+        len_filter = biscuit_get_length_ge(idx, start_pos + pattern_char_count);
+        if (len_filter) {
+            if (result) {
+                biscuit_roaring_and_inplace(result, len_filter);
+            } else {
+                result = len_filter;
+                len_filter = NULL;
+            }
+            if (len_filter) biscuit_roaring_free(len_filter);
+        }
     }
     
-    return result;
+    return result ? result : biscuit_roaring_create();
 }
 
-/*
- * Match pattern part at end using lowercase index
- */
+/* ==================== FIXED: biscuit_match_part_at_end ==================== */
 static RoaringBitmap* 
-biscuit_match_part_at_end_ilike(BiscuitIndex *idx, const char *part, int part_len) {
+biscuit_match_part_at_end(BiscuitIndex *idx, const char *part, int part_byte_len) {
     RoaringBitmap *result = NULL;
-    RoaringBitmap *char_bm;
     RoaringBitmap *len_filter;
-    int i, concrete_chars = 0;
-    int neg_pos;
+    int concrete_chars = 0;
+    bool first_char = true;
     
-    /* Intersect all non-wildcard character constraints (lowercase) */
-    for (i = 0; i < part_len; i++) {
-        if (part[i] == '_') {
+    /* Count characters in pattern (not bytes) */
+    int pattern_char_count = biscuit_utf8_char_count(part, part_byte_len);
+    
+    /* Process pattern from end to beginning */
+    int part_byte_pos = 0;
+    int char_offset_from_end = 0;
+    
+    while (part_byte_pos < part_byte_len) {
+        unsigned char first_byte = (unsigned char)part[part_byte_pos];
+        
+        /* Handle underscore wildcard */
+        if (first_byte == '_') {
+            part_byte_pos++;
+            char_offset_from_end++;
             continue;
         }
         
+        /* Get UTF-8 character length */
+        int char_len = biscuit_utf8_char_length(first_byte);
+        if (part_byte_pos + char_len > part_byte_len)
+            char_len = part_byte_len - part_byte_pos;
+        
         concrete_chars++;
-        neg_pos = -(part_len - i);
-        char_bm = biscuit_get_neg_bitmap_lower(idx, (unsigned char)part[i], neg_pos);
         
-        if (!char_bm) {
-            if (result) biscuit_roaring_free(result);
-            return biscuit_roaring_create();
-        }
+        /* Calculate negative position */
+        int neg_pos = -(pattern_char_count - char_offset_from_end);
         
-        if (!result) {
-            result = biscuit_roaring_copy(char_bm);
+        /* Match all bytes of this character at negative position */
+        if (char_len == 1) {
+            /* Single-byte character */
+            RoaringBitmap *char_bm = biscuit_get_neg_bitmap(idx, first_byte, neg_pos);
+            
+            if (!char_bm) {
+                if (result) biscuit_roaring_free(result);
+                return biscuit_roaring_create();
+            }
+            
+            if (first_char) {
+                result = biscuit_roaring_copy(char_bm);
+                first_char = false;
+            } else {
+                biscuit_roaring_and_inplace(result, char_bm);
+                if (biscuit_roaring_is_empty(result)) {
+                    return result;
+                }
+            }
         } else {
-            biscuit_roaring_and_inplace(result, char_bm);
-            if (biscuit_roaring_is_empty(result))
-                return result;
+            /* Multi-byte character - must have ALL bytes */
+            RoaringBitmap *multibyte_result = NULL;
+            int b;
+            
+            for (b = 0; b < char_len; b++) {
+                unsigned char byte_val = (unsigned char)part[part_byte_pos + b];
+                RoaringBitmap *byte_bm = biscuit_get_neg_bitmap(idx, byte_val, neg_pos);
+                
+                if (!byte_bm) {
+                    if (multibyte_result) biscuit_roaring_free(multibyte_result);
+                    if (result) biscuit_roaring_free(result);
+                    return biscuit_roaring_create();
+                }
+                
+                if (b == 0) {
+                    multibyte_result = biscuit_roaring_copy(byte_bm);
+                } else {
+                    biscuit_roaring_and_inplace(multibyte_result, byte_bm);
+                    if (biscuit_roaring_is_empty(multibyte_result)) {
+                        biscuit_roaring_free(multibyte_result);
+                        if (result) biscuit_roaring_free(result);
+                        return biscuit_roaring_create();
+                    }
+                }
+            }
+            
+            /* Intersect with overall result */
+            if (first_char) {
+                result = multibyte_result;
+                first_char = false;
+            } else {
+                biscuit_roaring_and_inplace(result, multibyte_result);
+                biscuit_roaring_free(multibyte_result);
+                if (biscuit_roaring_is_empty(result)) {
+                    return result;
+                }
+            }
         }
+        
+        part_byte_pos += char_len;
+        char_offset_from_end++;
     }
     
     /* All wildcards case */
     if (concrete_chars == 0) {
-        result = biscuit_get_length_ge_lower(idx, part_len);
+        if (result) biscuit_roaring_free(result);
+        result = biscuit_get_length_ge(idx, pattern_char_count);
     } else {
-        len_filter = biscuit_get_length_ge_lower(idx, part_len);
-        biscuit_roaring_and_inplace(result, len_filter);
-        biscuit_roaring_free(len_filter);
+        len_filter = biscuit_get_length_ge(idx, pattern_char_count);
+        if (len_filter) {
+            if (result) {
+                biscuit_roaring_and_inplace(result, len_filter);
+            } else {
+                result = len_filter;
+                len_filter = NULL;
+            }
+            if (len_filter) biscuit_roaring_free(len_filter);
+        }
     }
     
-    return result;
+    return result ? result : biscuit_roaring_create();
+}
+
+/* ==================== FIXED: biscuit_match_part_at_pos_ilike ==================== */
+static RoaringBitmap* 
+biscuit_match_part_at_pos_ilike(BiscuitIndex *idx, const char *part, int part_byte_len, int start_pos) {
+    RoaringBitmap *result = NULL;
+    RoaringBitmap *len_filter;
+    int part_byte_pos = 0;
+    int char_pos = start_pos;
+    int concrete_chars = 0;
+    bool first_char = true;
+    
+    while (part_byte_pos < part_byte_len) {
+        unsigned char first_byte = (unsigned char)part[part_byte_pos];
+        
+        if (first_byte == '_') {
+            part_byte_pos++;
+            char_pos++;
+            continue;
+        }
+        
+        int char_len = biscuit_utf8_char_length(first_byte);
+        if (part_byte_pos + char_len > part_byte_len)
+            char_len = part_byte_len - part_byte_pos;
+        
+        concrete_chars++;
+        
+        if (char_len == 1) {
+            RoaringBitmap *char_bm = biscuit_get_pos_bitmap_lower(idx, first_byte, char_pos);
+            
+            if (!char_bm) {
+                if (result) biscuit_roaring_free(result);
+                return biscuit_roaring_create();
+            }
+            
+            if (first_char) {
+                result = biscuit_roaring_copy(char_bm);
+                first_char = false;
+            } else {
+                biscuit_roaring_and_inplace(result, char_bm);
+                if (biscuit_roaring_is_empty(result))
+                    return result;
+            }
+        } else {
+            RoaringBitmap *multibyte_result = NULL;
+            int b;
+            
+            for (b = 0; b < char_len; b++) {
+                unsigned char byte_val = (unsigned char)part[part_byte_pos + b];
+                RoaringBitmap *byte_bm = biscuit_get_pos_bitmap_lower(idx, byte_val, char_pos);
+                
+                if (!byte_bm) {
+                    if (multibyte_result) biscuit_roaring_free(multibyte_result);
+                    if (result) biscuit_roaring_free(result);
+                    return biscuit_roaring_create();
+                }
+                
+                if (b == 0) {
+                    multibyte_result = biscuit_roaring_copy(byte_bm);
+                } else {
+                    biscuit_roaring_and_inplace(multibyte_result, byte_bm);
+                    if (biscuit_roaring_is_empty(multibyte_result)) {
+                        biscuit_roaring_free(multibyte_result);
+                        if (result) biscuit_roaring_free(result);
+                        return biscuit_roaring_create();
+                    }
+                }
+            }
+            
+            if (first_char) {
+                result = multibyte_result;
+                first_char = false;
+            } else {
+                biscuit_roaring_and_inplace(result, multibyte_result);
+                biscuit_roaring_free(multibyte_result);
+                if (biscuit_roaring_is_empty(result))
+                    return result;
+            }
+        }
+        
+        part_byte_pos += char_len;
+        char_pos++;
+    }
+    
+    if (concrete_chars == 0) {
+        int pattern_char_count = biscuit_utf8_char_count(part, part_byte_len);
+        if (result) biscuit_roaring_free(result);
+        result = biscuit_get_length_ge_lower(idx, start_pos + pattern_char_count);
+    } else {
+        int pattern_char_count = biscuit_utf8_char_count(part, part_byte_len);
+        len_filter = biscuit_get_length_ge_lower(idx, start_pos + pattern_char_count);
+        if (len_filter) {
+            if (result) {
+                biscuit_roaring_and_inplace(result, len_filter);
+            } else {
+                result = len_filter;
+                len_filter = NULL;
+            }
+            if (len_filter) biscuit_roaring_free(len_filter);
+        }
+    }
+    
+    return result ? result : biscuit_roaring_create();
+}
+
+/* ==================== FIXED: biscuit_match_part_at_end_ilike ==================== */
+static RoaringBitmap* 
+biscuit_match_part_at_end_ilike(BiscuitIndex *idx, const char *part, int part_byte_len) {
+    RoaringBitmap *result = NULL;
+    RoaringBitmap *len_filter;
+    int concrete_chars = 0;
+    bool first_char = true;
+    
+    int pattern_char_count = biscuit_utf8_char_count(part, part_byte_len);
+    
+    int part_byte_pos = 0;
+    int char_offset_from_end = 0;
+    
+    while (part_byte_pos < part_byte_len) {
+        unsigned char first_byte = (unsigned char)part[part_byte_pos];
+        
+        if (first_byte == '_') {
+            part_byte_pos++;
+            char_offset_from_end++;
+            continue;
+        }
+        
+        int char_len = biscuit_utf8_char_length(first_byte);
+        if (part_byte_pos + char_len > part_byte_len)
+            char_len = part_byte_len - part_byte_pos;
+        
+        concrete_chars++;
+        
+        int neg_pos = -(pattern_char_count - char_offset_from_end);
+        
+        if (char_len == 1) {
+            RoaringBitmap *char_bm = biscuit_get_neg_bitmap_lower(idx, first_byte, neg_pos);
+            
+            if (!char_bm) {
+                if (result) biscuit_roaring_free(result);
+                return biscuit_roaring_create();
+            }
+            
+            if (first_char) {
+                result = biscuit_roaring_copy(char_bm);
+                first_char = false;
+            } else {
+                biscuit_roaring_and_inplace(result, char_bm);
+                if (biscuit_roaring_is_empty(result))
+                    return result;
+            }
+        } else {
+            RoaringBitmap *multibyte_result = NULL;
+            int b;
+            
+            for (b = 0; b < char_len; b++) {
+                unsigned char byte_val = (unsigned char)part[part_byte_pos + b];
+                RoaringBitmap *byte_bm = biscuit_get_neg_bitmap_lower(idx, byte_val, neg_pos);
+                
+                if (!byte_bm) {
+                    if (multibyte_result) biscuit_roaring_free(multibyte_result);
+                    if (result) biscuit_roaring_free(result);
+                    return biscuit_roaring_create();
+                }
+                
+                if (b == 0) {
+                    multibyte_result = biscuit_roaring_copy(byte_bm);
+                } else {
+                    biscuit_roaring_and_inplace(multibyte_result, byte_bm);
+                    if (biscuit_roaring_is_empty(multibyte_result)) {
+                        biscuit_roaring_free(multibyte_result);
+                        if (result) biscuit_roaring_free(result);
+                        return biscuit_roaring_create();
+                    }
+                }
+            }
+            
+            if (first_char) {
+                result = multibyte_result;
+                first_char = false;
+            } else {
+                biscuit_roaring_and_inplace(result, multibyte_result);
+                biscuit_roaring_free(multibyte_result);
+                if (biscuit_roaring_is_empty(result))
+                    return result;
+            }
+        }
+        
+        part_byte_pos += char_len;
+        char_offset_from_end++;
+    }
+    
+    if (concrete_chars == 0) {
+        if (result) biscuit_roaring_free(result);
+        result = biscuit_get_length_ge_lower(idx, pattern_char_count);
+    } else {
+        len_filter = biscuit_get_length_ge_lower(idx, pattern_char_count);
+        if (len_filter) {
+            if (result) {
+                biscuit_roaring_and_inplace(result, len_filter);
+            } else {
+                result = len_filter;
+                len_filter = NULL;
+            }
+            if (len_filter) biscuit_roaring_free(len_filter);
+        }
+    }
+    
+    return result ? result : biscuit_roaring_create();
+}
+/* ==================== FIXED: UTF-8-AWARE RECURSIVE WINDOWED MATCHING (SINGLE-COLUMN) ==================== */
+
+/*
+ * Recursive windowed matching for single-column patterns (case-sensitive)
+ * Handles multi-byte UTF-8 characters correctly
+ */
+static void 
+biscuit_recursive_windowed_match(
+    RoaringBitmap *result, BiscuitIndex *idx,
+    const char **parts, int *part_lens, int part_count,
+    bool ends_percent, int part_idx, int min_pos,
+    RoaringBitmap *current_candidates, int max_len)
+{
+    int remaining_len, max_pos, pos, i;
+    RoaringBitmap *end_match;
+    RoaringBitmap *length_constraint;
+    RoaringBitmap *part_match;
+    RoaringBitmap *next_candidates;
+    int min_required_length;
+    int next_min_pos;
+    
+    /* Base case: all parts have been matched */
+    if (part_idx >= part_count) {
+        biscuit_roaring_or_inplace(result, current_candidates);
+        return;
+    }
+    
+    /* Calculate minimum CHARACTER length needed for remaining parts */
+    remaining_len = 0;
+    for (i = part_idx + 1; i < part_count; i++) {
+        remaining_len += biscuit_utf8_char_count(parts[i], part_lens[i]);
+    }
+    
+    /* CRITICAL FIX: Last part without trailing % must match at end */
+    if (part_idx == part_count - 1 && !ends_percent) {
+        /* Use negative indexing to match at the end */
+        end_match = biscuit_match_part_at_end(idx, parts[part_idx], part_lens[part_idx]);
+        
+        if (!end_match) {
+            return;
+        }
+        
+        /* Intersect with current candidates */
+        biscuit_roaring_and_inplace(end_match, current_candidates);
+        
+        /* Ensure minimum CHARACTER length constraint */
+        min_required_length = min_pos + biscuit_utf8_char_count(parts[part_idx], part_lens[part_idx]);
+        length_constraint = biscuit_get_length_ge(idx, min_required_length);
+        biscuit_roaring_and_inplace(length_constraint, end_match);
+        biscuit_roaring_free(length_constraint);
+        
+        /* Add to result */
+        biscuit_roaring_or_inplace(result, end_match);
+        biscuit_roaring_free(end_match);
+        return;
+    }
+    
+    /* Middle part: try all valid CHARACTER positions */
+    int current_part_char_len = biscuit_utf8_char_count(parts[part_idx], part_lens[part_idx]);
+    max_pos = max_len - current_part_char_len - remaining_len;
+    
+    if (min_pos > max_pos) {
+        /* No valid position for this part */
+        return;
+    }
+    
+    /* Try each valid CHARACTER position for current part */
+    for (pos = min_pos; pos <= max_pos; pos++) {
+        /* Match part at this CHARACTER position */
+        part_match = biscuit_match_part_at_pos(idx, parts[part_idx], part_lens[part_idx], pos);
+        
+        if (!part_match) {
+            continue;
+        }
+        
+        /* Intersect with current candidates */
+        next_candidates = biscuit_roaring_copy(current_candidates);
+        biscuit_roaring_and_inplace(next_candidates, part_match);
+        biscuit_roaring_free(part_match);
+        
+        /* Skip if no matches at this position */
+        if (biscuit_roaring_is_empty(next_candidates)) {
+            biscuit_roaring_free(next_candidates);
+            continue;
+        }
+        
+        /* Recurse for next part with updated CHARACTER position */
+        next_min_pos = pos + current_part_char_len;
+        
+        /* CRITICAL: For patterns with trailing %, ensure gap for remaining parts */
+        if (ends_percent || part_idx < part_count - 1) {
+            /* Need at least one position gap before next part can start */
+            next_min_pos = pos + current_part_char_len;
+        }
+        
+        biscuit_recursive_windowed_match(
+            result, idx, parts, part_lens, part_count,
+            ends_percent, part_idx + 1, next_min_pos, 
+            next_candidates, max_len
+        );
+        
+        biscuit_roaring_free(next_candidates);
+    }
 }
 
 /*
- * Recursive windowed matching for ILIKE patterns
+ * Recursive windowed matching for single-column patterns (case-insensitive)
+ * Handles multi-byte UTF-8 characters correctly
  */
 static void 
 biscuit_recursive_windowed_match_ilike(
@@ -2440,10 +3062,11 @@ biscuit_recursive_windowed_match_ilike(
         return;
     }
     
-    /* Calculate minimum length for remaining parts */
+    /* Calculate minimum CHARACTER length for remaining parts */
     remaining_len = 0;
-    for (i = part_idx + 1; i < part_count; i++)
-        remaining_len += part_lens[i];
+    for (i = part_idx + 1; i < part_count; i++) {
+        remaining_len += biscuit_utf8_char_count(parts[i], part_lens[i]);
+    }
     
     /* Last part without trailing % must match at end */
     if (part_idx == part_count - 1 && !ends_percent) {
@@ -2455,7 +3078,8 @@ biscuit_recursive_windowed_match_ilike(
         
         biscuit_roaring_and_inplace(end_match, current_candidates);
         
-        min_required_length = min_pos + part_lens[part_idx];
+        /* CHARACTER length constraint */
+        min_required_length = min_pos + biscuit_utf8_char_count(parts[part_idx], part_lens[part_idx]);
         length_constraint = biscuit_get_length_ge_lower(idx, min_required_length);
         biscuit_roaring_and_inplace(end_match, length_constraint);
         biscuit_roaring_free(length_constraint);
@@ -2465,8 +3089,10 @@ biscuit_recursive_windowed_match_ilike(
         return;
     }
     
-    /* Try all valid positions */
-    max_pos = max_len - part_lens[part_idx] - remaining_len;
+    /* Try all valid CHARACTER positions */
+    int current_part_char_len = biscuit_utf8_char_count(parts[part_idx], part_lens[part_idx]);
+    max_pos = max_len - current_part_char_len - remaining_len;
+    
     if (min_pos > max_pos) {
         return;
     }
@@ -2487,7 +3113,8 @@ biscuit_recursive_windowed_match_ilike(
             continue;
         }
         
-        next_min_pos = pos + part_lens[part_idx];
+        /* CHARACTER position advancement */
+        next_min_pos = pos + current_part_char_len;
         
         biscuit_recursive_windowed_match_ilike(
             result, idx, parts, part_lens, part_count,
@@ -2498,7 +3125,6 @@ biscuit_recursive_windowed_match_ilike(
         biscuit_roaring_free(next_candidates);
     }
 }
-
 
 static void
 biscuit_free_parsed_pattern(ParsedPattern *parsed)
@@ -2522,14 +3148,19 @@ biscuit_free_parsed_pattern(ParsedPattern *parsed)
         pfree(parsed->part_lens);
     }
     
+    if (parsed->part_byte_lens) {  // NEW
+        pfree(parsed->part_byte_lens);
+    }
+    
     pfree(parsed);
 }
-
 
 /*
  * Main ILIKE query function - routes to lowercase index
  */
 
+
+/* ==================== FIXED: biscuit_query_pattern_ilike - Substring Search ==================== */
 
 static RoaringBitmap* 
 biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern) {
@@ -2635,14 +3266,14 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern) {
         /* Calculate minimum required length */
         min_len = 0;
         for (i = 0; i < parsed->part_count; i++)
-            min_len += parsed->part_lens[i];
+            min_len += parsed->part_lens[i];  // Uses CHARACTER counts
         
         /* ==================== OPTIMIZED SINGLE PART PATTERNS ==================== */
         if (parsed->part_count == 1) {
             if (!parsed->starts_percent && !parsed->ends_percent) {
                 /* EXACT: 'abc' or 'a_c' - must match exactly at position 0 with exact length */
                 result = biscuit_match_part_at_pos_ilike(idx, parsed->parts[0], 
-                                                         parsed->part_lens[0], 0);
+                                                         parsed->part_byte_lens[0], 0);
                 if (result && min_len < idx->max_length_legacy && 
                     idx->length_bitmaps_legacy[min_len]) {
                     biscuit_roaring_and_inplace(result, idx->length_bitmaps_legacy[min_len]);
@@ -2653,24 +3284,190 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern) {
             } else if (!parsed->starts_percent) {
                 /* PREFIX: 'abc%' - starts at position 0, any length >= min_len */
                 result = biscuit_match_part_at_pos_ilike(idx, parsed->parts[0], 
-                                                         parsed->part_lens[0], 0);
+                                                         parsed->part_byte_lens[0], 0);
                 if (!result) result = biscuit_roaring_create();
             } else if (!parsed->ends_percent) {
                 /* SUFFIX: '%abc' - ends at end, any length >= min_len */
                 result = biscuit_match_part_at_end_ilike(idx, parsed->parts[0], 
-                                                         parsed->part_lens[0]);
+                                                         parsed->part_byte_lens[0]);
                 if (!result) result = biscuit_roaring_create();
             } else {
-                /* SUBSTRING: '%abc%' - can match anywhere */
+                /* ==================== CRITICAL FIX: SUBSTRING MATCH (ILIKE) ==================== */
+                /* Pattern: '%abc%' - must validate complete UTF-8 characters */
+                
                 result = biscuit_roaring_create();
-                for (i = 0; i <= idx->max_len - parsed->part_lens[0]; i++) {
-                    RoaringBitmap *part_match = biscuit_match_part_at_pos_ilike(
-                        idx, parsed->parts[0], parsed->part_lens[0], i);
-                    if (part_match) {
-                        biscuit_roaring_or_inplace(result, part_match);
-                        biscuit_roaring_free(part_match);
+                
+                /* STRATEGY: 
+                 * 1. Use bitmap intersection to get candidates (fast)
+                 * 2. Brute-force validate UTF-8 boundaries with lowercase comparison (ensures correctness)
+                 */
+                
+                RoaringBitmap *candidates = NULL;
+                int part_byte_len = parsed->part_byte_lens[0];
+                int part_char_len = parsed->part_lens[0];
+                
+                /* Get candidates using first byte of pattern */
+                if (part_byte_len > 0) {
+                    unsigned char first_byte = (unsigned char)parsed->parts[0][0];
+                    
+                    /* Skip underscores to find first concrete byte */
+                    int scan_pos = 0;
+                    while (scan_pos < part_byte_len && parsed->parts[0][scan_pos] == '_') {
+                        scan_pos++;
+                    }
+                    
+                    if (scan_pos < part_byte_len) {
+                        first_byte = (unsigned char)parsed->parts[0][scan_pos];
+                        
+                        /* Get all records with this byte (lowercase index) */
+                        if (idx->char_cache_lower[first_byte]) {
+                            candidates = biscuit_roaring_copy(idx->char_cache_lower[first_byte]);
+                        }
                     }
                 }
+                
+                if (!candidates) {
+                    candidates = biscuit_roaring_create();
+                    for (i = 0; i < idx->num_records; i++) {
+                        #ifdef HAVE_ROARING
+                        if (!roaring_bitmap_contains(idx->tombstones, (uint32_t)i))
+                        #else
+                        uint32_t block = i >> 6;
+                        uint32_t bit = i & 63;
+                        bool tombstoned = (block < idx->tombstones->num_blocks &&
+                                          (idx->tombstones->blocks[block] & (1ULL << bit)));
+                        if (!tombstoned)
+                        #endif
+                            biscuit_roaring_add(candidates, i);
+                    }
+                }
+                
+                /* Apply length filter (using lowercase length bitmaps) */
+                RoaringBitmap *length_filter = biscuit_get_length_ge_lower(idx, part_char_len);
+                if (length_filter) {
+                    biscuit_roaring_and_inplace(candidates, length_filter);
+                    biscuit_roaring_free(length_filter);
+                }
+                
+                /* Now validate each candidate with UTF-8-aware substring search (case-insensitive) */
+                #ifdef HAVE_ROARING
+                roaring_uint32_iterator_t *iter = roaring_create_iterator(candidates);
+                
+                while (iter->has_value) {
+                    uint32_t rec_idx = iter->current_value;
+                    
+                    if (rec_idx < (uint32_t)idx->num_records && idx->data_cache_lower && 
+                        idx->data_cache_lower[rec_idx]) {
+                        char *haystack = idx->data_cache_lower[rec_idx];
+                        int haystack_byte_len = strlen(haystack);
+                        int haystack_char_len = biscuit_utf8_char_count(haystack, haystack_byte_len);
+                        
+                        /* Try matching pattern at each CHARACTER position */
+                        bool found = false;
+                        for (int char_pos = 0; char_pos <= haystack_char_len - part_char_len && !found; char_pos++) {
+                            /* Convert character position to byte offset */
+                            int byte_offset = biscuit_utf8_char_to_byte_offset(haystack, haystack_byte_len, char_pos);
+                            
+                            if (byte_offset < 0 || byte_offset + part_byte_len > haystack_byte_len)
+                                continue;
+                            
+                            /* Match pattern bytes at this position */
+                            bool match = true;
+                            int needle_byte = 0;
+                            int hay_byte = byte_offset;
+                            
+                            while (needle_byte < part_byte_len && match) {
+                                if (parsed->parts[0][needle_byte] == '_') {
+                                    /* Underscore matches one CHARACTER */
+                                    int char_len = biscuit_utf8_char_length((unsigned char)haystack[hay_byte]);
+                                    hay_byte += char_len;
+                                    needle_byte++;
+                                } else {
+                                    /* Concrete character - must match exactly (already lowercase) */
+                                    if (haystack[hay_byte] != parsed->parts[0][needle_byte]) {
+                                        match = false;
+                                    } else {
+                                        hay_byte++;
+                                        needle_byte++;
+                                    }
+                                }
+                            }
+                            
+                            if (match) {
+                                found = true;
+                            }
+                        }
+                        
+                        if (found) {
+                            biscuit_roaring_add(result, rec_idx);
+                        }
+                    }
+                    
+                    roaring_advance_uint32_iterator(iter);
+                }
+                
+                roaring_free_uint32_iterator(iter);
+                #else
+                {
+                    uint32_t *indices;
+                    uint64_t count;
+                    int j;
+                    
+                    indices = biscuit_roaring_to_array(candidates, &count);
+                    
+                    if (indices) {
+                        for (j = 0; j < (int)count; j++) {
+                            uint32_t rec_idx = indices[j];
+                            
+                            if (rec_idx < (uint32_t)idx->num_records && idx->data_cache_lower && 
+                                idx->data_cache_lower[rec_idx]) {
+                                char *haystack = idx->data_cache_lower[rec_idx];
+                                int haystack_byte_len = strlen(haystack);
+                                int haystack_char_len = biscuit_utf8_char_count(haystack, haystack_byte_len);
+                                
+                                bool found = false;
+                                int char_pos;
+                                for (char_pos = 0; char_pos <= haystack_char_len - part_char_len && !found; char_pos++) {
+                                    int byte_offset = biscuit_utf8_char_to_byte_offset(haystack, haystack_byte_len, char_pos);
+                                    
+                                    if (byte_offset < 0 || byte_offset + part_byte_len > haystack_byte_len)
+                                        continue;
+                                    
+                                    bool match = true;
+                                    int needle_byte = 0;
+                                    int hay_byte = byte_offset;
+                                    
+                                    while (needle_byte < part_byte_len && match) {
+                                        if (parsed->parts[0][needle_byte] == '_') {
+                                            int char_len = biscuit_utf8_char_length((unsigned char)haystack[hay_byte]);
+                                            hay_byte += char_len;
+                                            needle_byte++;
+                                        } else {
+                                            if (haystack[hay_byte] != parsed->parts[0][needle_byte]) {
+                                                match = false;
+                                            } else {
+                                                hay_byte++;
+                                                needle_byte++;
+                                            }
+                                        }
+                                    }
+                                    
+                                    if (match) {
+                                        found = true;
+                                    }
+                                }
+                                
+                                if (found) {
+                                    biscuit_roaring_add(result, rec_idx);
+                                }
+                            }
+                        }
+                        pfree(indices);
+                    }
+                }
+                #endif
+                
+                biscuit_roaring_free(candidates);
             }
         }
         /* ==================== OPTIMIZED TWO PART PATTERNS ==================== */
@@ -2681,9 +3478,9 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern) {
             RoaringBitmap *length_filter;
             
             prefix_match = biscuit_match_part_at_pos_ilike(idx, parsed->parts[0], 
-                                                           parsed->part_lens[0], 0);
+                                                           parsed->part_byte_lens[0], 0);
             suffix_match = biscuit_match_part_at_end_ilike(idx, parsed->parts[1], 
-                                                           parsed->part_lens[1]);
+                                                           parsed->part_byte_lens[1]);
             
             if (!prefix_match || !suffix_match) {
                 if (prefix_match) biscuit_roaring_free(prefix_match);
@@ -2714,7 +3511,7 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern) {
             } else {
                 if (!parsed->starts_percent) {
                     RoaringBitmap *first_part_match = biscuit_match_part_at_pos_ilike(
-                        idx, parsed->parts[0], parsed->part_lens[0], 0);
+                        idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
                     
                     if (first_part_match) {
                         biscuit_roaring_and_inplace(first_part_match, candidates);
@@ -2759,6 +3556,10 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern) {
     }
     PG_END_TRY();
     
+    if (result && idx->tombstone_count > 0) {
+        biscuit_roaring_andnot_inplace(result, idx->tombstones);
+    }
+
     return result ? result : biscuit_roaring_create();
 }
 
@@ -2774,6 +3575,7 @@ static ParsedPattern* biscuit_parse_pattern(const char *pattern) {
     
     parsed->parts = (char **)palloc0(part_cap * sizeof(char *));
     parsed->part_lens = (int *)palloc0(part_cap * sizeof(int));
+    parsed->part_byte_lens = (int *)palloc0(part_cap * sizeof(int));  // NEW
     parsed->part_count = 0;
     parsed->starts_percent = (plen > 0 && pattern[0] == '%');
     parsed->ends_percent = (plen > 0 && pattern[plen - 1] == '%');
@@ -2782,22 +3584,33 @@ static ParsedPattern* biscuit_parse_pattern(const char *pattern) {
     
     for (i = part_start; i < plen; i++) {
         if (pattern[i] == '%') {
-            int part_len = i - part_start;
-            if (part_len > 0) {
+            int part_byte_len = i - part_start;
+            if (part_byte_len > 0) {
                 if (parsed->part_count >= part_cap) {
                     int new_cap = part_cap * 2;
                     char **new_parts = (char **)palloc(new_cap * sizeof(char *));
                     int *new_lens = (int *)palloc(new_cap * sizeof(int));
+                    int *new_byte_lens = (int *)palloc(new_cap * sizeof(int));  // NEW
                     memcpy(new_parts, parsed->parts, part_cap * sizeof(char *));
                     memcpy(new_lens, parsed->part_lens, part_cap * sizeof(int));
+                    memcpy(new_byte_lens, parsed->part_byte_lens, part_cap * sizeof(int));  // NEW
                     pfree(parsed->parts);
                     pfree(parsed->part_lens);
+                    pfree(parsed->part_byte_lens);  // NEW
                     parsed->parts = new_parts;
                     parsed->part_lens = new_lens;
+                    parsed->part_byte_lens = new_byte_lens;  // NEW
                     part_cap = new_cap;
                 }
-                parsed->parts[parsed->part_count] = pnstrdup(pattern + part_start, part_len);
-                parsed->part_lens[parsed->part_count] = part_len;
+                parsed->parts[parsed->part_count] = pnstrdup(pattern + part_start, part_byte_len);
+                
+                // CRITICAL FIX: Store CHARACTER count for length filters
+                parsed->part_lens[parsed->part_count] = biscuit_utf8_char_count(
+                    pattern + part_start, part_byte_len);
+                
+                // Store BYTE length for string operations
+                parsed->part_byte_lens[parsed->part_count] = part_byte_len;
+                
                 parsed->part_count++;
             }
             part_start = i + 1;
@@ -2805,10 +3618,17 @@ static ParsedPattern* biscuit_parse_pattern(const char *pattern) {
     }
     
     if (part_start < plen && (!parsed->ends_percent || part_start < plen - 1)) {
-        int part_len = parsed->ends_percent ? (plen - 1 - part_start) : (plen - part_start);
-        if (part_len > 0) {
-            parsed->parts[parsed->part_count] = pnstrdup(pattern + part_start, part_len);
-            parsed->part_lens[parsed->part_count] = part_len;
+        int part_byte_len = parsed->ends_percent ? (plen - 1 - part_start) : (plen - part_start);
+        if (part_byte_len > 0) {
+            parsed->parts[parsed->part_count] = pnstrdup(pattern + part_start, part_byte_len);
+            
+            // CRITICAL FIX: Store CHARACTER count for length filters
+            parsed->part_lens[parsed->part_count] = biscuit_utf8_char_count(
+                pattern + part_start, part_byte_len);
+            
+            // Store BYTE length for string operations
+            parsed->part_byte_lens[parsed->part_count] = part_byte_len;
+            
             parsed->part_count++;
         }
     }
@@ -2816,130 +3636,31 @@ static ParsedPattern* biscuit_parse_pattern(const char *pattern) {
     return parsed;
 }
 
-static void biscuit_recursive_windowed_match(
-    RoaringBitmap *result, BiscuitIndex *idx,
-    const char **parts, int *part_lens, int part_count,
-    bool ends_percent, int part_idx, int min_pos,
-    RoaringBitmap *current_candidates, int max_len)
-{
-    int remaining_len, max_pos, pos, i;
-    RoaringBitmap *end_match;
-    RoaringBitmap *length_constraint;
-    RoaringBitmap *part_match;
-    RoaringBitmap *next_candidates;
-    int min_required_length;
-    int next_min_pos;
-    
-    /* Base case: all parts have been matched */
-    if (part_idx >= part_count) {
-        biscuit_roaring_or_inplace(result, current_candidates);
-        return;
-    }
-    
-    /* Calculate minimum length needed for remaining parts */
-    remaining_len = 0;
-    for (i = part_idx + 1; i < part_count; i++)
-        remaining_len += part_lens[i];
-    
-    /* CRITICAL FIX: Last part without trailing % must match at end */
-    if (part_idx == part_count - 1 && !ends_percent) {
-        /* Use negative indexing to match at the end */
-        end_match = biscuit_match_part_at_end(idx, parts[part_idx], part_lens[part_idx]);
-        
-        if (!end_match) {
-            return;
-        }
-        
-        /* Intersect with current candidates */
-        biscuit_roaring_and_inplace(end_match, current_candidates);
-        
-        /* Ensure minimum length constraint */
-        min_required_length = min_pos + part_lens[part_idx];
-        length_constraint = biscuit_get_length_ge(idx, min_required_length);
-        biscuit_roaring_and_inplace(end_match, length_constraint);
-        biscuit_roaring_free(length_constraint);
-        
-        /* Add to result */
-        biscuit_roaring_or_inplace(result, end_match);
-        biscuit_roaring_free(end_match);
-        return;
-    }
-    
-    /* Middle part: try all valid positions */
-    max_pos = max_len - part_lens[part_idx] - remaining_len;
-    if (min_pos > max_pos) {
-        /* No valid position for this part */
-        return;
-    }
-    
-    /* Try each valid position for current part */
-    for (pos = min_pos; pos <= max_pos; pos++) {
-        /* Match part at this position */
-        part_match = biscuit_match_part_at_pos(idx, parts[part_idx], part_lens[part_idx], pos);
-        
-        if (!part_match) {
-            continue;
-        }
-        
-        /* Intersect with current candidates */
-        next_candidates = biscuit_roaring_copy(current_candidates);
-        biscuit_roaring_and_inplace(next_candidates, part_match);
-        biscuit_roaring_free(part_match);
-        
-        /* Skip if no matches at this position */
-        if (biscuit_roaring_is_empty(next_candidates)) {
-            biscuit_roaring_free(next_candidates);
-            continue;
-        }
-        
-        /* Recurse for next part with updated constraints */
-        next_min_pos = pos + part_lens[part_idx];
-        
-        /* CRITICAL: For patterns with trailing %, ensure gap for remaining parts */
-        if (ends_percent || part_idx < part_count - 1) {
-            /* Need at least one position gap before next part can start */
-            next_min_pos = pos + part_lens[part_idx];
-        }
-        
-        biscuit_recursive_windowed_match(
-            result, idx, parts, part_lens, part_count,
-            ends_percent, part_idx + 1, next_min_pos, 
-            next_candidates, max_len
-        );
-        
-        biscuit_roaring_free(next_candidates);
-    }
-}
-
 
 /*
 * OPTIMIZATION 12: Pure wildcard patterns as length queries
 * Patterns like '%%%___%%' with m '%'s and n '_'s become length_ge(n)
 */
+/* ==================== FIXED: biscuit_query_pattern - Substring Search ==================== */
 
 static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *pattern) {
     int plen = strlen(pattern);
-    ParsedPattern *parsed;
+    ParsedPattern *parsed = NULL;
     int min_len, i;
-    RoaringBitmap *result;
+    RoaringBitmap *result = NULL;
     int wildcard_count = 0, percent_count = 0;
     bool only_wildcards = true;
     
-    /* ========== FAST PATH 1: Empty pattern '' ========== */
+    /* ========== FAST PATH 1-5: Same as before ========== */
     if (plen == 0) {
-        //elog(DEBUG1, "Biscuit FAST PATH: Empty pattern → length[0]");
-        if (idx->max_length_legacy > 0 && idx->length_bitmaps_legacy[0]) {
+        if (idx->length_bitmaps_legacy && idx->length_bitmaps_legacy[0]) {
             uint64_t count = biscuit_roaring_count(idx->length_bitmaps_legacy[0]);
-            //elog(DEBUG1, "  → Returning %llu records with length 0", (unsigned long long)count);
             return biscuit_roaring_copy(idx->length_bitmaps_legacy[0]);
         }
-        //elog(DEBUG1, "  → No zero-length strings in index");
         return biscuit_roaring_create();
     }
     
-    /* ========== FAST PATH 2: Single '%' matches everything ========== */
     if (plen == 1 && pattern[0] == '%') {
-        //elog(DEBUG1, "Biscuit FAST PATH: Single '%%' → all non-tombstoned records");
         result = biscuit_roaring_create();
         for (i = 0; i < idx->num_records; i++) {
             #ifdef HAVE_ROARING
@@ -2954,11 +3675,9 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
                 biscuit_roaring_add(result, i);
         }
         uint64_t count = biscuit_roaring_count(result);
-        //elog(DEBUG1, "  → Matched %llu of %d records", (unsigned long long)count, idx->num_records);
         return result;
     }
     
-    /* ========== FAST PATH 3: Analyze for pure wildcards (% and _ only) ========== */
     for (i = 0; i < plen; i++) {
         if (pattern[i] == '%') {
             percent_count++;
@@ -2970,55 +3689,27 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
         }
     }
     
-    /* ========== FAST PATH 4 & 5: Pure wildcard patterns ========== */
     if (only_wildcards) {
         if (percent_count > 0) {
-            /* FAST PATH 4: Has %, so length >= wildcard_count */
-            /* Examples: '%___', '___%%', '%_%_%', etc. */
-            //elog(DEBUG1, "Biscuit FAST PATH: Pure wildcard pattern '%s'", pattern);
-            //elog(DEBUG1, "  → Contains %d underscores and %d percents", wildcard_count, percent_count);
-            //elog(DEBUG1, "  → Using length_ge_bitmaps[%d] (length >= %d)", wildcard_count, wildcard_count);
-            
             result = biscuit_get_length_ge(idx, wildcard_count);
-            
             if (result) {
                 uint64_t count = biscuit_roaring_count(result);
-                //elog(DEBUG1, "  → Matched %llu records with length >= %d", (unsigned long long)count, wildcard_count);
             }
-            
             return result;
-            
         } else {
-            /* FAST PATH 5: Only underscores → EXACT length match */
-            /* Examples: '____', '_', '________', etc. */
-            //elog(DEBUG1, "Biscuit FAST PATH: Pure underscore pattern '%s'", pattern);
-            //elog(DEBUG1, "  → Pattern length: %d underscores", wildcard_count);
-            //elog(DEBUG1, "  → Using length_bitmaps[%d] (exact length)", wildcard_count);
-            
             if (wildcard_count < idx->max_length_legacy && 
                 idx->length_bitmaps_legacy[wildcard_count]) {
-                
                 uint64_t count = biscuit_roaring_count(idx->length_bitmaps_legacy[wildcard_count]);
-                //elog(DEBUG1, "  → Matched %llu records with exact length %d", (unsigned long long)count, wildcard_count);
-                
                 return biscuit_roaring_copy(idx->length_bitmaps_legacy[wildcard_count]);
             }
-            
-            //elog(DEBUG1, "  → Length bitmap[%d] is NULL or out of range (max: %d)",  wildcard_count, idx->max_length_legacy - 1);
             return biscuit_roaring_create();
         }
     }
     
-    /* ========== SLOW PATH: Pattern contains concrete characters ========== */
-    //elog(DEBUG1, "Biscuit SLOW PATH: Pattern '%s' contains concrete characters", pattern);
-    //elog(DEBUG1, "  → Parsing pattern and using Biscuit matching engine");
-    
-    /* Parse pattern into parts separated by % */
+    /* ========== SLOW PATH ========== */
     parsed = biscuit_parse_pattern(pattern);
 
-    /* All percent signs (shouldn't happen, but handle gracefully) */
     if (parsed->part_count == 0) {
-        //elog(DEBUG1, "  → Pattern parsed to 0 parts (all %%), matching all records");
         result = biscuit_roaring_create();
         for (i = 0; i < idx->num_records; i++) {
             #ifdef HAVE_ROARING
@@ -3032,27 +3723,20 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
             #endif
                 biscuit_roaring_add(result, i);
         }
-        pfree(parsed->parts);
-        pfree(parsed->part_lens);
-        pfree(parsed);
+        biscuit_free_parsed_pattern(parsed);
         return result;
     }
 
-    /* Calculate minimum required length */
     min_len = 0;
     for (i = 0; i < parsed->part_count; i++)
-        min_len += parsed->part_lens[i];
-
-    //elog(DEBUG1, "  → Parsed into %d parts, minimum length: %d", parsed->part_count, min_len);
+        min_len += parsed->part_lens[i];  // Uses CHARACTER counts now
 
     /* ==================== OPTIMIZED SINGLE PART PATTERNS ==================== */
     if (parsed->part_count == 1) {
-        //elog(DEBUG1, "  → Single-part pattern optimization");
-        
         if (!parsed->starts_percent && !parsed->ends_percent) {
-            /* EXACT: 'abc' or 'a_c' - must match exactly at position 0 with exact length */
-            //elog(DEBUG1, "    → EXACT match: must be at position 0 with length %d", min_len);
-            result = biscuit_match_part_at_pos(idx, parsed->parts[0], parsed->part_lens[0], 0);
+            /* EXACT match */
+            result = biscuit_match_part_at_pos(idx, parsed->parts[0], 
+                                             parsed->part_byte_lens[0], 0);
             if (min_len < idx->max_length_legacy && idx->length_bitmaps_legacy[min_len]) {
                 biscuit_roaring_and_inplace(result, idx->length_bitmaps_legacy[min_len]);
             } else {
@@ -3060,45 +3744,207 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
                 result = biscuit_roaring_create();
             }
         } else if (!parsed->starts_percent) {
-            /* PREFIX: 'abc%' - starts at position 0, any length >= min_len */
-            //elog(DEBUG1, "    → PREFIX match: starts at position 0, length >= %d", min_len);
-            result = biscuit_match_part_at_pos(idx, parsed->parts[0], parsed->part_lens[0], 0);
+            /* PREFIX match */
+            result = biscuit_match_part_at_pos(idx, parsed->parts[0], 
+                                             parsed->part_byte_lens[0], 0);
         } else if (!parsed->ends_percent) {
-            /* SUFFIX: '%abc' - ends at end, any length >= min_len */
-            //elog(DEBUG1, "    → SUFFIX match: ends at string end, length >= %d", min_len);
-            result = biscuit_match_part_at_end(idx, parsed->parts[0], parsed->part_lens[0]);
+            /* SUFFIX match */
+            result = biscuit_match_part_at_end(idx, parsed->parts[0], 
+                                             parsed->part_byte_lens[0]);
         } else {
-            /* WEDGED: '%abc%' - can match anywhere */
-            //elog(DEBUG1, "    → SUBSTRING match: can appear anywhere");
+            /* ==================== CRITICAL FIX: SUBSTRING MATCH ==================== */
+            /* Pattern: '%abc%' - must validate complete UTF-8 characters */
+            
             result = biscuit_roaring_create();
-            for (i = 0; i <= idx->max_len - parsed->part_lens[0]; i++) {
-                RoaringBitmap *part_match = biscuit_match_part_at_pos(
-                    idx, parsed->parts[0], parsed->part_lens[0], i);
-                biscuit_roaring_or_inplace(result, part_match);
-                biscuit_roaring_free(part_match);
+            
+            /* STRATEGY: 
+             * 1. Use bitmap intersection to get candidates (fast)
+             * 2. Brute-force validate UTF-8 boundaries (ensures correctness)
+             */
+            
+            RoaringBitmap *candidates = NULL;
+            int part_byte_len = parsed->part_byte_lens[0];
+            int part_char_len = parsed->part_lens[0];
+            
+            /* Get candidates using first byte of pattern */
+            if (part_byte_len > 0) {
+                unsigned char first_byte = (unsigned char)parsed->parts[0][0];
+                
+                /* Skip underscores to find first concrete byte */
+                int scan_pos = 0;
+                while (scan_pos < part_byte_len && parsed->parts[0][scan_pos] == '_') {
+                    scan_pos++;
+                }
+                
+                if (scan_pos < part_byte_len) {
+                    first_byte = (unsigned char)parsed->parts[0][scan_pos];
+                    
+                    /* Get all records with this byte */
+                    if (idx->char_cache_legacy[first_byte]) {
+                        candidates = biscuit_roaring_copy(idx->char_cache_legacy[first_byte]);
+                    }
+                }
             }
+            
+            if (!candidates) {
+                candidates = biscuit_roaring_create();
+                for (i = 0; i < idx->num_records; i++) {
+                    #ifdef HAVE_ROARING
+                    if (!roaring_bitmap_contains(idx->tombstones, (uint32_t)i))
+                    #else
+                    uint32_t block = i >> 6;
+                    uint32_t bit = i & 63;
+                    bool tombstoned = (block < idx->tombstones->num_blocks &&
+                                      (idx->tombstones->blocks[block] & (1ULL << bit)));
+                    if (!tombstoned)
+                    #endif
+                        biscuit_roaring_add(candidates, i);
+                }
+            }
+            
+            /* Apply length filter */
+            RoaringBitmap *length_filter = biscuit_get_length_ge(idx, part_char_len);
+            if (length_filter) {
+                biscuit_roaring_and_inplace(candidates, length_filter);
+                biscuit_roaring_free(length_filter);
+            }
+            
+            /* Now validate each candidate with UTF-8-aware substring search */
+            #ifdef HAVE_ROARING
+            roaring_uint32_iterator_t *iter = roaring_create_iterator(candidates);
+            
+            while (iter->has_value) {
+                uint32_t rec_idx = iter->current_value;
+                
+                if (rec_idx < (uint32_t)idx->num_records && idx->data_cache[rec_idx]) {
+                    char *haystack = idx->data_cache[rec_idx];
+                    int haystack_byte_len = strlen(haystack);
+                    int haystack_char_len = biscuit_utf8_char_count(haystack, haystack_byte_len);
+                    
+                    /* Try matching pattern at each CHARACTER position */
+                    bool found = false;
+                    for (int char_pos = 0; char_pos <= haystack_char_len - part_char_len && !found; char_pos++) {
+                        /* Convert character position to byte offset */
+                        int byte_offset = biscuit_utf8_char_to_byte_offset(haystack, haystack_byte_len, char_pos);
+                        
+                        if (byte_offset < 0 || byte_offset + part_byte_len > haystack_byte_len)
+                            continue;
+                        
+                        /* Match pattern bytes at this position */
+                        bool match = true;
+                        int needle_byte = 0;
+                        int hay_byte = byte_offset;
+                        int needle_char = 0;
+                        
+                        while (needle_byte < part_byte_len && match) {
+                            if (parsed->parts[0][needle_byte] == '_') {
+                                /* Underscore matches one CHARACTER */
+                                int char_len = biscuit_utf8_char_length((unsigned char)haystack[hay_byte]);
+                                hay_byte += char_len;
+                                needle_byte++;
+                                needle_char++;
+                            } else {
+                                /* Concrete character - must match exactly */
+                                if (haystack[hay_byte] != parsed->parts[0][needle_byte]) {
+                                    match = false;
+                                } else {
+                                    hay_byte++;
+                                    needle_byte++;
+                                }
+                            }
+                        }
+                        
+                        if (match) {
+                            found = true;
+                        }
+                    }
+                    
+                    if (found) {
+                        biscuit_roaring_add(result, rec_idx);
+                    }
+                }
+                
+                roaring_advance_uint32_iterator(iter);
+            }
+            
+            roaring_free_uint32_iterator(iter);
+            #else
+            {
+                uint32_t *indices;
+                uint64_t count;
+                int j;
+                
+                indices = biscuit_roaring_to_array(candidates, &count);
+                
+                if (indices) {
+                    for (j = 0; j < (int)count; j++) {
+                        uint32_t rec_idx = indices[j];
+                        
+                        if (rec_idx < (uint32_t)idx->num_records && idx->data_cache[rec_idx]) {
+                            char *haystack = idx->data_cache[rec_idx];
+                            int haystack_byte_len = strlen(haystack);
+                            int haystack_char_len = biscuit_utf8_char_count(haystack, haystack_byte_len);
+                            
+                            bool found = false;
+                            int char_pos;
+                            for (char_pos = 0; char_pos <= haystack_char_len - part_char_len && !found; char_pos++) {
+                                int byte_offset = biscuit_utf8_char_to_byte_offset(haystack, haystack_byte_len, char_pos);
+                                
+                                if (byte_offset < 0 || byte_offset + part_byte_len > haystack_byte_len)
+                                    continue;
+                                
+                                bool match = true;
+                                int needle_byte = 0;
+                                int hay_byte = byte_offset;
+                                
+                                while (needle_byte < part_byte_len && match) {
+                                    if (parsed->parts[0][needle_byte] == '_') {
+                                        int char_len = biscuit_utf8_char_length((unsigned char)haystack[hay_byte]);
+                                        hay_byte += char_len;
+                                        needle_byte++;
+                                    } else {
+                                        if (haystack[hay_byte] != parsed->parts[0][needle_byte]) {
+                                            match = false;
+                                        } else {
+                                            hay_byte++;
+                                            needle_byte++;
+                                        }
+                                    }
+                                }
+                                
+                                if (match) {
+                                    found = true;
+                                }
+                            }
+                            
+                            if (found) {
+                                biscuit_roaring_add(result, rec_idx);
+                            }
+                        }
+                    }
+                    pfree(indices);
+                }
+            }
+            #endif
+            
+            biscuit_roaring_free(candidates);
         }
     }
-    /* ==================== OPTIMIZED TWO PART PATTERNS ==================== */
+    /* ==================== TWO PART PATTERNS ==================== */
     else if (parsed->part_count == 2 && !parsed->starts_percent && !parsed->ends_percent) {
-        /* INFIX: 'abc%def' - first at start, last at end */
+        /* INFIX: 'abc%def' */
         RoaringBitmap *prefix_match;
         RoaringBitmap *suffix_match;
         RoaringBitmap *length_filter;
         
-        //elog(DEBUG1, "  → Two-part INFIX optimization: prefix + suffix");
+        prefix_match = biscuit_match_part_at_pos(idx, parsed->parts[0], 
+                                                parsed->part_byte_lens[0], 0);
+        suffix_match = biscuit_match_part_at_end(idx, parsed->parts[1], 
+                                                parsed->part_byte_lens[1]);
         
-        /* Match prefix at position 0 */
-        prefix_match = biscuit_match_part_at_pos(idx, parsed->parts[0], parsed->part_lens[0], 0);
-        
-        /* Match suffix at end using negative indexing */
-        suffix_match = biscuit_match_part_at_end(idx, parsed->parts[1], parsed->part_lens[1]);
-        
-        /* Intersect both matches */
         biscuit_roaring_and_inplace(prefix_match, suffix_match);
         biscuit_roaring_free(suffix_match);
         
-        /* Must be at least as long as both parts combined */
         length_filter = biscuit_get_length_ge(idx, min_len);
         biscuit_roaring_and_inplace(prefix_match, length_filter);
         biscuit_roaring_free(length_filter);
@@ -3107,29 +3953,22 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
     }
     /* ==================== COMPLEX MULTI-PART PATTERNS ==================== */
     else {
-        /* Use recursive windowed matching for complex patterns */
         RoaringBitmap *candidates;
         
-        //elog(DEBUG1, "  → Complex multi-part pattern: using recursive matching");
-        
         result = biscuit_roaring_create();
-        
-        /* Get initial candidates based on length constraint */
         candidates = biscuit_get_length_ge(idx, min_len);
         
         if (biscuit_roaring_is_empty(candidates)) {
             biscuit_roaring_free(candidates);
         } else {
             if (!parsed->starts_percent) {
-                /* First part is anchored at position 0 */
                 RoaringBitmap *first_part_match = biscuit_match_part_at_pos(
-                    idx, parsed->parts[0], parsed->part_lens[0], 0);
+                    idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
                 
                 biscuit_roaring_and_inplace(first_part_match, candidates);
                 biscuit_roaring_free(candidates);
                 
                 if (!biscuit_roaring_is_empty(first_part_match)) {
-                    /* Start recursion from part 1 */
                     biscuit_recursive_windowed_match(
                         result, idx,
                         (const char **)parsed->parts, parsed->part_lens,
@@ -3139,7 +3978,6 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
                 }
                 biscuit_roaring_free(first_part_match);
             } else {
-                /* First part can float - start recursion from part 0 */
                 biscuit_recursive_windowed_match(
                     result, idx,
                     (const char **)parsed->parts, parsed->part_lens,
@@ -3151,23 +3989,22 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
         }
     }
 
-    /* Cleanup */
-    for (i = 0; i < parsed->part_count; i++)
-        pfree(parsed->parts[i]);
-    pfree(parsed->parts);
-    pfree(parsed->part_lens);
-    pfree(parsed);
+    biscuit_free_parsed_pattern(parsed);
     
     if (result) {
         uint64_t final_count = biscuit_roaring_count(result);
-        //elog(DEBUG1, "  → Final result: %llu matches", (unsigned long long)final_count);
     }
 
-    return result;
+    if (result && idx->tombstone_count > 0) {
+        biscuit_roaring_andnot_inplace(result, idx->tombstones);
+    }
+
+    return result ? result : biscuit_roaring_create();
 }
 
-
 /* ==================== UPDATED: biscuit_build_multicolumn WITH ILIKE SUPPORT ==================== */
+/* ==================== COMPLETE FIXED: biscuit_build_multicolumn() ==================== */
+/* ==================== COMPLETE FIXED: biscuit_build_multicolumn() ==================== */
 
 static IndexBuildResult *
 biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
@@ -3186,10 +4023,6 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
     Datum value;
     int text_len;
     char *text_val;
-    int pos;
-    unsigned char uch;
-    RoaringBitmap *bm;
-    int neg_offset;
     int i;
     
     natts = indexInfo->ii_NumIndexAttrs;
@@ -3198,7 +4031,7 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
         ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                 errmsg("biscuit index requires at least one column")));
     
-    elog(DEBUG1, "Biscuit: Building multi-column index with ILIKE support (%d columns)", natts);
+    elog(DEBUG1, "Biscuit: Building multi-column index with UTF-8 character-level indexing (%d columns)", natts);
     
     /* Build in CacheMemoryContext */
     buildContext = CacheMemoryContext;
@@ -3225,24 +4058,17 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
                         (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                         errmsg("biscuit indexes do not support expressions"),
                         errdetail("Expression found in column %d", col + 1),
-                        errhint("Index the column directly instead of casting it. "
-                                "For example, use 'CREATE INDEX ... ON table(text_column)' "
-                                "instead of 'CREATE INDEX ... ON table((int_column::text))'.")));
+                        errhint("Index the column directly instead of casting it.")));
             }
             AttrNumber col_attnum = indexInfo->ii_IndexAttrNumbers[col];
             
-            /* Handle expression indexes (col_attnum == 0) */
             if (col_attnum == 0) {
-                /* Expression index - get type from index tuple descriptor */
                 Form_pg_attribute idx_attr = TupleDescAttr(index->rd_att, col);
-                
                 idx->column_types[col] = idx_attr->atttypid;
                 getTypeOutputInfo(idx_attr->atttypid, &typoutput, &typIsVarlena);
                 fmgr_info(typoutput, &idx->output_funcs[col]);
             } else {
-                /* Regular column - get type from heap tuple descriptor */
                 Form_pg_attribute col_attr = TupleDescAttr(heap->rd_att, col_attnum - 1);
-                
                 idx->column_types[col] = col_attr->atttypid;
                 getTypeOutputInfo(col_attr->atttypid, &typoutput, &typIsVarlena);
                 fmgr_info(typoutput, &idx->output_funcs[col]);
@@ -3252,7 +4078,7 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
                 (char **)palloc(idx->capacity * sizeof(char *));
         }
         
-        /* Initialize per-column indices WITH ILIKE support */
+        /* Initialize per-column indices WITH UTF-8 support */
         idx->column_indices = (ColumnIndex *)palloc0(natts * sizeof(ColumnIndex));
 
         for (col = 0; col < natts; col++) {
@@ -3269,7 +4095,7 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
                 cidx->char_cache[ch] = NULL;
             }
             
-            /* NEW: Case-insensitive index */
+            /* Case-insensitive index */
             for (ch = 0; ch < CHAR_RANGE; ch++) {
                 cidx->pos_idx_lower[ch].entries = (PosEntry *)palloc(64 * sizeof(PosEntry));
                 cidx->pos_idx_lower[ch].count = 0;
@@ -3281,13 +4107,16 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
             }
             
             cidx->max_length = 0;
+            cidx->max_length_lower = 0;  /* ✅ NEW: Track lowercase max separately */
             cidx->length_bitmaps = NULL;
             cidx->length_ge_bitmaps = NULL;
+            cidx->length_bitmaps_lower = NULL;      /* ✅ NEW: Separate ILIKE bitmaps */
+            cidx->length_ge_bitmaps_lower = NULL;   /* ✅ NEW: Separate ILIKE bitmaps */
         }
         
         biscuit_init_crud_structures(idx);
         
-        /* Scan heap and build BOTH case-sensitive and case-insensitive indices */
+        /* Scan heap and build UTF-8 character-level indices */
         slot = table_slot_create(heap, NULL);
         scan = table_beginscan(heap, SnapshotAny, 0, NULL);
         
@@ -3308,16 +4137,11 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
             
             ItemPointerCopy(&slot->tts_tid, &idx->tids[idx->num_records]);
             
-            /* Index each column separately with BOTH case-sensitive and case-insensitive */
+            /* Index each column separately with UTF-8 character-level indexing */
             for (col = 0; col < natts; col++) {
                 AttrNumber col_attnum = indexInfo->ii_IndexAttrNumbers[col];
                 
-                /* For expression indexes, evaluate the expression */
                 if (col_attnum == 0) {
-                    /* Expression column - use FormIndexDatum to evaluate */
-                    FormIndexDatum(indexInfo, slot, NULL, &value, &isnull);
-                    
-                    /* FormIndexDatum returns values for ALL columns, get this one */
                     Datum *values = (Datum *)palloc(natts * sizeof(Datum));
                     bool *isnulls = (bool *)palloc(natts * sizeof(bool));
                     
@@ -3328,7 +4152,6 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
                     pfree(values);
                     pfree(isnulls);
                 } else {
-                    /* Regular column */
                     value = slot_getattr(slot, col_attnum, &isnull);
                 }
                 
@@ -3347,67 +4170,126 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
                 idx->column_data_cache[col][idx->num_records] = text_val;
                 
                 ColumnIndex *cidx = &idx->column_indices[col];
-                int col_len = text_len;
+                int col_char_count = biscuit_utf8_char_count(text_val, text_len);
                 
-                if (col_len > cidx->max_length) cidx->max_length = col_len;
-                if (col_len > idx->max_len) idx->max_len = col_len;
+                /* ✅ FIX: Track case-sensitive max */
+                if (col_char_count > cidx->max_length) 
+                    cidx->max_length = col_char_count;
+                if (col_char_count > idx->max_len) 
+                    idx->max_len = col_char_count;
                 
-                /* Build case-sensitive Biscuit index */
-                for (pos = 0; pos < col_len; pos++) {
-                    uch = (unsigned char)text_val[pos];
+                /* ==================== UTF-8 CHARACTER-BASED INDEXING (CASE-SENSITIVE) ==================== */
+                {
+                    int byte_pos = 0;
+                    int char_pos = 0;
                     
-                    bm = biscuit_get_col_pos_bitmap(cidx, uch, pos);
-                    if (!bm) {
-                        bm = biscuit_roaring_create();
-                        biscuit_set_col_pos_bitmap(cidx, uch, pos, bm);
+                    while (byte_pos < text_len) {
+                        unsigned char first_byte = (unsigned char)text_val[byte_pos];
+                        int char_len = biscuit_utf8_char_length(first_byte);
+                        RoaringBitmap *bm;
+                        int neg_offset;
+                        int remaining_chars;
+                        int b;
+                        
+                        if (byte_pos + char_len > text_len)
+                            char_len = text_len - byte_pos;
+                        
+                        /* Index ALL bytes of this UTF-8 character at SAME char_pos */
+                        for (b = 0; b < char_len; b++) {
+                            unsigned char uch = (unsigned char)text_val[byte_pos + b];
+                            
+                            /* Positive position */
+                            bm = biscuit_get_col_pos_bitmap(cidx, uch, char_pos);
+                            if (!bm) {
+                                bm = biscuit_roaring_create();
+                                biscuit_set_col_pos_bitmap(cidx, uch, char_pos, bm);
+                            }
+                            biscuit_roaring_add(bm, idx->num_records);
+                            
+                            /* Negative position */
+                            remaining_chars = biscuit_utf8_char_count(
+                                text_val + byte_pos, text_len - byte_pos
+                            );
+                            neg_offset = -remaining_chars;
+                            
+                            bm = biscuit_get_col_neg_bitmap(cidx, uch, neg_offset);
+                            if (!bm) {
+                                bm = biscuit_roaring_create();
+                                biscuit_set_col_neg_bitmap(cidx, uch, neg_offset, bm);
+                            }
+                            biscuit_roaring_add(bm, idx->num_records);
+                            
+                            /* Character cache */
+                            if (!cidx->char_cache[uch])
+                                cidx->char_cache[uch] = biscuit_roaring_create();
+                            biscuit_roaring_add(cidx->char_cache[uch], idx->num_records);
+                        }
+                        
+                        byte_pos += char_len;
+                        char_pos++;
                     }
-                    biscuit_roaring_add(bm, idx->num_records);
-                    
-                    neg_offset = -(col_len - pos);
-                    bm = biscuit_get_col_neg_bitmap(cidx, uch, neg_offset);
-                    if (!bm) {
-                        bm = biscuit_roaring_create();
-                        biscuit_set_col_neg_bitmap(cidx, uch, neg_offset, bm);
-                    }
-                    biscuit_roaring_add(bm, idx->num_records);
-                    
-                    if (!cidx->char_cache[uch])
-                        cidx->char_cache[uch] = biscuit_roaring_create();
-                    biscuit_roaring_add(cidx->char_cache[uch], idx->num_records);
                 }
-                
-                /* NEW: Build case-insensitive Biscuit index */
-                char *text_val_lower = biscuit_str_tolower(text_val, text_len);
-                int col_len_lower = strlen(text_val_lower);
-                
-                if (col_len_lower > cidx->max_length) {
-                    cidx->max_length = col_len_lower;
-                }
-                
-                for (pos = 0; pos < col_len_lower; pos++) {
-                    unsigned char uch_lower = (unsigned char)text_val_lower[pos];
-                    
-                    bm = biscuit_get_col_pos_bitmap_lower(cidx, uch_lower, pos);
-                    if (!bm) {
-                        bm = biscuit_roaring_create();
-                        biscuit_set_col_pos_bitmap_lower(cidx, uch_lower, pos, bm);
+
+                /* ==================== UTF-8 CHARACTER-BASED INDEXING (CASE-INSENSITIVE) ==================== */
+                {
+                    char *text_val_lower = biscuit_str_tolower(text_val, text_len);
+                    int lower_byte_len = strlen(text_val_lower);
+                    int lower_char_count = biscuit_utf8_char_count(text_val_lower, lower_byte_len);
+                    int byte_pos = 0;
+                    int char_pos = 0;
+
+                    /* ✅ FIX: Track lowercase max separately */
+                    if (lower_char_count > cidx->max_length_lower)
+                        cidx->max_length_lower = lower_char_count;
+
+                    while (byte_pos < lower_byte_len) {
+                        unsigned char first_byte = (unsigned char)text_val_lower[byte_pos];
+                        int char_len = biscuit_utf8_char_length(first_byte);
+                        RoaringBitmap *bm;
+                        int neg_offset;
+                        int remaining_chars;
+                        int b;
+                        
+                        if (byte_pos + char_len > lower_byte_len)
+                            char_len = lower_byte_len - byte_pos;
+                        
+                        /* Index ALL bytes of this UTF-8 character at SAME char_pos */
+                        for (b = 0; b < char_len; b++) {
+                            unsigned char uch_lower = (unsigned char)text_val_lower[byte_pos + b];
+                            
+                            /* Positive position */
+                            bm = biscuit_get_col_pos_bitmap_lower(cidx, uch_lower, char_pos);
+                            if (!bm) {
+                                bm = biscuit_roaring_create();
+                                biscuit_set_col_pos_bitmap_lower(cidx, uch_lower, char_pos, bm);
+                            }
+                            biscuit_roaring_add(bm, idx->num_records);
+                            
+                            /* Negative position */
+                            remaining_chars = biscuit_utf8_char_count(
+                                text_val_lower + byte_pos, lower_byte_len - byte_pos
+                            );
+                            neg_offset = -remaining_chars;
+                            
+                            bm = biscuit_get_col_neg_bitmap_lower(cidx, uch_lower, neg_offset);
+                            if (!bm) {
+                                bm = biscuit_roaring_create();
+                                biscuit_set_col_neg_bitmap_lower(cidx, uch_lower, neg_offset, bm);
+                            }
+                            biscuit_roaring_add(bm, idx->num_records);
+                            
+                            /* Character cache */
+                            if (!cidx->char_cache_lower[uch_lower])
+                                cidx->char_cache_lower[uch_lower] = biscuit_roaring_create();
+                            biscuit_roaring_add(cidx->char_cache_lower[uch_lower], idx->num_records);
+                        }
+                        
+                        byte_pos += char_len;
+                        char_pos++;
                     }
-                    biscuit_roaring_add(bm, idx->num_records);
                     
-                    neg_offset = -(col_len_lower - pos);
-                    bm = biscuit_get_col_neg_bitmap_lower(cidx, uch_lower, neg_offset);
-                    if (!bm) {
-                        bm = biscuit_roaring_create();
-                        biscuit_set_col_neg_bitmap_lower(cidx, uch_lower, neg_offset, bm);
-                    }
-                    biscuit_roaring_add(bm, idx->num_records);
-                    
-                    if (!cidx->char_cache_lower[uch_lower])
-                        cidx->char_cache_lower[uch_lower] = biscuit_roaring_create();
-                    biscuit_roaring_add(cidx->char_cache_lower[uch_lower], idx->num_records);
+                    pfree(text_val_lower);
                 }
-                
-                pfree(text_val_lower);
             }
             
             idx->num_records++;
@@ -3418,14 +4300,14 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
         
         elog(DEBUG1, "Biscuit: Multi-column scan complete - %d records", idx->num_records);
         
-        /* Build length bitmaps for BOTH case-sensitive and case-insensitive */
+        /* ==================== BUILD SEPARATE LENGTH BITMAPS ==================== */
         for (col = 0; col < natts; col++) {
             ColumnIndex *cidx = &idx->column_indices[col];
             
-            elog(DEBUG1, "Biscuit: Building length bitmaps for column %d (cs_max=%d, ci_max=%d)", 
-                 col, cidx->max_length, cidx->max_length);
+            elog(DEBUG1, "Biscuit: Building length bitmaps for column %d (max_case_sensitive=%d, max_lowercase=%d characters)", 
+                 col, cidx->max_length, cidx->max_length_lower);
             
-            /* Case-sensitive bitmaps */
+            /* CASE-SENSITIVE length bitmaps */
             cidx->length_bitmaps = (RoaringBitmap **)palloc0((cidx->max_length + 1) * sizeof(RoaringBitmap *));
             cidx->length_ge_bitmaps = (RoaringBitmap **)palloc0((cidx->max_length + 1) * sizeof(RoaringBitmap *));
             
@@ -3433,31 +4315,55 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
                 cidx->length_ge_bitmaps[i] = biscuit_roaring_create();
             }
             
+            /* CASE-INSENSITIVE length bitmaps (separate!) */
+            cidx->length_bitmaps_lower = (RoaringBitmap **)palloc0((cidx->max_length_lower + 1) * sizeof(RoaringBitmap *));
+            cidx->length_ge_bitmaps_lower = (RoaringBitmap **)palloc0((cidx->max_length_lower + 1) * sizeof(RoaringBitmap *));
             
-        }
-        
-        /* Populate length bitmaps */
-        for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++) {
-            for (col = 0; col < natts; col++) {
-                char *col_str = idx->column_data_cache[col][rec_idx];
-                int col_len = strlen(col_str);
-                ColumnIndex *cidx = &idx->column_indices[col];
-                
-                /* Case-sensitive lengths */
-                if (col_len <= cidx->max_length) {
-                    if (!cidx->length_bitmaps[col_len])
-                        cidx->length_bitmaps[col_len] = biscuit_roaring_create();
-                    biscuit_roaring_add(cidx->length_bitmaps[col_len], rec_idx);
-                }
-                
-                for (i = 0; i <= col_len && i <= cidx->max_length; i++) {
-                    biscuit_roaring_add(cidx->length_ge_bitmaps[i], rec_idx);
-                }
-                
+            for (i = 0; i <= cidx->max_length_lower; i++) {
+                cidx->length_ge_bitmaps_lower[i] = biscuit_roaring_create();
             }
         }
         
-        
+        /* ✅ FIX: Populate BOTH case-sensitive and lowercase length bitmaps SEPARATELY */
+        for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++) {
+            for (col = 0; col < natts; col++) {
+                char *col_str = idx->column_data_cache[col][rec_idx];
+                int byte_len = strlen(col_str);
+                int char_len = biscuit_utf8_char_count(col_str, byte_len);
+                
+                /* Calculate lowercase character count */
+                char *col_str_lower = biscuit_str_tolower(col_str, byte_len);
+                int lower_byte_len = strlen(col_str_lower);
+                int lower_char_len = biscuit_utf8_char_count(col_str_lower, lower_byte_len);
+                pfree(col_str_lower);
+                
+                ColumnIndex *cidx = &idx->column_indices[col];
+                
+                /* CASE-SENSITIVE: Add to exact length bitmap */
+                if (char_len <= cidx->max_length) {
+                    if (!cidx->length_bitmaps[char_len])
+                        cidx->length_bitmaps[char_len] = biscuit_roaring_create();
+                    biscuit_roaring_add(cidx->length_bitmaps[char_len], rec_idx);
+                }
+                
+                /* CASE-SENSITIVE: Populate length_ge */
+                for (i = 0; i <= char_len && i <= cidx->max_length; i++) {
+                    biscuit_roaring_add(cidx->length_ge_bitmaps[i], rec_idx);
+                }
+                
+                /* CASE-INSENSITIVE: Add to exact lowercase length bitmap */
+                if (lower_char_len <= cidx->max_length_lower) {
+                    if (!cidx->length_bitmaps_lower[lower_char_len])
+                        cidx->length_bitmaps_lower[lower_char_len] = biscuit_roaring_create();
+                    biscuit_roaring_add(cidx->length_bitmaps_lower[lower_char_len], rec_idx);
+                }
+                
+                /* CASE-INSENSITIVE: Populate length_ge_lower */
+                for (i = 0; i <= lower_char_len && i <= cidx->max_length_lower; i++) {
+                    biscuit_roaring_add(cidx->length_ge_bitmaps_lower[i], rec_idx);
+                }
+            }
+        }
         
         /* Write metadata to disk */
         biscuit_write_metadata_to_disk(index, idx);
@@ -3474,7 +4380,7 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
         result->heap_tuples = idx->num_records;
         result->index_tuples = idx->num_records;
         
-        elog(DEBUG1, "Biscuit: Multi-column build complete with ILIKE support");
+        elog(DEBUG1, "Biscuit: Multi-column build complete with separate LIKE/ILIKE length bitmaps");
         
         return result;
     }
@@ -3485,8 +4391,12 @@ biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
     }
     PG_END_TRY();
 }
+
 /* ==================== IAM CALLBACK FUNCTIONS ==================== */
 /* ==================== FIXED: biscuit_build - SINGLE COLUMN WITH ILIKE ==================== */
+
+/* ==================== COMPLETE REPLACEMENT: biscuit_build() ==================== */
+/* ==================== COMPLETE FIXED: biscuit_build() ==================== */
 
 static IndexBuildResult *
 biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
@@ -3546,7 +4456,7 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
             idx->char_cache_legacy[ch] = NULL;
         }
         
-        /* NEW: Initialize case-insensitive index (_lower) */
+        /* Initialize case-insensitive index (_lower) */
         for (ch = 0; ch < CHAR_RANGE; ch++) {
             idx->pos_idx_lower[ch].entries = (PosEntry *)palloc(64 * sizeof(PosEntry));
             idx->pos_idx_lower[ch].count = 0;
@@ -3557,12 +4467,11 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
             idx->char_cache_lower[ch] = NULL;
         }
         
-        
-        
         /* Allocate lowercase data cache */
         idx->data_cache_lower = (char **)palloc(idx->capacity * sizeof(char *));
         
-        
+        /* Initialize tracking for lowercase max length */
+        idx->max_length_lower = 0;
         
         /* Initialize CRUD structures */
         biscuit_init_crud_structures(idx);
@@ -3571,15 +4480,13 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
         slot = table_slot_create(heap, NULL);
         scan = table_beginscan(heap, SnapshotAny, 0, NULL);
         
-        elog(DEBUG1, "Biscuit: Building single-column index with LIKE and ILIKE support");
+        elog(DEBUG1, "Biscuit: Building single-column index with UTF-8 character-level indexing");
         
         while (table_scan_getnextslot(scan, ForwardScanDirection, slot)) {
-            int pos;
             text *txt;
             char *str;
-            int len;
-            char *str_lower;
-            int len_lower;
+            int byte_len;
+            int char_count;
             Datum values[1];
             bool isnull[1];
             bool should_free;
@@ -3591,10 +4498,14 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
             if (!isnull[0]) {
                 txt = DatumGetTextPP(values[0]);
                 str = VARDATA_ANY(txt);
-                len = VARSIZE_ANY_EXHDR(txt);
+                byte_len = VARSIZE_ANY_EXHDR(txt);
                 should_free = (txt != DatumGetTextPP(values[0]));
                 
-                if (len > idx->max_len) idx->max_len = len;
+                /* CRITICAL: Count CHARACTERS, not bytes */
+                char_count = biscuit_utf8_char_count(str, byte_len);
+                
+                if (char_count > idx->max_len) 
+                    idx->max_len = char_count;
                 
                 if (idx->num_records >= idx->capacity) {
                     idx->capacity *= 2;
@@ -3609,68 +4520,120 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
                 ItemPointerCopy(&slot->tts_tid, &idx->tids[idx->num_records]);
                 
                 /* Store original text (for LIKE) */
-                idx->data_cache[idx->num_records] = pnstrdup(str, len);
+                idx->data_cache[idx->num_records] = pnstrdup(str, byte_len);
                 
-                /* CRITICAL FIX: Convert to lowercase and store (for ILIKE) */
-                str_lower = biscuit_str_tolower(str, len);
-                len_lower = strlen(str_lower);
-                idx->data_cache_lower[idx->num_records] = str_lower;
-                
-                /* CRITICAL: Track max lowercase length */
-                if (len_lower > idx->max_length_legacy) {
-                    idx->max_length_legacy = len_lower;
+                /* ==================== UTF-8 CHARACTER-BASED INDEXING (CASE-SENSITIVE) ==================== */
+                {
+                    int byte_pos = 0;
+                    int char_pos = 0;
+                    
+                    while (byte_pos < byte_len) {
+                        unsigned char first_byte = (unsigned char)str[byte_pos];
+                        int char_len = biscuit_utf8_char_length(first_byte);
+                        RoaringBitmap *bm;
+                        int neg_offset;
+                        int remaining_chars;
+                        int b;
+                        
+                        /* Safety: Don't read past buffer */
+                        if (byte_pos + char_len > byte_len)
+                            char_len = byte_len - byte_pos;
+                        
+                        /* ✅ FIX: Index ALL bytes of this UTF-8 character at SAME char_pos */
+                        for (b = 0; b < char_len; b++) {
+                            unsigned char uch = (unsigned char)str[byte_pos + b];
+                            
+                            /* Positive position indexing (from start) */
+                            bm = biscuit_get_pos_bitmap(idx, uch, char_pos);
+                            if (!bm) {
+                                bm = biscuit_roaring_create();
+                                biscuit_set_pos_bitmap(idx, uch, char_pos, bm);
+                            }
+                            biscuit_roaring_add(bm, idx->num_records);
+                            
+                            /* Negative position indexing (from end) */
+                            remaining_chars = biscuit_utf8_char_count(
+                                str + byte_pos, byte_len - byte_pos
+                            );
+                            neg_offset = -remaining_chars;
+                            
+                            bm = biscuit_get_neg_bitmap(idx, uch, neg_offset);
+                            if (!bm) {
+                                bm = biscuit_roaring_create();
+                                biscuit_set_neg_bitmap(idx, uch, neg_offset, bm);
+                            }
+                            biscuit_roaring_add(bm, idx->num_records);
+                            
+                            /* Character cache */
+                            if (!idx->char_cache_legacy[uch])
+                                idx->char_cache_legacy[uch] = biscuit_roaring_create();
+                            biscuit_roaring_add(idx->char_cache_legacy[uch], idx->num_records);
+                        }
+                        
+                        byte_pos += char_len;
+                        char_pos++;  /* Increment ONCE per character */
+                    }
                 }
                 
-                /* Build case-sensitive index */
-                for (pos = 0; pos < len; pos++) {
-                    unsigned char uch = (unsigned char)str[pos];
-                    RoaringBitmap *bm;
-                    int neg_offset;
+                /* ==================== UTF-8 CHARACTER-BASED INDEXING (CASE-INSENSITIVE) ==================== */
+                {
+                    char *str_lower = biscuit_str_tolower(str, byte_len);
+                    int lower_byte_len = strlen(str_lower);
+                    int lower_char_count = biscuit_utf8_char_count(str_lower, lower_byte_len);
+                    int byte_pos = 0;
+                    int char_pos = 0;
                     
-                    bm = biscuit_get_pos_bitmap(idx, uch, pos);
-                    if (!bm) {
-                        bm = biscuit_roaring_create();
-                        biscuit_set_pos_bitmap(idx, uch, pos, bm);
+                    idx->data_cache_lower[idx->num_records] = str_lower;
+                    
+                    /* ✅ NEW: Track max lowercase character count separately */
+                    if (lower_char_count > idx->max_length_lower)
+                        idx->max_length_lower = lower_char_count;
+                    
+                    while (byte_pos < lower_byte_len) {
+                        unsigned char first_byte = (unsigned char)str_lower[byte_pos];
+                        int char_len = biscuit_utf8_char_length(first_byte);
+                        RoaringBitmap *bm;
+                        int neg_offset;
+                        int remaining_chars;
+                        int b;
+                        
+                        if (byte_pos + char_len > lower_byte_len)
+                            char_len = lower_byte_len - byte_pos;
+                        
+                        /* ✅ FIX: Index ALL bytes of this UTF-8 character at SAME char_pos */
+                        for (b = 0; b < char_len; b++) {
+                            unsigned char uch_lower = (unsigned char)str_lower[byte_pos + b];
+                            
+                            /* Positive position */
+                            bm = biscuit_get_pos_bitmap_lower(idx, uch_lower, char_pos);
+                            if (!bm) {
+                                bm = biscuit_roaring_create();
+                                biscuit_set_pos_bitmap_lower(idx, uch_lower, char_pos, bm);
+                            }
+                            biscuit_roaring_add(bm, idx->num_records);
+                            
+                            /* Negative position */
+                            remaining_chars = biscuit_utf8_char_count(
+                                str_lower + byte_pos, lower_byte_len - byte_pos
+                            );
+                            neg_offset = -remaining_chars;
+                            
+                            bm = biscuit_get_neg_bitmap_lower(idx, uch_lower, neg_offset);
+                            if (!bm) {
+                                bm = biscuit_roaring_create();
+                                biscuit_set_neg_bitmap_lower(idx, uch_lower, neg_offset, bm);
+                            }
+                            biscuit_roaring_add(bm, idx->num_records);
+                            
+                            /* Character cache */
+                            if (!idx->char_cache_lower[uch_lower])
+                                idx->char_cache_lower[uch_lower] = biscuit_roaring_create();
+                            biscuit_roaring_add(idx->char_cache_lower[uch_lower], idx->num_records);
+                        }
+                        
+                        byte_pos += char_len;
+                        char_pos++;  /* Increment ONCE per character */
                     }
-                    biscuit_roaring_add(bm, idx->num_records);
-                    
-                    neg_offset = -(len - pos);
-                    bm = biscuit_get_neg_bitmap(idx, uch, neg_offset);
-                    if (!bm) {
-                        bm = biscuit_roaring_create();
-                        biscuit_set_neg_bitmap(idx, uch, neg_offset, bm);
-                    }
-                    biscuit_roaring_add(bm, idx->num_records);
-                    
-                    if (!idx->char_cache_legacy[uch])
-                        idx->char_cache_legacy[uch] = biscuit_roaring_create();
-                    biscuit_roaring_add(idx->char_cache_legacy[uch], idx->num_records);
-                }
-                
-                /* Build case-insensitive index (lowercase) */
-                for (pos = 0; pos < len_lower; pos++) {
-                    unsigned char uch_lower = (unsigned char)str_lower[pos];
-                    RoaringBitmap *bm;
-                    int neg_offset;
-                    
-                    bm = biscuit_get_pos_bitmap_lower(idx, uch_lower, pos);
-                    if (!bm) {
-                        bm = biscuit_roaring_create();
-                        biscuit_set_pos_bitmap_lower(idx, uch_lower, pos, bm);
-                    }
-                    biscuit_roaring_add(bm, idx->num_records);
-                    
-                    neg_offset = -(len_lower - pos);
-                    bm = biscuit_get_neg_bitmap_lower(idx, uch_lower, neg_offset);
-                    if (!bm) {
-                        bm = biscuit_roaring_create();
-                        biscuit_set_neg_bitmap_lower(idx, uch_lower, neg_offset, bm);
-                    }
-                    biscuit_roaring_add(bm, idx->num_records);
-                    
-                    if (!idx->char_cache_lower[uch_lower])
-                        idx->char_cache_lower[uch_lower] = biscuit_roaring_create();
-                    biscuit_roaring_add(idx->char_cache_lower[uch_lower], idx->num_records);
                 }
                 
                 idx->num_records++;
@@ -3683,57 +4646,87 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
         table_endscan(scan);
         ExecDropSingleTupleTableSlot(slot);
         
-        elog(DEBUG1, "Biscuit: Scanned %d records, max_len=%d, max_length=%d", 
-             idx->num_records, idx->max_len, idx->max_length_legacy);
+        elog(DEBUG1, "Biscuit: Scanned %d records, max_len=%d (case-sensitive), max_len_lower=%d (lowercase) characters", 
+             idx->num_records, idx->max_len, idx->max_length_lower);
         
-        /* Build length bitmaps for BOTH indices */
-        int rec_idx, i;
-        
-        /* CRITICAL FIX: Add 1 to max lengths for proper array allocation */
-        int case_sensitive_max = idx->max_len + 1;
-        int case_insensitive_max = idx->max_length_legacy + 1;
-        
-        elog(DEBUG1, "Biscuit: Allocating case-sensitive length arrays [0..%d]", case_sensitive_max - 1);
-        elog(DEBUG1, "Biscuit: Allocating case-insensitive length arrays [0..%d]", case_insensitive_max - 1);
-        
-        /* Case-sensitive length bitmaps */
-        idx->max_length_legacy = case_sensitive_max;
-        idx->length_bitmaps_legacy = (RoaringBitmap **)palloc0(
-            idx->max_length_legacy * sizeof(RoaringBitmap *));
-        idx->length_ge_bitmaps_legacy = (RoaringBitmap **)palloc0(
-            idx->max_length_legacy * sizeof(RoaringBitmap *));
-        
-        for (ch = 0; ch < idx->max_length_legacy; ch++) {
-            idx->length_ge_bitmaps_legacy[ch] = biscuit_roaring_create();
-        }
-        
-        
-        
-        elog(DEBUG1, "Biscuit: Populating length bitmaps from %d records", idx->num_records);
-        
-        /* Populate both length bitmap sets */
-        for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++) {
-            int len, len_lower;
+        /* ==================== BUILD SEPARATE LENGTH BITMAPS ==================== */
+        {
+            int rec_idx, i;
             
-            if (!idx->data_cache[rec_idx]) {
-                continue;
+            /* Allocate for case-sensitive lengths */
+            idx->max_length_legacy = idx->max_len + 1;
+            
+            /* Allocate for lowercase lengths (can be different!) */
+            idx->max_length_lower += 1; // Add 1 for array sizing
+            
+            elog(DEBUG1, "Biscuit: Allocating SEPARATE length bitmaps:");
+            elog(DEBUG1, "  - Case-sensitive: [0..%d] characters", idx->max_len);
+            elog(DEBUG1, "  - Lowercase:       [0..%d] characters", idx->max_length_lower - 1);
+            
+            /* ==================== CASE-SENSITIVE LENGTH BITMAPS ==================== */
+            idx->length_bitmaps_legacy = (RoaringBitmap **)palloc0(
+                idx->max_length_legacy * sizeof(RoaringBitmap *));
+            idx->length_ge_bitmaps_legacy = (RoaringBitmap **)palloc0(
+                idx->max_length_legacy * sizeof(RoaringBitmap *));
+            
+            for (ch = 0; ch < idx->max_length_legacy; ch++) {
+                idx->length_ge_bitmaps_legacy[ch] = biscuit_roaring_create();
             }
             
-            /* Case-sensitive lengths */
-            len = strlen(idx->data_cache[rec_idx]);
+            /* ==================== CASE-INSENSITIVE LENGTH BITMAPS (SEPARATE!) ==================== */
+            idx->length_bitmaps_lower = (RoaringBitmap **)palloc0(
+                idx->max_length_lower * sizeof(RoaringBitmap *));
+            idx->length_ge_bitmaps_lower = (RoaringBitmap **)palloc0(
+                idx->max_length_lower * sizeof(RoaringBitmap *));
             
-            if (len < idx->max_length_legacy) {
-                if (!idx->length_bitmaps_legacy[len])
-                    idx->length_bitmaps_legacy[len] = biscuit_roaring_create();
-                biscuit_roaring_add(idx->length_bitmaps_legacy[len], rec_idx);
+            for (ch = 0; ch < idx->max_length_lower; ch++) {
+                idx->length_ge_bitmaps_lower[ch] = biscuit_roaring_create();
             }
             
-            for (i = 0; i <= len && i < idx->max_length_legacy; i++)
-                biscuit_roaring_add(idx->length_ge_bitmaps_legacy[i], rec_idx);
+            elog(DEBUG1, "Biscuit: Populating BOTH sets of length bitmaps from %d records", 
+                 idx->num_records);
             
-            
-        }
+            /* ✅ POPULATE BOTH SETS OF BITMAPS SEPARATELY BASED ON ACTUAL LENGTHS */
+            for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++) {
+                if (!idx->data_cache[rec_idx])
+                    continue;
                 
+                /* ==================== CASE-SENSITIVE CHARACTER COUNT ==================== */
+                int byte_len = strlen(idx->data_cache[rec_idx]);
+                int char_len = biscuit_utf8_char_count(idx->data_cache[rec_idx], byte_len);
+                
+                /* Add to exact length bitmap */
+                if (char_len < idx->max_length_legacy) {
+                    if (!idx->length_bitmaps_legacy[char_len])
+                        idx->length_bitmaps_legacy[char_len] = biscuit_roaring_create();
+                    biscuit_roaring_add(idx->length_bitmaps_legacy[char_len], rec_idx);
+                }
+                
+                /* Populate length_ge bitmaps */
+                for (i = 0; i <= char_len && i < idx->max_length_legacy; i++)
+                    biscuit_roaring_add(idx->length_ge_bitmaps_legacy[i], rec_idx);
+                
+                /* ==================== CASE-INSENSITIVE CHARACTER COUNT (SEPARATE!) ==================== */
+                if (idx->data_cache_lower[rec_idx]) {
+                    int lower_byte_len = strlen(idx->data_cache_lower[rec_idx]);
+                    int lower_char_len = biscuit_utf8_char_count(idx->data_cache_lower[rec_idx], lower_byte_len);
+                    
+                    /* Add to exact lowercase length bitmap */
+                    if (lower_char_len < idx->max_length_lower) {
+                        if (!idx->length_bitmaps_lower[lower_char_len])
+                            idx->length_bitmaps_lower[lower_char_len] = biscuit_roaring_create();
+                        biscuit_roaring_add(idx->length_bitmaps_lower[lower_char_len], rec_idx);
+                    }
+                    
+                    /* Populate lowercase length_ge bitmaps */
+                    for (i = 0; i <= lower_char_len && i < idx->max_length_lower; i++)
+                        biscuit_roaring_add(idx->length_ge_bitmaps_lower[i], rec_idx);
+                }
+            }
+            
+            elog(DEBUG1, "Biscuit: Length bitmap population complete");
+        }
+        
         /* Write metadata to disk */
         biscuit_write_metadata_to_disk(index, idx);
         
@@ -3741,7 +4734,6 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
         biscuit_register_callback();
         biscuit_cache_insert(RelationGetRelid(index), idx);
         
-        /* Set rd_amcache */
         index->rd_amcache = idx;
         
         /* Switch back to old context for result allocation */
@@ -3751,7 +4743,7 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
         result->heap_tuples = idx->num_records;
         result->index_tuples = idx->num_records;
         
-        elog(DEBUG1, "Biscuit: Build complete - LIKE and ILIKE ready");
+        elog(DEBUG1, "Biscuit: Build complete with separate LIKE/ILIKE length bitmaps");
         
         return result;
     }
@@ -3762,8 +4754,9 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
     }
     PG_END_TRY();
 }
+/* ==================== UPDATED: biscuit_load_index - WITH UTF-8 CHARACTER-LEVEL LOGIC ==================== */
 
-/* ==================== UPDATED: biscuit_load_index - MULTI-COLUMN SECTION WITH ILIKE ==================== */
+/* ==================== COMPLETE FIXED: biscuit_load_index() ==================== */
 
 static BiscuitIndex* biscuit_load_index(Relation index)
 {
@@ -3811,8 +4804,8 @@ static BiscuitIndex* biscuit_load_index(Relation index)
     idx->num_columns = natts;
     
     if (natts > 1) {
-        /* ==================== MULTI-COLUMN INITIALIZATION WITH ILIKE ==================== */
-        elog(DEBUG1, "Biscuit: Loading %d-column index with ILIKE support", natts);
+        /* ==================== MULTI-COLUMN INITIALIZATION WITH UTF-8 ==================== */
+        elog(DEBUG1, "Biscuit: Loading %d-column index with UTF-8 character-level support", natts);
         
         idx->column_types = (Oid *)palloc(natts * sizeof(Oid));
         idx->output_funcs = (FmgrInfo *)palloc(natts * sizeof(FmgrInfo));
@@ -3840,7 +4833,7 @@ static BiscuitIndex* biscuit_load_index(Relation index)
                 cidx->char_cache[ch] = NULL;
             }
             
-            /* NEW: Case-insensitive index */
+            /* Case-insensitive index */
             for (ch = 0; ch < CHAR_RANGE; ch++) {
                 cidx->pos_idx_lower[ch].entries = (PosEntry *)palloc(64 * sizeof(PosEntry));
                 cidx->pos_idx_lower[ch].count = 0;
@@ -3852,15 +4845,18 @@ static BiscuitIndex* biscuit_load_index(Relation index)
             }
             
             cidx->max_length = 0;
+            cidx->max_length_lower = 0;  /* ✅ NEW: Track lowercase max separately */
             cidx->length_bitmaps = NULL;
             cidx->length_ge_bitmaps = NULL;
+            cidx->length_bitmaps_lower = NULL;      /* ✅ NEW: Separate ILIKE bitmaps */
+            cidx->length_ge_bitmaps_lower = NULL;   /* ✅ NEW: Separate ILIKE bitmaps */
         }
         idx->data_cache = NULL;
         idx->data_cache_lower = NULL;
         
     } else {
         /* ==================== SINGLE-COLUMN INITIALIZATION ==================== */
-        elog(DEBUG1, "Biscuit: Loading single-column index with ILIKE support");
+        elog(DEBUG1, "Biscuit: Loading single-column index with UTF-8 character-level support");
         idx->data_cache = (char **)palloc(idx->capacity * sizeof(char *));
         idx->data_cache_lower = (char **)palloc(idx->capacity * sizeof(char *));
         idx->column_types = NULL;
@@ -3890,6 +4886,8 @@ static BiscuitIndex* biscuit_load_index(Relation index)
             idx->char_cache_lower[ch] = NULL;
         }
         
+        /* ✅ NEW: Initialize separate lowercase max length tracker */
+        idx->max_length_lower = 0;
     }
     
     biscuit_init_crud_structures(idx);
@@ -3900,13 +4898,12 @@ static BiscuitIndex* biscuit_load_index(Relation index)
     scan = table_beginscan(heap, SnapshotAny, 0, NULL);
     
     while (table_scan_getnextslot(scan, ForwardScanDirection, slot)) {
-        int pos;
         bool isnull;
         
         slot_getallattrs(slot);
         
         if (natts > 1) {
-            /* ==================== MULTI-COLUMN SCAN WITH ILIKE ==================== */
+            /* ==================== MULTI-COLUMN SCAN WITH UTF-8 CHARACTER-LEVEL ==================== */
             oldcontext = MemoryContextSwitchTo(indexContext);
             
             if (idx->num_records >= idx->capacity) {
@@ -3946,11 +4943,11 @@ static BiscuitIndex* biscuit_load_index(Relation index)
                     /* Regular column */
                     value = slot_getattr(slot, col_attnum, &isnull);
                 }
+                
                 ColumnIndex *cidx = &idx->column_indices[col];
-                char *col_str;
-                int col_len;
-                int text_len;
                 char *text_val;
+                int text_len;
+                int char_count;
                 
                 oldcontext = MemoryContextSwitchTo(indexContext);
                 
@@ -3962,76 +4959,123 @@ static BiscuitIndex* biscuit_load_index(Relation index)
                 
                 text_val = biscuit_datum_to_text(value, idx->column_types[col],
                                                 &idx->output_funcs[col], &text_len);
-                col_str = text_val;
-                col_len = text_len;
                 
-                if (col_len > cidx->max_length) cidx->max_length = col_len;
-                if (col_len > idx->max_len) idx->max_len = col_len;
+                /* Count UTF-8 characters */
+                char_count = biscuit_utf8_char_count(text_val, text_len);
+                
+                if (char_count > cidx->max_length) 
+                    cidx->max_length = char_count;
+                if (char_count > idx->max_len) 
+                    idx->max_len = char_count;
                 
                 idx->column_data_cache[col][idx->num_records] = text_val;
-                                
-                /* Build case-sensitive index */
-                for (pos = 0; pos < col_len; pos++) {
-                    unsigned char uch = (unsigned char)col_str[pos];
-                    RoaringBitmap *bm;
-                    int neg_offset;
-                    
-                    bm = biscuit_get_col_pos_bitmap(cidx, uch, pos);
-                    if (!bm) {
-                        bm = biscuit_roaring_create();
-                        biscuit_set_col_pos_bitmap(cidx, uch, pos, bm);
-                    }
-                    biscuit_roaring_add(bm, idx->num_records);
-                    
-                    neg_offset = -(col_len - pos);
-                    bm = biscuit_get_col_neg_bitmap(cidx, uch, neg_offset);
-                    if (!bm) {
-                        bm = biscuit_roaring_create();
-                        biscuit_set_col_neg_bitmap(cidx, uch, neg_offset, bm);
-                    }
-                    biscuit_roaring_add(bm, idx->num_records);
-                    
-                    if (!cidx->char_cache[uch])
-                        cidx->char_cache[uch] = biscuit_roaring_create();
-                    biscuit_roaring_add(cidx->char_cache[uch], idx->num_records);
-                }
-
-                /* NEW: Build case-insensitive index */
-                char *text_val_lower = biscuit_str_tolower(text_val, text_len);
-                int col_len_lower = strlen(text_val_lower);
-
-                /* Track max lowercase length */
-                if (col_len_lower > cidx->max_length) {
-                    cidx->max_length = col_len_lower;
-                }
-
-                /* Build case-insensitive indices */
-                for (pos = 0; pos < col_len_lower; pos++) {
-                    unsigned char uch_lower = (unsigned char)text_val_lower[pos];
-                    RoaringBitmap *bm;
-                    int neg_offset;
-                    
-                    bm = biscuit_get_col_pos_bitmap_lower(cidx, uch_lower, pos);
-                    if (!bm) {
-                        bm = biscuit_roaring_create();
-                        biscuit_set_col_pos_bitmap_lower(cidx, uch_lower, pos, bm);
-                    }
-                    biscuit_roaring_add(bm, idx->num_records);
-                    
-                    neg_offset = -(col_len_lower - pos);
-                    bm = biscuit_get_col_neg_bitmap_lower(cidx, uch_lower, neg_offset);
-                    if (!bm) {
-                        bm = biscuit_roaring_create();
-                        biscuit_set_col_neg_bitmap_lower(cidx, uch_lower, neg_offset, bm);
-                    }
-                    biscuit_roaring_add(bm, idx->num_records);
-                    
-                    if (!cidx->char_cache_lower[uch_lower])
-                        cidx->char_cache_lower[uch_lower] = biscuit_roaring_create();
-                    biscuit_roaring_add(cidx->char_cache_lower[uch_lower], idx->num_records);
-                }
                 
-                pfree(text_val_lower);
+                /* ==================== UTF-8 CHARACTER-BASED INDEXING (CASE-SENSITIVE) ==================== */
+                {
+                    int byte_pos = 0;
+                    int char_pos = 0;
+                    
+                    while (byte_pos < text_len) {
+                        unsigned char first_byte = (unsigned char)text_val[byte_pos];
+                        int char_len = biscuit_utf8_char_length(first_byte);
+                        RoaringBitmap *bm;
+                        int neg_offset;
+                        int remaining_chars;
+                        int b;
+                        
+                        if (byte_pos + char_len > text_len)
+                            char_len = text_len - byte_pos;
+                        
+                        /* Index ALL bytes of the UTF-8 character at SAME char_pos */
+                        for (b = 0; b < char_len; b++) {
+                            unsigned char uch = (unsigned char)text_val[byte_pos + b];
+                            
+                            bm = biscuit_get_col_pos_bitmap(cidx, uch, char_pos);
+                            if (!bm) {
+                                bm = biscuit_roaring_create();
+                                biscuit_set_col_pos_bitmap(cidx, uch, char_pos, bm);
+                            }
+                            biscuit_roaring_add(bm, idx->num_records);
+                            
+                            remaining_chars = biscuit_utf8_char_count(
+                                text_val + byte_pos, text_len - byte_pos
+                            );
+                            neg_offset = -remaining_chars;
+                            
+                            bm = biscuit_get_col_neg_bitmap(cidx, uch, neg_offset);
+                            if (!bm) {
+                                bm = biscuit_roaring_create();
+                                biscuit_set_col_neg_bitmap(cidx, uch, neg_offset, bm);
+                            }
+                            biscuit_roaring_add(bm, idx->num_records);
+                            
+                            if (!cidx->char_cache[uch])
+                                cidx->char_cache[uch] = biscuit_roaring_create();
+                            biscuit_roaring_add(cidx->char_cache[uch], idx->num_records);
+                        }
+                        
+                        byte_pos += char_len;
+                        char_pos++;
+                    }
+                }
+
+                /* ==================== UTF-8 CHARACTER-BASED INDEXING (CASE-INSENSITIVE) ==================== */
+                {
+                    char *text_val_lower = biscuit_str_tolower(text_val, text_len);
+                    int lower_byte_len = strlen(text_val_lower);
+                    int lower_char_count = biscuit_utf8_char_count(text_val_lower, lower_byte_len);
+                    int byte_pos = 0;
+                    int char_pos = 0;
+
+                    /* ✅ FIX: Track lowercase max separately */
+                    if (lower_char_count > cidx->max_length_lower)
+                        cidx->max_length_lower = lower_char_count;
+
+                    while (byte_pos < lower_byte_len) {
+                        unsigned char first_byte = (unsigned char)text_val_lower[byte_pos];
+                        int char_len = biscuit_utf8_char_length(first_byte);
+                        RoaringBitmap *bm;
+                        int neg_offset;
+                        int remaining_chars;
+                        int b;
+                        
+                        if (byte_pos + char_len > lower_byte_len)
+                            char_len = lower_byte_len - byte_pos;
+                        
+                        /* Index ALL bytes of the UTF-8 character at SAME char_pos */
+                        for (b = 0; b < char_len; b++) {
+                            unsigned char uch_lower = (unsigned char)text_val_lower[byte_pos + b];
+                            
+                            bm = biscuit_get_col_pos_bitmap_lower(cidx, uch_lower, char_pos);
+                            if (!bm) {
+                                bm = biscuit_roaring_create();
+                                biscuit_set_col_pos_bitmap_lower(cidx, uch_lower, char_pos, bm);
+                            }
+                            biscuit_roaring_add(bm, idx->num_records);
+                            
+                            remaining_chars = biscuit_utf8_char_count(
+                                text_val_lower + byte_pos, lower_byte_len - byte_pos
+                            );
+                            neg_offset = -remaining_chars;
+                            
+                            bm = biscuit_get_col_neg_bitmap_lower(cidx, uch_lower, neg_offset);
+                            if (!bm) {
+                                bm = biscuit_roaring_create();
+                                biscuit_set_col_neg_bitmap_lower(cidx, uch_lower, neg_offset, bm);
+                            }
+                            biscuit_roaring_add(bm, idx->num_records);
+                            
+                            if (!cidx->char_cache_lower[uch_lower])
+                                cidx->char_cache_lower[uch_lower] = biscuit_roaring_create();
+                            biscuit_roaring_add(cidx->char_cache_lower[uch_lower], idx->num_records);
+                        }
+                        
+                        byte_pos += char_len;
+                        char_pos++;
+                    }
+                    
+                    pfree(text_val_lower);
+                }
                 
                 MemoryContextSwitchTo(oldcontext);
             }
@@ -4039,24 +5083,26 @@ static BiscuitIndex* biscuit_load_index(Relation index)
             idx->num_records++;
             
         } else {
-            /* ==================== SINGLE-COLUMN SCAN WITH ILIKE SUPPORT ==================== */
+            /* ==================== SINGLE-COLUMN SCAN WITH UTF-8 CHARACTER-LEVEL ==================== */
             AttrNumber col_attnum = index->rd_index->indkey.values[0];
             Datum value = slot_getattr(slot, col_attnum, &isnull);
             text *txt;
             char *str;
-            int len;
-            char *str_lower;
-            int len_lower;
+            int byte_len;
+            int char_count;
             bool should_free;
 
             if (isnull) continue;
 
             txt = DatumGetTextPP(value);
             str = VARDATA_ANY(txt);
-            len = VARSIZE_ANY_EXHDR(txt);
+            byte_len = VARSIZE_ANY_EXHDR(txt);
             should_free = (txt != DatumGetTextPP(value));
 
-            if (len > idx->max_len) idx->max_len = len;
+            /* Count characters */
+            char_count = biscuit_utf8_char_count(str, byte_len);
+            if (char_count > idx->max_len) 
+                idx->max_len = char_count;
 
             oldcontext = MemoryContextSwitchTo(indexContext);
 
@@ -4071,76 +5117,113 @@ static BiscuitIndex* biscuit_load_index(Relation index)
             }
 
             ItemPointerCopy(&slot->tts_tid, &idx->tids[idx->num_records]);
+            idx->data_cache[idx->num_records] = pnstrdup(str, byte_len);
 
-            /* Store original text */
-            idx->data_cache[idx->num_records] = pnstrdup(str, len);
-
-            /* Store lowercase text */
-            str_lower = biscuit_str_tolower(str, len);
-            len_lower = strlen(str_lower);
-            idx->data_cache_lower[idx->num_records] = str_lower;
-
-            /* FIXED: Track max for BOTH case-sensitive and case-insensitive */
-            if (len > idx->max_len) {
-                idx->max_len = len;
+            /* ==================== UTF-8 CHARACTER-BASED INDEXING (CASE-SENSITIVE) ==================== */
+            {
+                int byte_pos = 0;
+                int char_pos = 0;
+                
+                while (byte_pos < byte_len) {
+                    unsigned char first_byte = (unsigned char)str[byte_pos];
+                    int char_len = biscuit_utf8_char_length(first_byte);
+                    RoaringBitmap *bm;
+                    int neg_offset;
+                    int remaining_chars;
+                    int b;
+                    
+                    if (byte_pos + char_len > byte_len)
+                        char_len = byte_len - byte_pos;
+                    
+                    /* Index ALL bytes of the UTF-8 character at SAME char_pos */
+                    for (b = 0; b < char_len; b++) {
+                        unsigned char uch = (unsigned char)str[byte_pos + b];
+                        
+                        bm = biscuit_get_pos_bitmap(idx, uch, char_pos);
+                        if (!bm) {
+                            bm = biscuit_roaring_create();
+                            biscuit_set_pos_bitmap(idx, uch, char_pos, bm);
+                        }
+                        biscuit_roaring_add(bm, idx->num_records);
+                        
+                        remaining_chars = biscuit_utf8_char_count(
+                            str + byte_pos, byte_len - byte_pos
+                        );
+                        neg_offset = -remaining_chars;
+                        
+                        bm = biscuit_get_neg_bitmap(idx, uch, neg_offset);
+                        if (!bm) {
+                            bm = biscuit_roaring_create();
+                            biscuit_set_neg_bitmap(idx, uch, neg_offset, bm);
+                        }
+                        biscuit_roaring_add(bm, idx->num_records);
+                        
+                        if (!idx->char_cache_legacy[uch])
+                            idx->char_cache_legacy[uch] = biscuit_roaring_create();
+                        biscuit_roaring_add(idx->char_cache_legacy[uch], idx->num_records);
+                    }
+                    
+                    byte_pos += char_len;
+                    char_pos++;
+                }
             }
 
-            /* FIXED: Track the maximum length we'll need for bitmap allocation */
-            int max_for_bitmaps = (len > len_lower) ? len : len_lower;
-            if (max_for_bitmaps > idx->max_length_legacy) {
-                idx->max_length_legacy = max_for_bitmaps;
-            }
-
-            /* Build case-sensitive index */
-            for (pos = 0; pos < len; pos++) {
-                unsigned char uch = (unsigned char)str[pos];
-                RoaringBitmap *bm;
-                int neg_offset;
+            /* ==================== UTF-8 CHARACTER-BASED INDEXING (CASE-INSENSITIVE) ==================== */
+            {
+                char *str_lower = biscuit_str_tolower(str, byte_len);
+                int lower_byte_len = strlen(str_lower);
+                int lower_char_count = biscuit_utf8_char_count(str_lower, lower_byte_len);
+                int byte_pos = 0;
+                int char_pos = 0;
                 
-                bm = biscuit_get_pos_bitmap(idx, uch, pos);
-                if (!bm) {
-                    bm = biscuit_roaring_create();
-                    biscuit_set_pos_bitmap(idx, uch, pos, bm);
+                idx->data_cache_lower[idx->num_records] = str_lower;
+                
+                /* ✅ FIX: Track lowercase max separately */
+                if (lower_char_count > idx->max_length_lower)
+                    idx->max_length_lower = lower_char_count;
+                
+                while (byte_pos < lower_byte_len) {
+                    unsigned char first_byte = (unsigned char)str_lower[byte_pos];
+                    int char_len = biscuit_utf8_char_length(first_byte);
+                    RoaringBitmap *bm;
+                    int neg_offset;
+                    int remaining_chars;
+                    int b;
+                    
+                    if (byte_pos + char_len > lower_byte_len)
+                        char_len = lower_byte_len - byte_pos;
+                    
+                    /* Index ALL bytes of the UTF-8 character at SAME char_pos */
+                    for (b = 0; b < char_len; b++) {
+                        unsigned char uch_lower = (unsigned char)str_lower[byte_pos + b];
+                        
+                        bm = biscuit_get_pos_bitmap_lower(idx, uch_lower, char_pos);
+                        if (!bm) {
+                            bm = biscuit_roaring_create();
+                            biscuit_set_pos_bitmap_lower(idx, uch_lower, char_pos, bm);
+                        }
+                        biscuit_roaring_add(bm, idx->num_records);
+                        
+                        remaining_chars = biscuit_utf8_char_count(
+                            str_lower + byte_pos, lower_byte_len - byte_pos
+                        );
+                        neg_offset = -remaining_chars;
+                        
+                        bm = biscuit_get_neg_bitmap_lower(idx, uch_lower, neg_offset);
+                        if (!bm) {
+                            bm = biscuit_roaring_create();
+                            biscuit_set_neg_bitmap_lower(idx, uch_lower, neg_offset, bm);
+                        }
+                        biscuit_roaring_add(bm, idx->num_records);
+                        
+                        if (!idx->char_cache_lower[uch_lower])
+                            idx->char_cache_lower[uch_lower] = biscuit_roaring_create();
+                        biscuit_roaring_add(idx->char_cache_lower[uch_lower], idx->num_records);
+                    }
+                    
+                    byte_pos += char_len;
+                    char_pos++;
                 }
-                biscuit_roaring_add(bm, idx->num_records);
-                
-                neg_offset = -(len - pos);
-                bm = biscuit_get_neg_bitmap(idx, uch, neg_offset);
-                if (!bm) {
-                    bm = biscuit_roaring_create();
-                    biscuit_set_neg_bitmap(idx, uch, neg_offset, bm);
-                }
-                biscuit_roaring_add(bm, idx->num_records);
-                
-                if (!idx->char_cache_legacy[uch])
-                    idx->char_cache_legacy[uch] = biscuit_roaring_create();
-                biscuit_roaring_add(idx->char_cache_legacy[uch], idx->num_records);
-            }
-
-            /* Build case-insensitive index */
-            for (pos = 0; pos < len_lower; pos++) {
-                unsigned char uch_lower = (unsigned char)str_lower[pos];
-                RoaringBitmap *bm;
-                int neg_offset;
-                
-                bm = biscuit_get_pos_bitmap_lower(idx, uch_lower, pos);
-                if (!bm) {
-                    bm = biscuit_roaring_create();
-                    biscuit_set_pos_bitmap_lower(idx, uch_lower, pos, bm);
-                }
-                biscuit_roaring_add(bm, idx->num_records);
-                
-                neg_offset = -(len_lower - pos);
-                bm = biscuit_get_neg_bitmap_lower(idx, uch_lower, neg_offset);
-                if (!bm) {
-                    bm = biscuit_roaring_create();
-                    biscuit_set_neg_bitmap_lower(idx, uch_lower, neg_offset, bm);
-                }
-                biscuit_roaring_add(bm, idx->num_records);
-                
-                if (!idx->char_cache_lower[uch_lower])
-                    idx->char_cache_lower[uch_lower] = biscuit_roaring_create();
-                biscuit_roaring_add(idx->char_cache_lower[uch_lower], idx->num_records);
             }
 
             idx->num_records++;
@@ -4153,92 +5236,102 @@ static BiscuitIndex* biscuit_load_index(Relation index)
     table_endscan(scan);
     ExecDropSingleTupleTableSlot(slot);
     
-    
     if (idx->num_records == 0) {
         elog(WARNING, "Biscuit: No records loaded from heap - index is empty!");
         table_close(heap, AccessShareLock);
         return idx;
     }
     
-    /* ==================== BUILD LENGTH BITMAPS ==================== */
+    /* ==================== BUILD SEPARATE LENGTH BITMAPS FOR LIKE AND ILIKE ==================== */
     oldcontext = MemoryContextSwitchTo(indexContext);
     
     if (natts > 1) {
-        /* ==================== MULTI-COLUMN LENGTH BITMAPS WITH ILIKE ==================== */
-        elog(DEBUG1, "Biscuit: Building multi-column length bitmaps with ILIKE");
+        /* ==================== MULTI-COLUMN LENGTH BITMAPS ==================== */
+        elog(DEBUG1, "Biscuit: Building multi-column length bitmaps (separate for LIKE/ILIKE)");
         
         for (col = 0; col < natts; col++) {
             ColumnIndex *cidx = &idx->column_indices[col];
             int i;
             
-            /* Case-sensitive bitmaps */
-            cidx->length_bitmaps = (RoaringBitmap **)palloc0((cidx->max_length+ 1) * sizeof(RoaringBitmap *));
-            cidx->length_ge_bitmaps = (RoaringBitmap **)palloc0((cidx->max_length+ 1) * sizeof(RoaringBitmap *));
+            elog(DEBUG1, "  Column %d: case_sensitive max=%d, lowercase max=%d characters",
+                 col, cidx->max_length, cidx->max_length_lower);
+            
+            /* CASE-SENSITIVE length bitmaps */
+            cidx->length_bitmaps = (RoaringBitmap **)palloc0((cidx->max_length + 1) * sizeof(RoaringBitmap *));
+            cidx->length_ge_bitmaps = (RoaringBitmap **)palloc0((cidx->max_length + 1) * sizeof(RoaringBitmap *));
             
             for (i = 0; i <= cidx->max_length; i++) {
                 cidx->length_ge_bitmaps[i] = biscuit_roaring_create();
             }
             
+            /* CASE-INSENSITIVE length bitmaps (separate!) */
+            cidx->length_bitmaps_lower = (RoaringBitmap **)palloc0((cidx->max_length_lower + 1) * sizeof(RoaringBitmap *));
+            cidx->length_ge_bitmaps_lower = (RoaringBitmap **)palloc0((cidx->max_length_lower + 1) * sizeof(RoaringBitmap *));
             
+            for (i = 0; i <= cidx->max_length_lower; i++) {
+                cidx->length_ge_bitmaps_lower[i] = biscuit_roaring_create();
+            }
         }
         
         MemoryContextSwitchTo(oldcontext);
         
-        elog(DEBUG1, "Biscuit: Populating multi-column length bitmaps from %d records", idx->num_records);
-        
-        /* Populate both length bitmap sets */
+        /* ✅ FIX: Populate BOTH case-sensitive and lowercase length bitmaps SEPARATELY */
         for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++) {
             for (col = 0; col < natts; col++) {
                 ColumnIndex *cidx = &idx->column_indices[col];
                 char *cached_str = idx->column_data_cache[col][rec_idx];
-                int len = strlen(cached_str);
+                int byte_len = strlen(cached_str);
+                int char_len = biscuit_utf8_char_count(cached_str, byte_len);
+                
+                /* Calculate lowercase character count */
+                char *cached_str_lower = biscuit_str_tolower(cached_str, byte_len);
+                int lower_byte_len = strlen(cached_str_lower);
+                int lower_char_len = biscuit_utf8_char_count(cached_str_lower, lower_byte_len);
+                pfree(cached_str_lower);
+                
                 int i;
                 
                 oldcontext = MemoryContextSwitchTo(indexContext);
                 
-                /* Case-sensitive lengths */
-                if (len <= cidx->max_length) {
-                    if (!cidx->length_bitmaps[len])
-                        cidx->length_bitmaps[len] = biscuit_roaring_create();
-                    biscuit_roaring_add(cidx->length_bitmaps[len], rec_idx);
+                /* CASE-SENSITIVE: Add to exact length bitmap */
+                if (char_len <= cidx->max_length) {
+                    if (!cidx->length_bitmaps[char_len])
+                        cidx->length_bitmaps[char_len] = biscuit_roaring_create();
+                    biscuit_roaring_add(cidx->length_bitmaps[char_len], rec_idx);
                 }
                 
-                for (i = 0; i <= len && i <= cidx->max_length; i++) {
+                /* CASE-SENSITIVE: Populate length_ge */
+                for (i = 0; i <= char_len && i <= cidx->max_length; i++) {
                     biscuit_roaring_add(cidx->length_ge_bitmaps[i], rec_idx);
                 }
                 
+                /* CASE-INSENSITIVE: Add to exact lowercase length bitmap */
+                if (lower_char_len <= cidx->max_length_lower) {
+                    if (!cidx->length_bitmaps_lower[lower_char_len])
+                        cidx->length_bitmaps_lower[lower_char_len] = biscuit_roaring_create();
+                    biscuit_roaring_add(cidx->length_bitmaps_lower[lower_char_len], rec_idx);
+                }
                 
+                /* CASE-INSENSITIVE: Populate length_ge_lower */
+                for (i = 0; i <= lower_char_len && i <= cidx->max_length_lower; i++) {
+                    biscuit_roaring_add(cidx->length_ge_bitmaps_lower[i], rec_idx);
+                }
                 
                 MemoryContextSwitchTo(oldcontext);
             }
-        }
-        
-        /* Verify ILIKE indices */
-        for (col = 0; col < natts; col++) {
-            ColumnIndex *cidx = &idx->column_indices[col];
-            int total_in_length_bitmaps = 0;
-            int i;
-            
-            for (i = 0; i <= cidx->max_length; i++) {
-                if (cidx->length_bitmaps[i]) {
-                    uint64_t count = biscuit_roaring_count(cidx->length_bitmaps[i]);
-                    if (count > 0) {
-                        total_in_length_bitmaps += count;
-                    }
-                }
-            }
-            
-            uint64_t length_ge_0_count = biscuit_roaring_count(cidx->length_ge_bitmaps[0]);
-            elog(DEBUG1, "Biscuit: Column %d LIKE - length_ge[0] count: %llu (expected %d)", 
-                 col, (unsigned long long)length_ge_0_count, idx->num_records);
-            
-            
         }
         
     } else {
         /* ==================== SINGLE-COLUMN LENGTH BITMAPS ==================== */
         int i;
         
+        /* Ensure max_length_lower is set (add 1 for array sizing) */
+        idx->max_length_lower += 1;
+        
+        elog(DEBUG1, "Biscuit: Building single-column length bitmaps (case_sensitive: [0..%d], lowercase: [0..%d] characters)",
+             idx->max_len, idx->max_length_lower - 1);
+        
+        /* CASE-SENSITIVE length bitmaps */
         idx->max_length_legacy = idx->max_len + 1;
         idx->length_bitmaps_legacy = (RoaringBitmap **)palloc0(idx->max_length_legacy * sizeof(RoaringBitmap *));
         idx->length_ge_bitmaps_legacy = (RoaringBitmap **)palloc0(idx->max_length_legacy * sizeof(RoaringBitmap *));
@@ -4246,44 +5339,61 @@ static BiscuitIndex* biscuit_load_index(Relation index)
         for (ch = 0; ch < idx->max_length_legacy; ch++)
             idx->length_ge_bitmaps_legacy[ch] = biscuit_roaring_create();
         
+        /* CASE-INSENSITIVE length bitmaps (separate!) */
+        idx->length_bitmaps_lower = (RoaringBitmap **)palloc0(idx->max_length_lower * sizeof(RoaringBitmap *));
+        idx->length_ge_bitmaps_lower = (RoaringBitmap **)palloc0(idx->max_length_lower * sizeof(RoaringBitmap *));
+        
+        for (ch = 0; ch < idx->max_length_lower; ch++)
+            idx->length_ge_bitmaps_lower[ch] = biscuit_roaring_create();
         
         MemoryContextSwitchTo(oldcontext);
         
-        elog(DEBUG1, "Biscuit: Building length bitmaps from %d cached records", idx->num_records);
-        elog(DEBUG1, "Biscuit: Case-sensitive max=%d, Case-insensitive max=%d", 
-             idx->max_length_legacy - 1, idx->max_len- 1);
-        
+        /* ✅ FIX: Populate BOTH case-sensitive and lowercase length bitmaps SEPARATELY */
         for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++) {
-            int len, len_lower;
-            char *cached_str = idx->data_cache[rec_idx];
-            char *cached_str_lower = idx->data_cache_lower[rec_idx];
-            
-            if (!cached_str) {
+            if (!idx->data_cache[rec_idx])
                 continue;
-            }
             
-            len = strlen(cached_str);
+            /* Case-sensitive character count */
+            int byte_len = strlen(idx->data_cache[rec_idx]);
+            int char_len = biscuit_utf8_char_count(idx->data_cache[rec_idx], byte_len);
+            
+            /* Calculate lowercase character count */
+            char *cached_str_lower = biscuit_str_tolower(idx->data_cache[rec_idx], byte_len);
+            int lower_byte_len = strlen(cached_str_lower);
+            int lower_char_len = biscuit_utf8_char_count(cached_str_lower, lower_byte_len);
+            pfree(cached_str_lower);
             
             oldcontext = MemoryContextSwitchTo(indexContext);
             
-            /* Case-sensitive - FIXED: use <= instead of < */
-            if (len <= idx->max_length_legacy) {  // CHANGED
-                if (!idx->length_bitmaps_legacy[len])
-                    idx->length_bitmaps_legacy[len] = biscuit_roaring_create();
-                biscuit_roaring_add(idx->length_bitmaps_legacy[len], rec_idx);
+            /* CASE-SENSITIVE: Add to exact length bitmap */
+            if (char_len < idx->max_length_legacy) {
+                if (!idx->length_bitmaps_legacy[char_len])
+                    idx->length_bitmaps_legacy[char_len] = biscuit_roaring_create();
+                biscuit_roaring_add(idx->length_bitmaps_legacy[char_len], rec_idx);
             }
             
-            /* FIXED: use <= instead of < */
-            for (i = 0; i <= len && i <= idx->max_length_legacy; i++)  // CHANGED
+            /* CASE-SENSITIVE: Populate length_ge */
+            for (i = 0; i <= char_len && i < idx->max_length_legacy; i++)
                 biscuit_roaring_add(idx->length_ge_bitmaps_legacy[i], rec_idx);
             
+            /* CASE-INSENSITIVE: Add to exact lowercase length bitmap */
+            if (lower_char_len < idx->max_length_lower) {
+                if (!idx->length_bitmaps_lower[lower_char_len])
+                    idx->length_bitmaps_lower[lower_char_len] = biscuit_roaring_create();
+                biscuit_roaring_add(idx->length_bitmaps_lower[lower_char_len], rec_idx);
+            }
+            
+            /* CASE-INSENSITIVE: Populate length_ge_lower */
+            for (i = 0; i <= lower_char_len && i < idx->max_length_lower; i++)
+                biscuit_roaring_add(idx->length_ge_bitmaps_lower[i], rec_idx);
+            
             MemoryContextSwitchTo(oldcontext);
-        }        
+        }
     }
     
     table_close(heap, AccessShareLock);
     
-    elog(DEBUG1, "Biscuit: Index load complete with full ILIKE support");
+    elog(DEBUG1, "Biscuit: Index load complete with UTF-8 character-level support");
     
     return idx;
 }
@@ -4304,10 +5414,9 @@ biscuit_insert(Relation index, Datum *values, bool *isnull,
     BiscuitIndex *idx;
     MemoryContext oldcontext;
     MemoryContext indexContext;
-    text *txt;
-    char *str;
-    int len, pos;
     uint32_t rec_idx;
+    bool is_reusing_slot = false;
+    bool found_existing = false;
     
     if (!index->rd_indexcxt) {
         index->rd_indexcxt = AllocSetContextCreate(CacheMemoryContext,
@@ -4319,128 +5428,694 @@ biscuit_insert(Relation index, Datum *values, bool *isnull,
     idx = (BiscuitIndex *)index->rd_amcache;
     
     if (!idx) {
-        //elog(WARNING, "Biscuit: Index cache miss on INSERT - this should only happen once");
         idx = biscuit_load_index(index);
         index->rd_amcache = idx;
     }
     
+    /* Handle NULL values - just skip indexing */
     if (isnull[0]) {
         return true;
     }
     
     oldcontext = MemoryContextSwitchTo(indexContext);
     
-    txt = DatumGetTextPP(values[0]);
-    str = VARDATA_ANY(txt);
-    len = VARSIZE_ANY_EXHDR(txt);
-    
-    
-    if (biscuit_pop_free_slot(idx, &rec_idx)) {
-        biscuit_roaring_remove(idx->tombstones, rec_idx);
-        idx->tombstone_count--;
+    /* ==================== MULTI-COLUMN INSERT ==================== */
+    if (idx->num_columns > 1) {
+        int col;
         
-        if (idx->data_cache[rec_idx]) {
-            biscuit_remove_from_all_indices(idx, rec_idx);
-            pfree(idx->data_cache[rec_idx]);
+        /* Check if any column is NULL */
+        for (col = 0; col < idx->num_columns; col++) {
+            if (isnull[col]) {
+                MemoryContextSwitchTo(oldcontext);
+                return true;  /* Skip NULL records */
+            }
         }
-    } else {
-        if (idx->num_records >= idx->capacity) {
-            idx->capacity *= 2;
-            idx->tids = (ItemPointerData *)repalloc(idx->tids, 
-                                                    idx->capacity * sizeof(ItemPointerData));
-            idx->data_cache = (char **)repalloc(idx->data_cache, 
-                                                idx->capacity * sizeof(char *));
+        
+        /* ✅ FIX: Check if this TID already exists (UPDATE case) */
+        for (rec_idx = 0; rec_idx < (uint32_t)idx->num_records; rec_idx++) {
+            if (ItemPointerEquals(&idx->tids[rec_idx], ht_ctid)) {
+                /* Found existing record - this is an UPDATE */
+                found_existing = true;
+                
+                /* Clean up old data from ALL indices */
+                biscuit_remove_from_all_indices(idx, rec_idx);
+                
+                for (col = 0; col < idx->num_columns; col++) {
+                    if (idx->column_data_cache[col][rec_idx]) {
+                        pfree(idx->column_data_cache[col][rec_idx]);
+                        idx->column_data_cache[col][rec_idx] = NULL;
+                    }
+                }
+                
+                /* Remove from tombstones if present */
+                if (idx->tombstone_count > 0) {
+                    #ifdef HAVE_ROARING
+                    if (roaring_bitmap_contains(idx->tombstones, rec_idx)) {
+                        biscuit_roaring_remove(idx->tombstones, rec_idx);
+                        idx->tombstone_count--;
+                    }
+                    #else
+                    uint32_t block = rec_idx >> 6;
+                    uint32_t bit = rec_idx & 63;
+                    if (block < idx->tombstones->num_blocks &&
+                        (idx->tombstones->blocks[block] & (1ULL << bit))) {
+                        biscuit_roaring_remove(idx->tombstones, rec_idx);
+                        idx->tombstone_count--;
+                    }
+                    #endif
+                }
+                
+                idx->update_count++;
+                break;
+            }
         }
-        rec_idx = idx->num_records++;
+        
+        /* If not found, try to reuse a free slot or allocate new */
+        if (!found_existing) {
+            if (biscuit_pop_free_slot(idx, &rec_idx)) {
+                is_reusing_slot = true;
+                
+                /* Clean up old data first */
+                biscuit_remove_from_all_indices(idx, rec_idx);
+                
+                for (col = 0; col < idx->num_columns; col++) {
+                    if (idx->column_data_cache[col][rec_idx]) {
+                        pfree(idx->column_data_cache[col][rec_idx]);
+                        idx->column_data_cache[col][rec_idx] = NULL;
+                    }
+                }
+                
+                /* Remove from tombstone bitmap */
+                biscuit_roaring_remove(idx->tombstones, rec_idx);
+                idx->tombstone_count--;
+            } else {
+                /* Allocate new slot */
+                if (idx->num_records >= idx->capacity) {
+                    idx->capacity *= 2;
+                    idx->tids = (ItemPointerData *)repalloc(idx->tids,
+                                                            idx->capacity * sizeof(ItemPointerData));
+                    for (col = 0; col < idx->num_columns; col++) {
+                        idx->column_data_cache[col] = (char **)repalloc(
+                            idx->column_data_cache[col],
+                            idx->capacity * sizeof(char *));
+                    }
+                }
+                rec_idx = idx->num_records++;
+                
+                /* Initialize new slot */
+                for (col = 0; col < idx->num_columns; col++) {
+                    idx->column_data_cache[col][rec_idx] = NULL;
+                }
+            }
+        }
+        
+        /* Store TID */
+        ItemPointerCopy(ht_ctid, &idx->tids[rec_idx]);
+        
+        /* Process each column */
+        for (col = 0; col < idx->num_columns; col++) {
+            ColumnIndex *cidx = &idx->column_indices[col];
+            char *text_val;
+            int text_len;
+            int char_count;
+            int i;
+            
+            /* Convert datum to text */
+            text_val = biscuit_datum_to_text(values[col], idx->column_types[col],
+                                            &idx->output_funcs[col], &text_len);
+            
+            idx->column_data_cache[col][rec_idx] = text_val;
+            
+            char_count = biscuit_utf8_char_count(text_val, text_len);
+            
+            if (char_count > cidx->max_length)
+                cidx->max_length = char_count;
+            if (char_count > idx->max_len)
+                idx->max_len = char_count;
+            
+            /* Build case-sensitive index */
+            {
+                int byte_pos = 0;
+                int char_pos = 0;
+                
+                while (byte_pos < text_len) {
+                    unsigned char first_byte = (unsigned char)text_val[byte_pos];
+                    int char_len = biscuit_utf8_char_length(first_byte);
+                    RoaringBitmap *bm;
+                    int neg_offset, remaining_chars;
+                    int b;
+                    
+                    if (byte_pos + char_len > text_len)
+                        char_len = text_len - byte_pos;
+                    
+                    for (b = 0; b < char_len; b++) {
+                        unsigned char uch = (unsigned char)text_val[byte_pos + b];
+                        
+                        bm = biscuit_get_col_pos_bitmap(cidx, uch, char_pos);
+                        if (!bm) {
+                            bm = biscuit_roaring_create();
+                            biscuit_set_col_pos_bitmap(cidx, uch, char_pos, bm);
+                        }
+                        biscuit_roaring_add(bm, rec_idx);
+                        
+                        remaining_chars = biscuit_utf8_char_count(
+                            text_val + byte_pos, text_len - byte_pos);
+                        neg_offset = -remaining_chars;
+                        
+                        bm = biscuit_get_col_neg_bitmap(cidx, uch, neg_offset);
+                        if (!bm) {
+                            bm = biscuit_roaring_create();
+                            biscuit_set_col_neg_bitmap(cidx, uch, neg_offset, bm);
+                        }
+                        biscuit_roaring_add(bm, rec_idx);
+                        
+                        if (!cidx->char_cache[uch])
+                            cidx->char_cache[uch] = biscuit_roaring_create();
+                        biscuit_roaring_add(cidx->char_cache[uch], rec_idx);
+                    }
+                    
+                    byte_pos += char_len;
+                    char_pos++;
+                }
+            }
+            
+            /* Build case-insensitive index */
+            {
+                char *text_lower = biscuit_str_tolower(text_val, text_len);
+                int lower_byte_len = strlen(text_lower);
+                int lower_char_count = biscuit_utf8_char_count(text_lower, lower_byte_len);
+                int byte_pos = 0;
+                int char_pos = 0;
+                
+                if (lower_char_count > cidx->max_length_lower)
+                    cidx->max_length_lower = lower_char_count;
+                
+                while (byte_pos < lower_byte_len) {
+                    unsigned char first_byte = (unsigned char)text_lower[byte_pos];
+                    int char_len = biscuit_utf8_char_length(first_byte);
+                    RoaringBitmap *bm;
+                    int neg_offset, remaining_chars;
+                    int b;
+                    
+                    if (byte_pos + char_len > lower_byte_len)
+                        char_len = lower_byte_len - byte_pos;
+                    
+                    for (b = 0; b < char_len; b++) {
+                        unsigned char uch_lower = (unsigned char)text_lower[byte_pos + b];
+                        
+                        bm = biscuit_get_col_pos_bitmap_lower(cidx, uch_lower, char_pos);
+                        if (!bm) {
+                            bm = biscuit_roaring_create();
+                            biscuit_set_col_pos_bitmap_lower(cidx, uch_lower, char_pos, bm);
+                        }
+                        biscuit_roaring_add(bm, rec_idx);
+                        
+                        remaining_chars = biscuit_utf8_char_count(
+                            text_lower + byte_pos, lower_byte_len - byte_pos);
+                        neg_offset = -remaining_chars;
+                        
+                        bm = biscuit_get_col_neg_bitmap_lower(cidx, uch_lower, neg_offset);
+                        if (!bm) {
+                            bm = biscuit_roaring_create();
+                            biscuit_set_col_neg_bitmap_lower(cidx, uch_lower, neg_offset, bm);
+                        }
+                        biscuit_roaring_add(bm, rec_idx);
+                        
+                        if (!cidx->char_cache_lower[uch_lower])
+                            cidx->char_cache_lower[uch_lower] = biscuit_roaring_create();
+                        biscuit_roaring_add(cidx->char_cache_lower[uch_lower], rec_idx);
+                    }
+                    
+                    byte_pos += char_len;
+                    char_pos++;
+                }
+                
+                pfree(text_lower);
+            }
+            
+            /* Update case-sensitive length bitmaps */
+            {
+                /* Ensure bitmaps are allocated */
+                if (!cidx->length_bitmaps || char_count >= cidx->max_length) {
+                    int old_max = cidx->max_length;
+                    int new_max = (char_count + 1) * 2;
+                    RoaringBitmap **new_bitmaps = (RoaringBitmap **)palloc0(new_max * sizeof(RoaringBitmap *));
+                    RoaringBitmap **new_ge = (RoaringBitmap **)palloc0(new_max * sizeof(RoaringBitmap *));
+                    
+                    if (cidx->length_bitmaps) {
+                        memcpy(new_bitmaps, cidx->length_bitmaps, old_max * sizeof(RoaringBitmap *));
+                        pfree(cidx->length_bitmaps);
+                    }
+                    if (cidx->length_ge_bitmaps) {
+                        memcpy(new_ge, cidx->length_ge_bitmaps, old_max * sizeof(RoaringBitmap *));
+                        pfree(cidx->length_ge_bitmaps);
+                    }
+                    
+                    for (i = old_max; i < new_max; i++)
+                        new_ge[i] = biscuit_roaring_create();
+                    
+                    cidx->length_bitmaps = new_bitmaps;
+                    cidx->length_ge_bitmaps = new_ge;
+                    cidx->max_length = new_max;
+                }
+                
+                if (!cidx->length_bitmaps[char_count])
+                    cidx->length_bitmaps[char_count] = biscuit_roaring_create();
+                biscuit_roaring_add(cidx->length_bitmaps[char_count], rec_idx);
+                
+                for (i = 0; i <= char_count && i < cidx->max_length; i++)
+                    biscuit_roaring_add(cidx->length_ge_bitmaps[i], rec_idx);
+            }
+            
+            /* Update case-insensitive length bitmaps */
+            {
+                char *temp_lower = biscuit_str_tolower(text_val, text_len);
+                int temp_lower_len = strlen(temp_lower);
+                int lower_char_count = biscuit_utf8_char_count(temp_lower, temp_lower_len);
+                pfree(temp_lower);
+                
+                if (!cidx->length_bitmaps_lower || lower_char_count >= cidx->max_length_lower) {
+                    int old_max = cidx->max_length_lower;
+                    int new_max = (lower_char_count + 1) * 2;
+                    RoaringBitmap **new_bitmaps = (RoaringBitmap **)palloc0(new_max * sizeof(RoaringBitmap *));
+                    RoaringBitmap **new_ge = (RoaringBitmap **)palloc0(new_max * sizeof(RoaringBitmap *));
+                    
+                    if (cidx->length_bitmaps_lower) {
+                        memcpy(new_bitmaps, cidx->length_bitmaps_lower, old_max * sizeof(RoaringBitmap *));
+                        pfree(cidx->length_bitmaps_lower);
+                    }
+                    if (cidx->length_ge_bitmaps_lower) {
+                        memcpy(new_ge, cidx->length_ge_bitmaps_lower, old_max * sizeof(RoaringBitmap *));
+                        pfree(cidx->length_ge_bitmaps_lower);
+                    }
+                    
+                    for (i = old_max; i < new_max; i++)
+                        new_ge[i] = biscuit_roaring_create();
+                    
+                    cidx->length_bitmaps_lower = new_bitmaps;
+                    cidx->length_ge_bitmaps_lower = new_ge;
+                    cidx->max_length_lower = new_max;
+                }
+                
+                if (!cidx->length_bitmaps_lower[lower_char_count])
+                    cidx->length_bitmaps_lower[lower_char_count] = biscuit_roaring_create();
+                biscuit_roaring_add(cidx->length_bitmaps_lower[lower_char_count], rec_idx);
+                
+                for (i = 0; i <= lower_char_count && i < cidx->max_length_lower; i++)
+                    biscuit_roaring_add(cidx->length_ge_bitmaps_lower[i], rec_idx);
+            }
+        }
+        
+        if (!found_existing && !is_reusing_slot) {
+            idx->insert_count++;
+        }
+        
+        MemoryContextSwitchTo(oldcontext);
+        return true;
     }
     
-    ItemPointerCopy(ht_ctid, &idx->tids[rec_idx]);
-    idx->data_cache[rec_idx] = pnstrdup(str, len);
-    
-    if (len > idx->max_len)
-        idx->max_len = len;
-    
-    for (pos = 0; pos < len; pos++) {
-        unsigned char uch = (unsigned char)str[pos];
-        RoaringBitmap *bm;
-        int neg_offset;
+    /* ==================== SINGLE-COLUMN INSERT ==================== */
+    {
+        text *txt;
+        char *str;
+        int byte_len, char_count;
         
-        bm = biscuit_get_pos_bitmap(idx, uch, pos);
-        if (!bm) {
-            bm = biscuit_roaring_create();
-            biscuit_set_pos_bitmap(idx, uch, pos, bm);
+        txt = DatumGetTextPP(values[0]);
+        str = VARDATA_ANY(txt);
+        byte_len = VARSIZE_ANY_EXHDR(txt);
+        
+        char_count = biscuit_utf8_char_count(str, byte_len);
+        
+        if (char_count > idx->max_len) 
+            idx->max_len = char_count;
+        
+        /* ✅ FIX: Check if this TID already exists (UPDATE case) */
+        for (rec_idx = 0; rec_idx < (uint32_t)idx->num_records; rec_idx++) {
+            if (ItemPointerEquals(&idx->tids[rec_idx], ht_ctid)) {
+                /* Found existing record - this is an UPDATE */
+                found_existing = true;
+                
+                /* Clean up old data from ALL indices */
+                biscuit_remove_from_all_indices(idx, rec_idx);
+                
+                if (idx->data_cache[rec_idx]) {
+                    pfree(idx->data_cache[rec_idx]);
+                    idx->data_cache[rec_idx] = NULL;
+                }
+                
+                if (idx->data_cache_lower && idx->data_cache_lower[rec_idx]) {
+                    pfree(idx->data_cache_lower[rec_idx]);
+                    idx->data_cache_lower[rec_idx] = NULL;
+                }
+                
+                /* Remove from tombstones if present */
+                if (idx->tombstone_count > 0) {
+                    #ifdef HAVE_ROARING
+                    if (roaring_bitmap_contains(idx->tombstones, rec_idx)) {
+                        biscuit_roaring_remove(idx->tombstones, rec_idx);
+                        idx->tombstone_count--;
+                    }
+                    #else
+                    uint32_t block = rec_idx >> 6;
+                    uint32_t bit = rec_idx & 63;
+                    if (block < idx->tombstones->num_blocks &&
+                        (idx->tombstones->blocks[block] & (1ULL << bit))) {
+                        biscuit_roaring_remove(idx->tombstones, rec_idx);
+                        idx->tombstone_count--;
+                    }
+                    #endif
+                }
+                
+                idx->update_count++;
+                break;
+            }
         }
-        biscuit_roaring_add(bm, rec_idx);
         
-        neg_offset = -(len - pos);
-        bm = biscuit_get_neg_bitmap(idx, uch, neg_offset);
-        if (!bm) {
-            bm = biscuit_roaring_create();
-            biscuit_set_neg_bitmap(idx, uch, neg_offset, bm);
+        /* If not found, try to reuse free slot or allocate new */
+        if (!found_existing) {
+            if (biscuit_pop_free_slot(idx, &rec_idx)) {
+                is_reusing_slot = true;
+                
+                /* Clean up old data first */
+                biscuit_remove_from_all_indices(idx, rec_idx);
+                
+                if (idx->data_cache[rec_idx]) {
+                    pfree(idx->data_cache[rec_idx]);
+                    idx->data_cache[rec_idx] = NULL;
+                }
+                
+                if (idx->data_cache_lower && idx->data_cache_lower[rec_idx]) {
+                    pfree(idx->data_cache_lower[rec_idx]);
+                    idx->data_cache_lower[rec_idx] = NULL;
+                }
+                
+                /* Remove from tombstone bitmap */
+                biscuit_roaring_remove(idx->tombstones, rec_idx);
+                idx->tombstone_count--;
+            } else {
+                /* Allocate new slot */
+                if (idx->num_records >= idx->capacity) {
+                    idx->capacity *= 2;
+                    idx->tids = (ItemPointerData *)repalloc(idx->tids, 
+                                                            idx->capacity * sizeof(ItemPointerData));
+                    idx->data_cache = (char **)repalloc(idx->data_cache, 
+                                                        idx->capacity * sizeof(char *));
+                    
+                    if (idx->data_cache_lower) {
+                        idx->data_cache_lower = (char **)repalloc(idx->data_cache_lower,
+                                                                  idx->capacity * sizeof(char *));
+                    } else {
+                        idx->data_cache_lower = (char **)palloc0(idx->capacity * sizeof(char *));
+                    }
+                }
+                rec_idx = idx->num_records++;
+                
+                /* Initialize new slot */
+                idx->data_cache[rec_idx] = NULL;
+                if (idx->data_cache_lower) {
+                    idx->data_cache_lower[rec_idx] = NULL;
+                }
+            }
         }
-        biscuit_roaring_add(bm, rec_idx);
         
-        if (!idx->char_cache_legacy[uch])
-            idx->char_cache_legacy[uch] = biscuit_roaring_create();
-        biscuit_roaring_add(idx->char_cache_legacy[uch], rec_idx);
+        /* Store TID and data */
+        ItemPointerCopy(ht_ctid, &idx->tids[rec_idx]);
+        idx->data_cache[rec_idx] = pnstrdup(str, byte_len);
+        
+        /* ==================== BUILD INDICES FOR NEW DATA ==================== */
+        
+        /* Case-sensitive indexing */
+        {
+            int byte_pos = 0;
+            int char_pos = 0;
+            
+            while (byte_pos < byte_len) {
+                unsigned char first_byte = (unsigned char)str[byte_pos];
+                int char_len = biscuit_utf8_char_length(first_byte);
+                RoaringBitmap *bm;
+                int neg_offset;
+                int remaining_chars;
+                int b;
+                
+                if (byte_pos + char_len > byte_len)
+                    char_len = byte_len - byte_pos;
+                
+                for (b = 0; b < char_len; b++) {
+                    unsigned char uch = (unsigned char)str[byte_pos + b];
+                    
+                    /* Positive position */
+                    bm = biscuit_get_pos_bitmap(idx, uch, char_pos);
+                    if (!bm) {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_pos_bitmap(idx, uch, char_pos, bm);
+                    }
+                    biscuit_roaring_add(bm, rec_idx);
+                    
+                    /* Negative position */
+                    remaining_chars = biscuit_utf8_char_count(
+                        str + byte_pos, byte_len - byte_pos
+                    );
+                    neg_offset = -remaining_chars;
+                    
+                    bm = biscuit_get_neg_bitmap(idx, uch, neg_offset);
+                    if (!bm) {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_neg_bitmap(idx, uch, neg_offset, bm);
+                    }
+                    biscuit_roaring_add(bm, rec_idx);
+                    
+                    /* Character cache */
+                    if (!idx->char_cache_legacy[uch])
+                        idx->char_cache_legacy[uch] = biscuit_roaring_create();
+                    biscuit_roaring_add(idx->char_cache_legacy[uch], rec_idx);
+                }
+                
+                byte_pos += char_len;
+                char_pos++;
+            }
+        }
+        
+        /* Case-insensitive indexing */
+        {
+            char *str_lower;
+            int lower_byte_len;
+            int lower_char_count;
+            int byte_pos = 0;
+            int char_pos = 0;
+            
+            str_lower = biscuit_str_tolower(str, byte_len);
+            lower_byte_len = strlen(str_lower);
+            lower_char_count = biscuit_utf8_char_count(str_lower, lower_byte_len);
+            
+            if (!idx->data_cache_lower) {
+                idx->data_cache_lower = (char **)palloc0(idx->capacity * sizeof(char *));
+            }
+            
+            idx->data_cache_lower[rec_idx] = str_lower;
+            
+            if (lower_char_count > idx->max_length_lower)
+                idx->max_length_lower = lower_char_count;
+            
+            while (byte_pos < lower_byte_len) {
+                unsigned char first_byte = (unsigned char)str_lower[byte_pos];
+                int char_len = biscuit_utf8_char_length(first_byte);
+                RoaringBitmap *bm;
+                int neg_offset;
+                int remaining_chars;
+                int b;
+                
+                if (byte_pos + char_len > lower_byte_len)
+                    char_len = lower_byte_len - byte_pos;
+                
+                for (b = 0; b < char_len; b++) {
+                    unsigned char uch_lower = (unsigned char)str_lower[byte_pos + b];
+                    
+                    /* Positive position */
+                    bm = biscuit_get_pos_bitmap_lower(idx, uch_lower, char_pos);
+                    if (!bm) {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_pos_bitmap_lower(idx, uch_lower, char_pos, bm);
+                    }
+                    biscuit_roaring_add(bm, rec_idx);
+                    
+                    /* Negative position */
+                    remaining_chars = biscuit_utf8_char_count(
+                        str_lower + byte_pos, lower_byte_len - byte_pos
+                    );
+                    neg_offset = -remaining_chars;
+                    
+                    bm = biscuit_get_neg_bitmap_lower(idx, uch_lower, neg_offset);
+                    if (!bm) {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_neg_bitmap_lower(idx, uch_lower, neg_offset, bm);
+                    }
+                    biscuit_roaring_add(bm, rec_idx);
+                    
+                    /* Character cache */
+                    if (!idx->char_cache_lower[uch_lower])
+                        idx->char_cache_lower[uch_lower] = biscuit_roaring_create();
+                    biscuit_roaring_add(idx->char_cache_lower[uch_lower], rec_idx);
+                }
+                
+                byte_pos += char_len;
+                char_pos++;
+            }
+        }
+        
+        /* ==================== UPDATE LENGTH BITMAPS ==================== */
+        
+        /* Case-sensitive length bitmaps */
+        {
+            int i;
+            
+            if (!idx->length_bitmaps_legacy || idx->max_length_legacy == 0) {
+                int initial_size = 32;
+                
+                idx->length_bitmaps_legacy = (RoaringBitmap **)palloc0(initial_size * sizeof(RoaringBitmap *));
+                idx->length_ge_bitmaps_legacy = (RoaringBitmap **)palloc0(initial_size * sizeof(RoaringBitmap *));
+                
+                for (i = 0; i < initial_size; i++) {
+                    idx->length_ge_bitmaps_legacy[i] = biscuit_roaring_create();
+                }
+                
+                idx->max_length_legacy = initial_size;
+            }
+            
+            if (char_count >= idx->max_length_legacy) {
+                int old_max = idx->max_length_legacy;
+                int new_max = (char_count + 1) * 2;
+                
+                RoaringBitmap **new_bitmaps = (RoaringBitmap **)palloc0(new_max * sizeof(RoaringBitmap *));
+                RoaringBitmap **new_ge_bitmaps = (RoaringBitmap **)palloc0(new_max * sizeof(RoaringBitmap *));
+                
+                memcpy(new_bitmaps, idx->length_bitmaps_legacy, 
+                    old_max * sizeof(RoaringBitmap *));
+                memcpy(new_ge_bitmaps, idx->length_ge_bitmaps_legacy, 
+                    old_max * sizeof(RoaringBitmap *));
+                
+                for (i = old_max; i < new_max; i++) {
+                    new_ge_bitmaps[i] = biscuit_roaring_create();
+                }
+                
+                pfree(idx->length_bitmaps_legacy);
+                pfree(idx->length_ge_bitmaps_legacy);
+                
+                idx->length_bitmaps_legacy = new_bitmaps;
+                idx->length_ge_bitmaps_legacy = new_ge_bitmaps;
+                idx->max_length_legacy = new_max;
+            }
+            
+            if (char_count < idx->max_length_legacy) {
+                if (!idx->length_bitmaps_legacy[char_count])
+                    idx->length_bitmaps_legacy[char_count] = biscuit_roaring_create();
+                biscuit_roaring_add(idx->length_bitmaps_legacy[char_count], rec_idx);
+            }
+            
+            for (i = 0; i <= char_count && i < idx->max_length_legacy; i++) {
+                if (!idx->length_ge_bitmaps_legacy[i]) {
+                    idx->length_ge_bitmaps_legacy[i] = biscuit_roaring_create();
+                }
+                biscuit_roaring_add(idx->length_ge_bitmaps_legacy[i], rec_idx);
+            }
+        }
+        
+        /* Case-insensitive length bitmaps */
+        {
+            int lower_char_count = biscuit_utf8_char_count(
+                idx->data_cache_lower[rec_idx], 
+                strlen(idx->data_cache_lower[rec_idx])
+            );
+            int i;
+            
+            if (!idx->length_bitmaps_lower || idx->max_length_lower == 0) {
+                int initial_size = 32;
+                
+                idx->length_bitmaps_lower = (RoaringBitmap **)palloc0(initial_size * sizeof(RoaringBitmap *));
+                idx->length_ge_bitmaps_lower = (RoaringBitmap **)palloc0(initial_size * sizeof(RoaringBitmap *));
+                
+                for (i = 0; i < initial_size; i++) {
+                    idx->length_ge_bitmaps_lower[i] = biscuit_roaring_create();
+                }
+                
+                idx->max_length_lower = initial_size;
+            }
+            
+            if (lower_char_count >= idx->max_length_lower) {
+                int old_max = idx->max_length_lower;
+                int new_max = (lower_char_count + 1) * 2;
+                
+                RoaringBitmap **new_bitmaps = (RoaringBitmap **)palloc0(new_max * sizeof(RoaringBitmap *));
+                RoaringBitmap **new_ge_bitmaps = (RoaringBitmap **)palloc0(new_max * sizeof(RoaringBitmap *));
+                
+                memcpy(new_bitmaps, idx->length_bitmaps_lower, 
+                    old_max * sizeof(RoaringBitmap *));
+                memcpy(new_ge_bitmaps, idx->length_ge_bitmaps_lower, 
+                    old_max * sizeof(RoaringBitmap *));
+                
+                for (i = old_max; i < new_max; i++) {
+                    new_ge_bitmaps[i] = biscuit_roaring_create();
+                }
+                
+                pfree(idx->length_bitmaps_lower);
+                pfree(idx->length_ge_bitmaps_lower);
+                
+                idx->length_bitmaps_lower = new_bitmaps;
+                idx->length_ge_bitmaps_lower = new_ge_bitmaps;
+                idx->max_length_lower = new_max;
+            }
+            
+            if (lower_char_count < idx->max_length_lower) {
+                if (!idx->length_bitmaps_lower[lower_char_count])
+                    idx->length_bitmaps_lower[lower_char_count] = biscuit_roaring_create();
+                biscuit_roaring_add(idx->length_bitmaps_lower[lower_char_count], rec_idx);
+            }
+            
+            for (i = 0; i <= lower_char_count && i < idx->max_length_lower; i++) {
+                if (!idx->length_ge_bitmaps_lower[i]) {
+                    idx->length_ge_bitmaps_lower[i] = biscuit_roaring_create();
+                }
+                biscuit_roaring_add(idx->length_ge_bitmaps_lower[i], rec_idx);
+            }
+        }
+        
+        if (!found_existing && !is_reusing_slot) {
+            idx->insert_count++;
+        }
+        
+        MemoryContextSwitchTo(oldcontext);
+        
+        return true;
     }
-    
-    if (len >= idx->max_length_legacy) {
-        int old_max = idx->max_length_legacy;
-        int new_max = len + 1;
-        int i;
-        
-        RoaringBitmap **new_bitmaps = (RoaringBitmap **)palloc0(new_max * sizeof(RoaringBitmap *));
-        RoaringBitmap **new_ge_bitmaps = (RoaringBitmap **)palloc0((new_max + 1) * sizeof(RoaringBitmap *));
-        
-        if (old_max > 0) {
-            memcpy(new_bitmaps, idx->length_bitmaps_legacy, old_max * sizeof(RoaringBitmap *));
-            memcpy(new_ge_bitmaps, idx->length_ge_bitmaps_legacy, old_max * sizeof(RoaringBitmap *));
-        }
-        
-        for (i = old_max; i < new_max; i++)
-            new_bitmaps[i] = NULL;
-        for (i = old_max; i <= new_max; i++)
-            new_ge_bitmaps[i] = biscuit_roaring_create();
-        
-        idx->length_bitmaps_legacy = new_bitmaps;
-        idx->length_ge_bitmaps_legacy = new_ge_bitmaps;
-        idx->max_length_legacy = new_max;
-    }
-    
-    if (!idx->length_bitmaps_legacy[len])
-        idx->length_bitmaps_legacy[len] = biscuit_roaring_create();
-    biscuit_roaring_add(idx->length_bitmaps_legacy[len], rec_idx);
-    
-    for (pos = 0; pos <= len && pos < idx->max_length_legacy; pos++)
-        biscuit_roaring_add(idx->length_ge_bitmaps_legacy[pos], rec_idx);
-    
-    idx->insert_count++;
-    
-    MemoryContextSwitchTo(oldcontext);
-    
-    return true;
 }
-
+/* ==================== FIXED: biscuit_bulkdelete ==================== */
+/*
+ * Bulk delete with proper ILIKE bitmap cleanup
+ */
+/* ==================== CRITICAL FIX: biscuit_bulkdelete ==================== */
+/*
+ * The bug: When DELETE is executed, records are added to tombstones bitmap,
+ * then ALL tombstones are removed from ALL bitmaps - including records that
+ * were tombstoned in PREVIOUS operations but still valid.
+ * 
+ * The fix: Only remove from bitmaps the records we're ACTUALLY deleting now,
+ * not all historical tombstones.
+ */
 static IndexBulkDeleteResult *
 biscuit_bulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
                    IndexBulkDeleteCallback callback, void *callback_state)
 {
     Relation index = info->index;
     BiscuitIndex *idx;
-    int i, ch, j;
-    uint32_t block, bit;
-    bool tombstoned;
-    uint64_t count;
-    uint32_t *indices;
-    CharIndex *pos_cidx;
-    CharIndex *neg_cidx;
+    int i;
     MemoryContext oldcontext;
+    RoaringBitmap *records_to_delete = NULL;  /* NEW: Track what we're deleting NOW */
+    uint64_t delete_count;
+    uint32_t *delete_indices;
+    int j, ch, col;
     
     idx = (BiscuitIndex *)index->rd_amcache;
     
     if (!idx) {
-        elog(WARNING, "Biscuit: Index not cached during bulkdelete - loading");
         idx = biscuit_load_index(index);
         index->rd_amcache = idx;
     }
@@ -4449,125 +6124,196 @@ biscuit_bulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
         stats = (IndexBulkDeleteResult *)palloc0(sizeof(IndexBulkDeleteResult));
     }
     
-    /* Switch to index context for all operations */
     if (index->rd_indexcxt) {
         oldcontext = MemoryContextSwitchTo(index->rd_indexcxt);
     }
     
+    /* ==================== NEW: Create bitmap of records to delete ==================== */
+    records_to_delete = biscuit_roaring_create();
+    
+    /* ==================== MARK RECORDS FOR DELETION ==================== */
     for (i = 0; i < idx->num_records; i++) {
-        if (idx->num_columns == 1 && idx->data_cache[i] == NULL)
-            continue;
-        else if (idx->num_columns > 1 && idx->column_data_cache[0][i] == NULL)
+        bool has_data;
+        bool already_tombstoned;
+        
+        /* Check if record has data */
+        if (idx->num_columns == 1) {
+            has_data = (idx->data_cache[i] != NULL);
+        } else {
+            has_data = (idx->column_data_cache && 
+                       idx->column_data_cache[0] && 
+                       idx->column_data_cache[0][i] != NULL);
+        }
+        
+        if (!has_data)
             continue;
         
+        /* Check if already tombstoned */
         #ifdef HAVE_ROARING
-        if (roaring_bitmap_contains(idx->tombstones, (uint32_t)i))
-            continue;
+        already_tombstoned = roaring_bitmap_contains(idx->tombstones, (uint32_t)i);
         #else
-        block = i >> 6;
-        bit = i & 63;
-        tombstoned = (block < idx->tombstones->num_blocks &&
-                     (idx->tombstones->blocks[block] & (1ULL << bit)));
-        if (tombstoned)
-            continue;
+        {
+            uint32_t block = i >> 6;
+            uint32_t bit = i & 63;
+            already_tombstoned = (block < idx->tombstones->num_blocks &&
+                                 (idx->tombstones->blocks[block] & (1ULL << bit)));
+        }
         #endif
         
+        if (already_tombstoned)
+            continue;
+        
+        /* Check if should be deleted via callback */
         if (callback(&idx->tids[i], callback_state)) {
+            /* Mark as tombstone */
             biscuit_roaring_add(idx->tombstones, (uint32_t)i);
+            biscuit_roaring_add(records_to_delete, (uint32_t)i);  /* NEW: Track for this operation */
             idx->tombstone_count++;
+            
             biscuit_push_free_slot(idx, (uint32_t)i);
             stats->tuples_removed++;
             idx->delete_count++;
         }
     }
     
-    /* Cleanup threshold */
-    if (idx->tombstone_count >= TOMBSTONE_CLEANUP_THRESHOLD) {
-        elog(DEBUG1, "Biscuit: Cleanup threshold reached");
+    /* ==================== CRITICAL FIX: Remove ONLY newly deleted records ==================== */
+    delete_count = biscuit_roaring_count(records_to_delete);
+    
+    if (delete_count > 0) {
+        delete_indices = biscuit_roaring_to_array(records_to_delete, &delete_count);
         
-        if (idx->num_columns == 1) {
-            /* Single-column cleanup */
-            for (ch = 0; ch < CHAR_RANGE; ch++) {
-                pos_cidx = &idx->pos_idx_legacy[ch];
-                for (j = 0; j < pos_cidx->count; j++)
-                    biscuit_roaring_andnot_inplace(pos_cidx->entries[j].bitmap, idx->tombstones);
+        if (delete_indices) {
+            /* ==================== SINGLE-COLUMN CLEANUP ==================== */
+            if (idx->num_columns == 1) {
+                /* Remove from character indices */
+                for (ch = 0; ch < CHAR_RANGE; ch++) {
+                    CharIndex *pos_cidx = &idx->pos_idx_legacy[ch];
+                    CharIndex *neg_cidx = &idx->neg_idx_legacy[ch];
+                    
+                    /* Case-sensitive */
+                    for (j = 0; j < pos_cidx->count; j++)
+                        biscuit_roaring_andnot_inplace(pos_cidx->entries[j].bitmap, records_to_delete);
+                    
+                    for (j = 0; j < neg_cidx->count; j++)
+                        biscuit_roaring_andnot_inplace(neg_cidx->entries[j].bitmap, records_to_delete);
+                    
+                    if (idx->char_cache_legacy[ch])
+                        biscuit_roaring_andnot_inplace(idx->char_cache_legacy[ch], records_to_delete);
+                    
+                    /* Case-insensitive */
+                    pos_cidx = &idx->pos_idx_lower[ch];
+                    neg_cidx = &idx->neg_idx_lower[ch];
+                    
+                    for (j = 0; j < pos_cidx->count; j++)
+                        biscuit_roaring_andnot_inplace(pos_cidx->entries[j].bitmap, records_to_delete);
+                    
+                    for (j = 0; j < neg_cidx->count; j++)
+                        biscuit_roaring_andnot_inplace(neg_cidx->entries[j].bitmap, records_to_delete);
+                    
+                    if (idx->char_cache_lower[ch])
+                        biscuit_roaring_andnot_inplace(idx->char_cache_lower[ch], records_to_delete);
+                }
                 
-                neg_cidx = &idx->neg_idx_legacy[ch];
-                for (j = 0; j < neg_cidx->count; j++)
-                    biscuit_roaring_andnot_inplace(neg_cidx->entries[j].bitmap, idx->tombstones);
+                /* Remove from length bitmaps */
+                for (j = 0; j < idx->max_length_legacy; j++) {
+                    if (idx->length_bitmaps_legacy && idx->length_bitmaps_legacy[j])
+                        biscuit_roaring_andnot_inplace(idx->length_bitmaps_legacy[j], records_to_delete);
+                    if (idx->length_ge_bitmaps_legacy && idx->length_ge_bitmaps_legacy[j])
+                        biscuit_roaring_andnot_inplace(idx->length_ge_bitmaps_legacy[j], records_to_delete);
+                }
                 
-                if (idx->char_cache_legacy[ch])
-                    biscuit_roaring_andnot_inplace(idx->char_cache_legacy[ch], idx->tombstones);
-            }
-            
-            for (j = 0; j < idx->max_length_legacy; j++) {
-                if (idx->length_bitmaps_legacy[j])
-                    biscuit_roaring_andnot_inplace(idx->length_bitmaps_legacy[j], idx->tombstones);
-                if (idx->length_ge_bitmaps_legacy[j])
-                    biscuit_roaring_andnot_inplace(idx->length_ge_bitmaps_legacy[j], idx->tombstones);
-            }
-            
-            /* Free cached strings - they're in the same context */
-            count = 0;
-            indices = biscuit_roaring_to_array(idx->tombstones, &count);
-            if (indices) {
-                for (i = 0; i < (int)count; i++) {
-                    if (idx->data_cache[indices[i]]) {
-                        pfree(idx->data_cache[indices[i]]);
-                        idx->data_cache[indices[i]] = NULL;
+                for (j = 0; j < idx->max_length_lower; j++) {
+                    if (idx->length_bitmaps_lower && idx->length_bitmaps_lower[j])
+                        biscuit_roaring_andnot_inplace(idx->length_bitmaps_lower[j], records_to_delete);
+                    if (idx->length_ge_bitmaps_lower && idx->length_ge_bitmaps_lower[j])
+                        biscuit_roaring_andnot_inplace(idx->length_ge_bitmaps_lower[j], records_to_delete);
+                }
+                
+                /* Free cached strings for deleted records */
+                for (j = 0; j < (int)delete_count; j++) {
+                    if (idx->data_cache[delete_indices[j]]) {
+                        pfree(idx->data_cache[delete_indices[j]]);
+                        idx->data_cache[delete_indices[j]] = NULL;
+                    }
+                    if (idx->data_cache_lower && idx->data_cache_lower[delete_indices[j]]) {
+                        pfree(idx->data_cache_lower[delete_indices[j]]);
+                        idx->data_cache_lower[delete_indices[j]] = NULL;
                     }
                 }
-                pfree(indices);
             }
-        } else {
-            /* Multi-column cleanup */
-            int col;
-            
-            for (col = 0; col < idx->num_columns; col++) {
-                ColumnIndex *cidx = &idx->column_indices[col];
-                
-                for (ch = 0; ch < CHAR_RANGE; ch++) {
-                    pos_cidx = &cidx->pos_idx[ch];
-                    for (j = 0; j < pos_cidx->count; j++)
-                        biscuit_roaring_andnot_inplace(pos_cidx->entries[j].bitmap, idx->tombstones);
+            /* ==================== MULTI-COLUMN CLEANUP ==================== */
+            else {
+                for (col = 0; col < idx->num_columns; col++) {
+                    ColumnIndex *cidx = &idx->column_indices[col];
                     
-                    neg_cidx = &cidx->neg_idx[ch];
-                    for (j = 0; j < neg_cidx->count; j++)
-                        biscuit_roaring_andnot_inplace(neg_cidx->entries[j].bitmap, idx->tombstones);
+                    for (ch = 0; ch < CHAR_RANGE; ch++) {
+                        CharIndex *pos_cidx = &cidx->pos_idx[ch];
+                        CharIndex *neg_cidx = &cidx->neg_idx[ch];
+                        
+                        /* Case-sensitive */
+                        for (j = 0; j < pos_cidx->count; j++)
+                            biscuit_roaring_andnot_inplace(pos_cidx->entries[j].bitmap, records_to_delete);
+                        
+                        for (j = 0; j < neg_cidx->count; j++)
+                            biscuit_roaring_andnot_inplace(neg_cidx->entries[j].bitmap, records_to_delete);
+                        
+                        if (cidx->char_cache[ch])
+                            biscuit_roaring_andnot_inplace(cidx->char_cache[ch], records_to_delete);
+                        
+                        /* Case-insensitive */
+                        pos_cidx = &cidx->pos_idx_lower[ch];
+                        neg_cidx = &cidx->neg_idx_lower[ch];
+                        
+                        for (j = 0; j < pos_cidx->count; j++)
+                            biscuit_roaring_andnot_inplace(pos_cidx->entries[j].bitmap, records_to_delete);
+                        
+                        for (j = 0; j < neg_cidx->count; j++)
+                            biscuit_roaring_andnot_inplace(neg_cidx->entries[j].bitmap, records_to_delete);
+                        
+                        if (cidx->char_cache_lower[ch])
+                            biscuit_roaring_andnot_inplace(cidx->char_cache_lower[ch], records_to_delete);
+                    }
                     
-                    if (cidx->char_cache[ch])
-                        biscuit_roaring_andnot_inplace(cidx->char_cache[ch], idx->tombstones);
+                    /* Length bitmaps */
+                    for (j = 0; j <= cidx->max_length; j++) {
+                        if (cidx->length_bitmaps && cidx->length_bitmaps[j])
+                            biscuit_roaring_andnot_inplace(cidx->length_bitmaps[j], records_to_delete);
+                        if (cidx->length_ge_bitmaps && cidx->length_ge_bitmaps[j])
+                            biscuit_roaring_andnot_inplace(cidx->length_ge_bitmaps[j], records_to_delete);
+                    }
+                    
+                    for (j = 0; j <= cidx->max_length_lower; j++) {
+                        if (cidx->length_bitmaps_lower && cidx->length_bitmaps_lower[j])
+                            biscuit_roaring_andnot_inplace(cidx->length_bitmaps_lower[j], records_to_delete);
+                        if (cidx->length_ge_bitmaps_lower && cidx->length_ge_bitmaps_lower[j])
+                            biscuit_roaring_andnot_inplace(cidx->length_ge_bitmaps_lower[j], records_to_delete);
+                    }
                 }
                 
-                for (j = 0; j < cidx->max_length; j++) {
-                    if (cidx->length_bitmaps[j])
-                        biscuit_roaring_andnot_inplace(cidx->length_bitmaps[j], idx->tombstones);
-                    if (cidx->length_ge_bitmaps[j])
-                        biscuit_roaring_andnot_inplace(cidx->length_ge_bitmaps[j], idx->tombstones);
-                }
-            }
-            
-            /* Free cached strings */
-            count = 0;
-            indices = biscuit_roaring_to_array(idx->tombstones, &count);
-            if (indices) {
-                for (i = 0; i < (int)count; i++) {
+                /* Free column data */
+                for (j = 0; j < (int)delete_count; j++) {
                     for (col = 0; col < idx->num_columns; col++) {
-                        if (idx->column_data_cache[col][indices[i]]) {
-                            pfree(idx->column_data_cache[col][indices[i]]);
-                            idx->column_data_cache[col][indices[i]] = NULL;
+                        if (idx->column_data_cache[col][delete_indices[j]]) {
+                            pfree(idx->column_data_cache[col][delete_indices[j]]);
+                            idx->column_data_cache[col][delete_indices[j]] = NULL;
                         }
                     }
                 }
-                pfree(indices);
             }
+            
+            pfree(delete_indices);
         }
-        
+    }
+    
+    /* Cleanup */
+    biscuit_roaring_free(records_to_delete);
+    
+    /* ==================== OPTIONAL: Reset tombstone bitmap periodically ==================== */
+    /* Only reset if we've accumulated too many tombstones */
+    if (idx->tombstone_count >= TOMBSTONE_CLEANUP_THRESHOLD) {
         biscuit_roaring_free(idx->tombstones);
         idx->tombstones = biscuit_roaring_create();
         idx->tombstone_count = 0;
-        
-        elog(DEBUG1, "Biscuit: Cleanup complete");
     }
     
     if (index->rd_indexcxt) {
@@ -5019,44 +6765,91 @@ log_query_plan(QueryPlan *plan)
 
 /* ==================== PER-COLUMN PATTERN MATCHING ==================== */
 
+/* ==================== FIXED: UTF-8-AWARE MULTI-COLUMN PATTERN MATCHING ==================== */
+
+/*
+ * Match a pattern part at a specific character position (multi-column version)
+ * Handles multi-byte UTF-8 characters correctly
+ */
 static RoaringBitmap* 
 biscuit_match_col_part_at_pos(ColumnIndex *col, const char *part, 
                               int part_len, int start_pos) {
     RoaringBitmap *result = NULL;
     RoaringBitmap *char_bm;
     RoaringBitmap *len_filter;
-    int i, concrete_chars = 0;
-    int pos;
+    int part_byte_pos = 0;
+    int char_pos = start_pos;
+    int concrete_chars = 0;
     
-    /* Intersect all non-wildcard character constraints */
-    for (i = 0; i < part_len; i++) {
-        if (part[i] == '_') {
-            continue;  /* Skip underscore wildcards */
+    /* Process pattern character by character (not byte by byte) */
+    while (part_byte_pos < part_len) {
+        unsigned char first_byte = (unsigned char)part[part_byte_pos];
+        
+        /* Handle underscore wildcard */
+        if (first_byte == '_') {
+            part_byte_pos++;
+            char_pos++;
+            continue;
         }
+        
+        /* Get UTF-8 character length */
+        int char_len = biscuit_utf8_char_length(first_byte);
+        if (part_byte_pos + char_len > part_len)
+            char_len = part_len - part_byte_pos;
         
         concrete_chars++;
-        pos = start_pos + i;
-        char_bm = biscuit_get_col_pos_bitmap(col, (unsigned char)part[i], pos);
         
-        if (!char_bm) {
-            if (result) biscuit_roaring_free(result);
-            return biscuit_roaring_create();
-        }
-        
-        if (!result) {
-            result = biscuit_roaring_copy(char_bm);
+        /* For multi-byte characters, we need to match ALL bytes at this position */
+        if (char_len == 1) {
+            /* Single-byte character - simple case */
+            char_bm = biscuit_get_col_pos_bitmap(col, first_byte, char_pos);
+            
+            if (!char_bm) {
+                if (result) biscuit_roaring_free(result);
+                return biscuit_roaring_create();
+            }
+            
+            if (!result) {
+                result = biscuit_roaring_copy(char_bm);
+            } else {
+                biscuit_roaring_and_inplace(result, char_bm);
+                if (biscuit_roaring_is_empty(result))
+                    return result;
+            }
         } else {
-            biscuit_roaring_and_inplace(result, char_bm);
-            if (biscuit_roaring_is_empty(result))
-                return result;
+            /* Multi-byte character - must match ALL bytes at same char_pos */
+            int b;
+            for (b = 0; b < char_len; b++) {
+                unsigned char byte_val = (unsigned char)part[part_byte_pos + b];
+                
+                char_bm = biscuit_get_col_pos_bitmap(col, byte_val, char_pos);
+                
+                if (!char_bm) {
+                    if (result) biscuit_roaring_free(result);
+                    return biscuit_roaring_create();
+                }
+                
+                if (!result) {
+                    result = biscuit_roaring_copy(char_bm);
+                } else {
+                    biscuit_roaring_and_inplace(result, char_bm);
+                    if (biscuit_roaring_is_empty(result))
+                        return result;
+                }
+            }
         }
+        
+        part_byte_pos += char_len;
+        char_pos++;
     }
     
     /* All wildcards case */
     if (concrete_chars == 0) {
-        result = biscuit_get_col_length_ge(col, start_pos + part_len);
+        int pattern_char_count = biscuit_utf8_char_count(part, part_len);
+        result = biscuit_get_col_length_ge(col, start_pos + pattern_char_count);
     } else {
-        len_filter = biscuit_get_col_length_ge(col, start_pos + part_len);
+        int pattern_char_count = biscuit_utf8_char_count(part, part_len);
+        len_filter = biscuit_get_col_length_ge(col, start_pos + pattern_char_count);
         if (len_filter) {
             biscuit_roaring_and_inplace(result, len_filter);
             biscuit_roaring_free(len_filter);
@@ -5066,43 +6859,93 @@ biscuit_match_col_part_at_pos(ColumnIndex *col, const char *part,
     return result;
 }
 
+/*
+ * Match a pattern part at the end using negative indexing (multi-column version)
+ * Handles multi-byte UTF-8 characters correctly
+ */
 static RoaringBitmap* 
 biscuit_match_col_part_at_end(ColumnIndex *col, const char *part, int part_len) {
     RoaringBitmap *result = NULL;
     RoaringBitmap *char_bm;
     RoaringBitmap *len_filter;
-    int i, concrete_chars = 0;
-    int neg_pos;
+    int concrete_chars = 0;
     
-    /* Intersect all non-wildcard character constraints */
-    for (i = 0; i < part_len; i++) {
-        if (part[i] == '_') {
+    /* Count characters in pattern (not bytes) */
+    int pattern_char_count = biscuit_utf8_char_count(part, part_len);
+    
+    /* Process pattern from end to beginning */
+    int part_byte_pos = 0;
+    int char_offset_from_end = 0;  /* 0 = last char, 1 = second-to-last, etc. */
+    
+    while (part_byte_pos < part_len) {
+        unsigned char first_byte = (unsigned char)part[part_byte_pos];
+        
+        /* Handle underscore wildcard */
+        if (first_byte == '_') {
+            part_byte_pos++;
+            char_offset_from_end++;
             continue;
         }
         
+        /* Get UTF-8 character length */
+        int char_len = biscuit_utf8_char_length(first_byte);
+        if (part_byte_pos + char_len > part_len)
+            char_len = part_len - part_byte_pos;
+        
         concrete_chars++;
-        neg_pos = -(part_len - i);
-        char_bm = biscuit_get_col_neg_bitmap(col, (unsigned char)part[i], neg_pos);
         
-        if (!char_bm) {
-            if (result) biscuit_roaring_free(result);
-            return biscuit_roaring_create();
-        }
+        /* Calculate negative position */
+        int neg_pos = -(pattern_char_count - char_offset_from_end);
         
-        if (!result) {
-            result = biscuit_roaring_copy(char_bm);
+        /* Match all bytes of this character at negative position */
+        if (char_len == 1) {
+            /* Single-byte character */
+            char_bm = biscuit_get_col_neg_bitmap(col, first_byte, neg_pos);
+            
+            if (!char_bm) {
+                if (result) biscuit_roaring_free(result);
+                return biscuit_roaring_create();
+            }
+            
+            if (!result) {
+                result = biscuit_roaring_copy(char_bm);
+            } else {
+                biscuit_roaring_and_inplace(result, char_bm);
+                if (biscuit_roaring_is_empty(result))
+                    return result;
+            }
         } else {
-            biscuit_roaring_and_inplace(result, char_bm);
-            if (biscuit_roaring_is_empty(result))
-                return result;
+            /* Multi-byte character - match ALL bytes */
+            int b;
+            for (b = 0; b < char_len; b++) {
+                unsigned char byte_val = (unsigned char)part[part_byte_pos + b];
+                
+                char_bm = biscuit_get_col_neg_bitmap(col, byte_val, neg_pos);
+                
+                if (!char_bm) {
+                    if (result) biscuit_roaring_free(result);
+                    return biscuit_roaring_create();
+                }
+                
+                if (!result) {
+                    result = biscuit_roaring_copy(char_bm);
+                } else {
+                    biscuit_roaring_and_inplace(result, char_bm);
+                    if (biscuit_roaring_is_empty(result))
+                        return result;
+                }
+            }
         }
+        
+        part_byte_pos += char_len;
+        char_offset_from_end++;
     }
     
     /* All wildcards case */
     if (concrete_chars == 0) {
-        result = biscuit_get_col_length_ge(col, part_len);
+        result = biscuit_get_col_length_ge(col, pattern_char_count);
     } else {
-        len_filter = biscuit_get_col_length_ge(col, part_len);
+        len_filter = biscuit_get_col_length_ge(col, pattern_char_count);
         if (len_filter) {
             biscuit_roaring_and_inplace(result, len_filter);
             biscuit_roaring_free(len_filter);
@@ -5112,6 +6955,7 @@ biscuit_match_col_part_at_end(ColumnIndex *col, const char *part, int part_len) 
     return result;
 }
 
+/* ==================== ILIKE VERSIONS (MULTI-COLUMN) ==================== */
 
 static RoaringBitmap* 
 biscuit_match_col_part_at_pos_ilike(ColumnIndex *col, const char *part, 
@@ -5119,38 +6963,79 @@ biscuit_match_col_part_at_pos_ilike(ColumnIndex *col, const char *part,
     RoaringBitmap *result = NULL;
     RoaringBitmap *char_bm;
     RoaringBitmap *len_filter;
-    int i, concrete_chars = 0;
-    int pos;
+    int part_byte_pos = 0;
+    int char_pos = start_pos;
+    int concrete_chars = 0;
     
-    /* Intersect all non-wildcard character constraints (lowercase) */
-    for (i = 0; i < part_len; i++) {
-        if (part[i] == '_') {
+    /* Process pattern character by character */
+    while (part_byte_pos < part_len) {
+        unsigned char first_byte = (unsigned char)part[part_byte_pos];
+        
+        /* Handle underscore wildcard */
+        if (first_byte == '_') {
+            part_byte_pos++;
+            char_pos++;
             continue;
         }
         
+        /* Get UTF-8 character length */
+        int char_len = biscuit_utf8_char_length(first_byte);
+        if (part_byte_pos + char_len > part_len)
+            char_len = part_len - part_byte_pos;
+        
         concrete_chars++;
-        pos = start_pos + i;
-        char_bm = biscuit_get_col_pos_bitmap_lower(col, (unsigned char)part[i], pos);
         
-        if (!char_bm) {
-            if (result) biscuit_roaring_free(result);
-            return biscuit_roaring_create();
-        }
-        
-        if (!result) {
-            result = biscuit_roaring_copy(char_bm);
+        /* Match all bytes of this character */
+        if (char_len == 1) {
+            /* Single-byte character */
+            char_bm = biscuit_get_col_pos_bitmap_lower(col, first_byte, char_pos);
+            
+            if (!char_bm) {
+                if (result) biscuit_roaring_free(result);
+                return biscuit_roaring_create();
+            }
+            
+            if (!result) {
+                result = biscuit_roaring_copy(char_bm);
+            } else {
+                biscuit_roaring_and_inplace(result, char_bm);
+                if (biscuit_roaring_is_empty(result))
+                    return result;
+            }
         } else {
-            biscuit_roaring_and_inplace(result, char_bm);
-            if (biscuit_roaring_is_empty(result))
-                return result;
+            /* Multi-byte character */
+            int b;
+            for (b = 0; b < char_len; b++) {
+                unsigned char byte_val = (unsigned char)part[part_byte_pos + b];
+                
+                char_bm = biscuit_get_col_pos_bitmap_lower(col, byte_val, char_pos);
+                
+                if (!char_bm) {
+                    if (result) biscuit_roaring_free(result);
+                    return biscuit_roaring_create();
+                }
+                
+                if (!result) {
+                    result = biscuit_roaring_copy(char_bm);
+                } else {
+                    biscuit_roaring_and_inplace(result, char_bm);
+                    if (biscuit_roaring_is_empty(result))
+                        return result;
+                }
+            }
         }
+        
+        part_byte_pos += char_len;
+        char_pos++;
     }
     
     /* All wildcards case */
     if (concrete_chars == 0) {
-        result = biscuit_get_col_length_ge_lower(col, start_pos + part_len);
+        int pattern_char_count = biscuit_utf8_char_count(part, part_len);
+        result = biscuit_get_col_length_ge_lower(col, start_pos + pattern_char_count);
     } else {
-        len_filter = biscuit_get_col_length_ge_lower(col, start_pos + part_len);
+        int pattern_char_count = biscuit_utf8_char_count(part, part_len);
+        len_filter = biscuit_get_col_length_ge_lower(col, start_pos + pattern_char_count);
         if (len_filter) {
             biscuit_roaring_and_inplace(result, len_filter);
             biscuit_roaring_free(len_filter);
@@ -5165,38 +7050,84 @@ biscuit_match_col_part_at_end_ilike(ColumnIndex *col, const char *part, int part
     RoaringBitmap *result = NULL;
     RoaringBitmap *char_bm;
     RoaringBitmap *len_filter;
-    int i, concrete_chars = 0;
-    int neg_pos;
+    int concrete_chars = 0;
     
-    /* Intersect all non-wildcard character constraints (lowercase) */
-    for (i = 0; i < part_len; i++) {
-        if (part[i] == '_') {
+    /* Count characters in pattern */
+    int pattern_char_count = biscuit_utf8_char_count(part, part_len);
+    
+    /* Process pattern from beginning */
+    int part_byte_pos = 0;
+    int char_offset_from_end = 0;
+    
+    while (part_byte_pos < part_len) {
+        unsigned char first_byte = (unsigned char)part[part_byte_pos];
+        
+        /* Handle underscore wildcard */
+        if (first_byte == '_') {
+            part_byte_pos++;
+            char_offset_from_end++;
             continue;
         }
         
+        /* Get UTF-8 character length */
+        int char_len = biscuit_utf8_char_length(first_byte);
+        if (part_byte_pos + char_len > part_len)
+            char_len = part_len - part_byte_pos;
+        
         concrete_chars++;
-        neg_pos = -(part_len - i);
-        char_bm = biscuit_get_col_neg_bitmap_lower(col, (unsigned char)part[i], neg_pos);
         
-        if (!char_bm) {
-            if (result) biscuit_roaring_free(result);
-            return biscuit_roaring_create();
-        }
+        /* Calculate negative position */
+        int neg_pos = -(pattern_char_count - char_offset_from_end);
         
-        if (!result) {
-            result = biscuit_roaring_copy(char_bm);
+        /* Match all bytes */
+        if (char_len == 1) {
+            /* Single-byte character */
+            char_bm = biscuit_get_col_neg_bitmap_lower(col, first_byte, neg_pos);
+            
+            if (!char_bm) {
+                if (result) biscuit_roaring_free(result);
+                return biscuit_roaring_create();
+            }
+            
+            if (!result) {
+                result = biscuit_roaring_copy(char_bm);
+            } else {
+                biscuit_roaring_and_inplace(result, char_bm);
+                if (biscuit_roaring_is_empty(result))
+                    return result;
+            }
         } else {
-            biscuit_roaring_and_inplace(result, char_bm);
-            if (biscuit_roaring_is_empty(result))
-                return result;
+            /* Multi-byte character */
+            int b;
+            for (b = 0; b < char_len; b++) {
+                unsigned char byte_val = (unsigned char)part[part_byte_pos + b];
+                
+                char_bm = biscuit_get_col_neg_bitmap_lower(col, byte_val, neg_pos);
+                
+                if (!char_bm) {
+                    if (result) biscuit_roaring_free(result);
+                    return biscuit_roaring_create();
+                }
+                
+                if (!result) {
+                    result = biscuit_roaring_copy(char_bm);
+                } else {
+                    biscuit_roaring_and_inplace(result, char_bm);
+                    if (biscuit_roaring_is_empty(result))
+                        return result;
+                }
+            }
         }
+        
+        part_byte_pos += char_len;
+        char_offset_from_end++;
     }
     
     /* All wildcards case */
     if (concrete_chars == 0) {
-        result = biscuit_get_col_length_ge_lower(col, part_len);
+        result = biscuit_get_col_length_ge_lower(col, pattern_char_count);
     } else {
-        len_filter = biscuit_get_col_length_ge_lower(col, part_len);
+        len_filter = biscuit_get_col_length_ge_lower(col, pattern_char_count);
         if (len_filter) {
             biscuit_roaring_and_inplace(result, len_filter);
             biscuit_roaring_free(len_filter);
@@ -5206,6 +7137,12 @@ biscuit_match_col_part_at_end_ilike(ColumnIndex *col, const char *part, int part
     return result;
 }
 
+/* ==================== FIXED: UTF-8-AWARE RECURSIVE WINDOWED MATCHING (MULTI-COLUMN) ==================== */
+
+/*
+ * Recursive windowed matching for multi-column patterns (case-sensitive)
+ * Handles multi-byte UTF-8 characters correctly
+ */
 static void 
 biscuit_recursive_windowed_match_col(
     RoaringBitmap *result, ColumnIndex *col,
@@ -5227,10 +7164,11 @@ biscuit_recursive_windowed_match_col(
         return;
     }
     
-    /* Calculate minimum length needed for remaining parts */
+    /* Calculate minimum CHARACTER length needed for remaining parts */
     remaining_len = 0;
-    for (i = part_idx + 1; i < part_count; i++)
-        remaining_len += part_lens[i];
+    for (i = part_idx + 1; i < part_count; i++) {
+        remaining_len += biscuit_utf8_char_count(parts[i], part_lens[i]);
+    }
     
     /* CRITICAL FIX: Last part without trailing % must match at end */
     if (part_idx == part_count - 1 && !ends_percent) {
@@ -5244,8 +7182,8 @@ biscuit_recursive_windowed_match_col(
         /* Intersect with current candidates */
         biscuit_roaring_and_inplace(end_match, current_candidates);
         
-        /* Ensure minimum length constraint */
-        min_required_length = min_pos + part_lens[part_idx];
+        /* Ensure minimum CHARACTER length constraint */
+        min_required_length = min_pos + biscuit_utf8_char_count(parts[part_idx], part_lens[part_idx]);
         length_constraint = biscuit_get_col_length_ge(col, min_required_length);
         if (length_constraint) {
             biscuit_roaring_and_inplace(end_match, length_constraint);
@@ -5258,16 +7196,18 @@ biscuit_recursive_windowed_match_col(
         return;
     }
     
-    /* Middle part: try all valid positions */
-    max_pos = max_len - part_lens[part_idx] - remaining_len;
+    /* Middle part: try all valid CHARACTER positions */
+    int current_part_char_len = biscuit_utf8_char_count(parts[part_idx], part_lens[part_idx]);
+    max_pos = max_len - current_part_char_len - remaining_len;
+    
     if (min_pos > max_pos) {
         /* No valid position for this part */
         return;
     }
     
-    /* Try each valid position for current part */
+    /* Try each valid CHARACTER position for current part */
     for (pos = min_pos; pos <= max_pos; pos++) {
-        /* Match part at this position */
+        /* Match part at this CHARACTER position */
         part_match = biscuit_match_col_part_at_pos(col, parts[part_idx], part_lens[part_idx], pos);
         
         if (!part_match) {
@@ -5285,8 +7225,8 @@ biscuit_recursive_windowed_match_col(
             continue;
         }
         
-        /* Recurse for next part with updated constraints */
-        next_min_pos = pos + part_lens[part_idx];
+        /* Recurse for next part with updated CHARACTER position */
+        next_min_pos = pos + current_part_char_len;
         
         biscuit_recursive_windowed_match_col(
             result, col, parts, part_lens, part_count,
@@ -5298,6 +7238,10 @@ biscuit_recursive_windowed_match_col(
     }
 }
 
+/*
+ * Recursive windowed matching for multi-column patterns (case-insensitive)
+ * Handles multi-byte UTF-8 characters correctly
+ */
 static void 
 biscuit_recursive_windowed_match_col_ilike(
     RoaringBitmap *result, ColumnIndex *col,
@@ -5319,10 +7263,11 @@ biscuit_recursive_windowed_match_col_ilike(
         return;
     }
     
-    /* Calculate minimum length for remaining parts */
+    /* Calculate minimum CHARACTER length for remaining parts */
     remaining_len = 0;
-    for (i = part_idx + 1; i < part_count; i++)
-        remaining_len += part_lens[i];
+    for (i = part_idx + 1; i < part_count; i++) {
+        remaining_len += biscuit_utf8_char_count(parts[i], part_lens[i]);
+    }
     
     /* Last part without trailing % must match at end */
     if (part_idx == part_count - 1 && !ends_percent) {
@@ -5334,7 +7279,8 @@ biscuit_recursive_windowed_match_col_ilike(
         
         biscuit_roaring_and_inplace(end_match, current_candidates);
         
-        min_required_length = min_pos + part_lens[part_idx];
+        /* CHARACTER length constraint */
+        min_required_length = min_pos + biscuit_utf8_char_count(parts[part_idx], part_lens[part_idx]);
         length_constraint = biscuit_get_col_length_ge_lower(col, min_required_length);
         if (length_constraint) {
             biscuit_roaring_and_inplace(end_match, length_constraint);
@@ -5346,8 +7292,10 @@ biscuit_recursive_windowed_match_col_ilike(
         return;
     }
     
-    /* Try all valid positions */
-    max_pos = max_len - part_lens[part_idx] - remaining_len;
+    /* Try all valid CHARACTER positions */
+    int current_part_char_len = biscuit_utf8_char_count(parts[part_idx], part_lens[part_idx]);
+    max_pos = max_len - current_part_char_len - remaining_len;
+    
     if (min_pos > max_pos) {
         return;
     }
@@ -5368,7 +7316,8 @@ biscuit_recursive_windowed_match_col_ilike(
             continue;
         }
         
-        next_min_pos = pos + part_lens[part_idx];
+        /* CHARACTER position advancement */
+        next_min_pos = pos + current_part_char_len;
         
         biscuit_recursive_windowed_match_col_ilike(
             result, col, parts, part_lens, part_count,
@@ -5379,7 +7328,6 @@ biscuit_recursive_windowed_match_col_ilike(
         biscuit_roaring_free(next_candidates);
     }
 }
-
 /* ==================== FIXED: Per-column pattern matching ==================== */
 
 static RoaringBitmap* 
@@ -5606,6 +7554,10 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
     }
     PG_END_TRY();
     
+    if (result && idx->tombstone_count > 0) {
+        biscuit_roaring_andnot_inplace(result, idx->tombstones);
+    }
+
     return result ? result : biscuit_roaring_create();
 }
 
@@ -5843,11 +7795,16 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
         PG_RE_THROW();
     }
     PG_END_TRY();
+
+    if (result && idx->tombstone_count > 0) {
+        biscuit_roaring_andnot_inplace(result, idx->tombstones);
+    }
     
     return result ? result : biscuit_roaring_create();
 }
 
 /* ==================== OPTIMIZED MULTI-COLUMN RESCAN ==================== */
+
 
 static void
 biscuit_rescan_multicolumn(IndexScanDesc scan, ScanKey keys, int nkeys,
@@ -6021,7 +7978,6 @@ biscuit_rescan_multicolumn(IndexScanDesc scan, ScanKey keys, int nkeys,
 cleanup:
     biscuit_free_query_plan(plan);
 }
-
 
 static void
 biscuit_rescan(IndexScanDesc scan, ScanKey keys, int nkeys,
@@ -6357,6 +8313,21 @@ biscuit_columnindex_memory_usage(const ColumnIndex *col_idx)
             total += biscuit_roaring_memory_usage(col_idx->length_ge_bitmaps[i]);
         }
         total += (col_idx->max_length + 1) * sizeof(RoaringBitmap *);
+    }
+
+    /* CASE-INSENSITIVE length bitmaps (separate!) */
+    if (col_idx->length_bitmaps_lower && col_idx->max_length_lower > 0) {
+        for (i = 0; i <= col_idx->max_length_lower; i++) {
+            total += biscuit_roaring_memory_usage(col_idx->length_bitmaps_lower[i]);
+        }
+        total += (col_idx->max_length_lower + 1) * sizeof(RoaringBitmap *);
+    }
+    
+    if (col_idx->length_ge_bitmaps_lower && col_idx->max_length_lower > 0) {
+        for (i = 0; i <= col_idx->max_length_lower; i++) {
+            total += biscuit_roaring_memory_usage(col_idx->length_ge_bitmaps_lower[i]);
+        }
+        total += (col_idx->max_length_lower + 1) * sizeof(RoaringBitmap *);
     }
     
     return total;

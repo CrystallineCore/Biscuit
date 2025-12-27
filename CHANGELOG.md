@@ -1,5 +1,49 @@
 # Biscuit Index Extension - Changelog
 
+## Version 2.2.0
+
+### ✨ Major Changes
+
+**Switched from byte-based to character-based indexing**
+
+* Biscuit now indexes **Unicode characters instead of raw UTF-8 bytes**.
+* Eliminates incorrect behavior caused by multi-byte UTF-8 sequences being treated as independent index entries.
+* Index structure now aligns with PostgreSQL’s character semantics rather than byte-level representation.
+
+### 🛠️ UTF-8 & Internationalization Improvements
+
+**Enhanced UTF-8 compatibility**
+
+* Improved handling of multi-byte UTF-8 characters (e.g., accented Latin characters, non-Latin scripts).
+* Index lookups, comparisons, and filtering now operate on logical characters rather than byte fragments.
+
+**Correct UTF-8 support for `ILIKE`**
+
+* `ILIKE` now works reliably with UTF-8 text, including case-insensitive matching on multi-byte characters.
+* Fixes previously incorrect matches and missed results in non-ASCII datasets.
+
+### 🐛 CRUD Correctness Fixes
+
+**Resolved multiple CRUD-related bugs**
+
+* Fixed inconsistencies during **INSERT**, **UPDATE**, and **DELETE** operations that could leave the index in an incorrect state.
+* Ensured index entries are properly added, updated, and removed in sync with heap tuples.
+* Improved stability under mixed read/write workloads.
+
+### 🛡️ Correctness & Planner Consistency
+
+* Improved alignment between Biscuit’s index behavior and PostgreSQL’s text semantics.
+* Reduced false positives during pattern matching and eliminated character-splitting artifacts.
+* More predictable planner behavior due to improved index consistency.
+
+### 🔧 Internal Refactoring
+
+* Refactored index layout and lookup logic to support character-aware traversal.
+* Hardened UTF-8 decoding paths and edge-case handling.
+* Simplified internal invariants for better maintainability and debugging.
+
+---
+
 ## Version 2.1.5
 
 ### 🔧 Improvements
