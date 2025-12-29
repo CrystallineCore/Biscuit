@@ -107,7 +107,7 @@ PG_FUNCTION_INFO_V1(biscuit_version);
 Datum
 biscuit_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("2.2.0"));
+    PG_RETURN_TEXT_P(cstring_to_text("2.2.1"));
 }
 
 // Get build information - Set-Returning Function
@@ -232,7 +232,7 @@ biscuit_build_info_json(PG_FUNCTION_ARGS)
     initStringInfo(&buf);
     
     appendStringInfo(&buf, "{");
-    appendStringInfo(&buf, "\"version\": \"2.2.0\",");
+    appendStringInfo(&buf, "\"version\": \"2.2.1\",");
     
 #ifdef HAVE_ROARING
     appendStringInfo(&buf, "\"roaring_enabled\": true,");
@@ -3161,7 +3161,6 @@ biscuit_free_parsed_pattern(ParsedPattern *parsed)
 
 
 /* ==================== FIXED: biscuit_query_pattern_ilike - Substring Search ==================== */
-
 static RoaringBitmap* 
 biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern) {
     char *pattern_lower = NULL;
@@ -3292,15 +3291,10 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern) {
                                                          parsed->part_byte_lens[0]);
                 if (!result) result = biscuit_roaring_create();
             } else {
-                /* ==================== CRITICAL FIX: SUBSTRING MATCH (ILIKE) ==================== */
-                /* Pattern: '%abc%' - must validate complete UTF-8 characters */
+                /* ==================== FIXED: SUBSTRING MATCH (ILIKE) ==================== */
+                /* Pattern: '%abc%' - must validate complete UTF-8 characters with lowercase */
                 
                 result = biscuit_roaring_create();
-                
-                /* STRATEGY: 
-                 * 1. Use bitmap intersection to get candidates (fast)
-                 * 2. Brute-force validate UTF-8 boundaries with lowercase comparison (ensures correctness)
-                 */
                 
                 RoaringBitmap *candidates = NULL;
                 int part_byte_len = parsed->part_byte_lens[0];
@@ -3349,7 +3343,7 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern) {
                     biscuit_roaring_free(length_filter);
                 }
                 
-                /* Now validate each candidate with UTF-8-aware substring search (case-insensitive) */
+                /* ✅ FIX: Validate each candidate with UTF-8-aware substring search (case-insensitive) */
                 #ifdef HAVE_ROARING
                 roaring_uint32_iterator_t *iter = roaring_create_iterator(candidates);
                 
@@ -3368,32 +3362,54 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern) {
                             /* Convert character position to byte offset */
                             int byte_offset = biscuit_utf8_char_to_byte_offset(haystack, haystack_byte_len, char_pos);
                             
-                            if (byte_offset < 0 || byte_offset + part_byte_len > haystack_byte_len)
+                            if (byte_offset < 0)
                                 continue;
                             
-                            /* Match pattern bytes at this position */
+                            /* ✅ KEY FIX: Match CHARACTER by CHARACTER */
                             bool match = true;
-                            int needle_byte = 0;
-                            int hay_byte = byte_offset;
+                            int pattern_byte = 0;
+                            int haystack_byte = byte_offset;
                             
-                            while (needle_byte < part_byte_len && match) {
-                                if (parsed->parts[0][needle_byte] == '_') {
-                                    /* Underscore matches one CHARACTER */
-                                    int char_len = biscuit_utf8_char_length((unsigned char)haystack[hay_byte]);
-                                    hay_byte += char_len;
-                                    needle_byte++;
-                                } else {
-                                    /* Concrete character - must match exactly (already lowercase) */
-                                    if (haystack[hay_byte] != parsed->parts[0][needle_byte]) {
+                            while (pattern_byte < part_byte_len && haystack_byte < haystack_byte_len && match) {
+                                /* Handle underscore wildcard */
+                                if (parsed->parts[0][pattern_byte] == '_') {
+                                    /* Underscore matches ONE CHARACTER */
+                                    int hay_char_len = biscuit_utf8_char_length((unsigned char)haystack[haystack_byte]);
+                                    haystack_byte += hay_char_len;
+                                    pattern_byte++;
+                                    continue;
+                                }
+                                
+                                /* Get lengths of current UTF-8 characters */
+                                int pattern_char_len = biscuit_utf8_char_length((unsigned char)parsed->parts[0][pattern_byte]);
+                                int hay_char_len = biscuit_utf8_char_length((unsigned char)haystack[haystack_byte]);
+                                
+                                /* Character lengths must match */
+                                if (pattern_char_len != hay_char_len) {
+                                    match = false;
+                                    break;
+                                }
+                                
+                                /* Compare all bytes of the multi-byte character */
+                                for (int b = 0; b < pattern_char_len; b++) {
+                                    if (pattern_byte + b >= part_byte_len || 
+                                        haystack_byte + b >= haystack_byte_len ||
+                                        parsed->parts[0][pattern_byte + b] != haystack[haystack_byte + b]) {
                                         match = false;
-                                    } else {
-                                        hay_byte++;
-                                        needle_byte++;
+                                        break;
                                     }
                                 }
+                                
+                                if (!match)
+                                    break;
+                                
+                                /* Advance by character length */
+                                pattern_byte += pattern_char_len;
+                                haystack_byte += hay_char_len;
                             }
                             
-                            if (match) {
+                            /* Verify we consumed the entire pattern */
+                            if (match && pattern_byte == part_byte_len) {
                                 found = true;
                             }
                         }
@@ -3430,29 +3446,47 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern) {
                                 for (char_pos = 0; char_pos <= haystack_char_len - part_char_len && !found; char_pos++) {
                                     int byte_offset = biscuit_utf8_char_to_byte_offset(haystack, haystack_byte_len, char_pos);
                                     
-                                    if (byte_offset < 0 || byte_offset + part_byte_len > haystack_byte_len)
+                                    if (byte_offset < 0)
                                         continue;
                                     
+                                    /* ✅ FIX: CHARACTER-by-CHARACTER matching */
                                     bool match = true;
-                                    int needle_byte = 0;
-                                    int hay_byte = byte_offset;
+                                    int pattern_byte = 0;
+                                    int haystack_byte = byte_offset;
                                     
-                                    while (needle_byte < part_byte_len && match) {
-                                        if (parsed->parts[0][needle_byte] == '_') {
-                                            int char_len = biscuit_utf8_char_length((unsigned char)haystack[hay_byte]);
-                                            hay_byte += char_len;
-                                            needle_byte++;
-                                        } else {
-                                            if (haystack[hay_byte] != parsed->parts[0][needle_byte]) {
+                                    while (pattern_byte < part_byte_len && haystack_byte < haystack_byte_len && match) {
+                                        if (parsed->parts[0][pattern_byte] == '_') {
+                                            int hay_char_len = biscuit_utf8_char_length((unsigned char)haystack[haystack_byte]);
+                                            haystack_byte += hay_char_len;
+                                            pattern_byte++;
+                                            continue;
+                                        }
+                                        
+                                        int pattern_char_len = biscuit_utf8_char_length((unsigned char)parsed->parts[0][pattern_byte]);
+                                        int hay_char_len = biscuit_utf8_char_length((unsigned char)haystack[haystack_byte]);
+                                        
+                                        if (pattern_char_len != hay_char_len) {
+                                            match = false;
+                                            break;
+                                        }
+                                        
+                                        for (int b = 0; b < pattern_char_len; b++) {
+                                            if (pattern_byte + b >= part_byte_len || 
+                                                haystack_byte + b >= haystack_byte_len ||
+                                                parsed->parts[0][pattern_byte + b] != haystack[haystack_byte + b]) {
                                                 match = false;
-                                            } else {
-                                                hay_byte++;
-                                                needle_byte++;
+                                                break;
                                             }
                                         }
+                                        
+                                        if (!match)
+                                            break;
+                                        
+                                        pattern_byte += pattern_char_len;
+                                        haystack_byte += hay_char_len;
                                     }
                                     
-                                    if (match) {
+                                    if (match && pattern_byte == part_byte_len) {
                                         found = true;
                                     }
                                 }
@@ -3520,7 +3554,7 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern) {
                         if (!biscuit_roaring_is_empty(first_part_match)) {
                             biscuit_recursive_windowed_match_ilike(
                                 result, idx,
-                                (const char **)parsed->parts, parsed->part_lens,
+                                (const char **)parsed->parts, parsed->part_byte_lens,
                                 parsed->part_count, parsed->ends_percent,
                                 1, parsed->part_lens[0], first_part_match, 
                                 idx->max_len
@@ -3533,7 +3567,7 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern) {
                 } else {
                     biscuit_recursive_windowed_match_ilike(
                         result, idx,
-                        (const char **)parsed->parts, parsed->part_lens,
+                        (const char **)parsed->parts, parsed->part_byte_lens,
                         parsed->part_count, parsed->ends_percent,
                         0, 0, candidates, idx->max_len
                     );
@@ -3555,7 +3589,7 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern) {
         PG_RE_THROW();
     }
     PG_END_TRY();
-    
+
     if (result && idx->tombstone_count > 0) {
         biscuit_roaring_andnot_inplace(result, idx->tombstones);
     }
@@ -3654,7 +3688,6 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
     /* ========== FAST PATH 1-5: Same as before ========== */
     if (plen == 0) {
         if (idx->length_bitmaps_legacy && idx->length_bitmaps_legacy[0]) {
-            uint64_t count = biscuit_roaring_count(idx->length_bitmaps_legacy[0]);
             return biscuit_roaring_copy(idx->length_bitmaps_legacy[0]);
         }
         return biscuit_roaring_create();
@@ -3674,7 +3707,6 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
             #endif
                 biscuit_roaring_add(result, i);
         }
-        uint64_t count = biscuit_roaring_count(result);
         return result;
     }
     
@@ -3692,14 +3724,10 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
     if (only_wildcards) {
         if (percent_count > 0) {
             result = biscuit_get_length_ge(idx, wildcard_count);
-            if (result) {
-                uint64_t count = biscuit_roaring_count(result);
-            }
             return result;
         } else {
             if (wildcard_count < idx->max_length_legacy && 
                 idx->length_bitmaps_legacy[wildcard_count]) {
-                uint64_t count = biscuit_roaring_count(idx->length_bitmaps_legacy[wildcard_count]);
                 return biscuit_roaring_copy(idx->length_bitmaps_legacy[wildcard_count]);
             }
             return biscuit_roaring_create();
@@ -3729,7 +3757,7 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
 
     min_len = 0;
     for (i = 0; i < parsed->part_count; i++)
-        min_len += parsed->part_lens[i];  // Uses CHARACTER counts now
+        min_len += parsed->part_lens[i];
 
     /* ==================== OPTIMIZED SINGLE PART PATTERNS ==================== */
     if (parsed->part_count == 1) {
@@ -3737,10 +3765,12 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
             /* EXACT match */
             result = biscuit_match_part_at_pos(idx, parsed->parts[0], 
                                              parsed->part_byte_lens[0], 0);
-            if (min_len < idx->max_length_legacy && idx->length_bitmaps_legacy[min_len]) {
+            if (result && min_len < idx->max_length_legacy && idx->length_bitmaps_legacy[min_len]) {
                 biscuit_roaring_and_inplace(result, idx->length_bitmaps_legacy[min_len]);
-            } else {
+            } else if (result) {
                 biscuit_roaring_free(result);
+                result = biscuit_roaring_create();
+            } else {
                 result = biscuit_roaring_create();
             }
         } else if (!parsed->starts_percent) {
@@ -3752,182 +3782,141 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
             result = biscuit_match_part_at_end(idx, parsed->parts[0], 
                                              parsed->part_byte_lens[0]);
         } else {
-            /* ==================== CRITICAL FIX: SUBSTRING MATCH ==================== */
-            /* Pattern: '%abc%' - must validate complete UTF-8 characters */
+            /* ==================== SUBSTRING: Use position-based matching like multi-column ==================== */
             
             result = biscuit_roaring_create();
             
-            /* STRATEGY: 
-             * 1. Use bitmap intersection to get candidates (fast)
-             * 2. Brute-force validate UTF-8 boundaries (ensures correctness)
-             */
-            
-            RoaringBitmap *candidates = NULL;
+            /* Parse the pattern into parts for windowed matching */
             int part_byte_len = parsed->part_byte_lens[0];
-            int part_char_len = parsed->part_lens[0];
             
-            /* Get candidates using first byte of pattern */
-            if (part_byte_len > 0) {
-                unsigned char first_byte = (unsigned char)parsed->parts[0][0];
-                
-                /* Skip underscores to find first concrete byte */
-                int scan_pos = 0;
-                while (scan_pos < part_byte_len && parsed->parts[0][scan_pos] == '_') {
-                    scan_pos++;
-                }
-                
-                if (scan_pos < part_byte_len) {
-                    first_byte = (unsigned char)parsed->parts[0][scan_pos];
-                    
-                    /* Get all records with this byte */
-                    if (idx->char_cache_legacy[first_byte]) {
-                        candidates = biscuit_roaring_copy(idx->char_cache_legacy[first_byte]);
-                    }
-                }
-            }
-            
-            if (!candidates) {
-                candidates = biscuit_roaring_create();
-                for (i = 0; i < idx->num_records; i++) {
-                    #ifdef HAVE_ROARING
-                    if (!roaring_bitmap_contains(idx->tombstones, (uint32_t)i))
-                    #else
-                    uint32_t block = i >> 6;
-                    uint32_t bit = i & 63;
-                    bool tombstoned = (block < idx->tombstones->num_blocks &&
-                                      (idx->tombstones->blocks[block] & (1ULL << bit)));
-                    if (!tombstoned)
-                    #endif
-                        biscuit_roaring_add(candidates, i);
-                }
-            }
-            
-            /* Apply length filter */
-            RoaringBitmap *length_filter = biscuit_get_length_ge(idx, part_char_len);
-            if (length_filter) {
-                biscuit_roaring_and_inplace(candidates, length_filter);
-                biscuit_roaring_free(length_filter);
-            }
-            
-            /* Now validate each candidate with UTF-8-aware substring search */
-            #ifdef HAVE_ROARING
-            roaring_uint32_iterator_t *iter = roaring_create_iterator(candidates);
-            
-            while (iter->has_value) {
-                uint32_t rec_idx = iter->current_value;
-                
-                if (rec_idx < (uint32_t)idx->num_records && idx->data_cache[rec_idx]) {
-                    char *haystack = idx->data_cache[rec_idx];
-                    int haystack_byte_len = strlen(haystack);
-                    int haystack_char_len = biscuit_utf8_char_count(haystack, haystack_byte_len);
-                    
-                    /* Try matching pattern at each CHARACTER position */
-                    bool found = false;
-                    for (int char_pos = 0; char_pos <= haystack_char_len - part_char_len && !found; char_pos++) {
-                        /* Convert character position to byte offset */
-                        int byte_offset = biscuit_utf8_char_to_byte_offset(haystack, haystack_byte_len, char_pos);
-                        
-                        if (byte_offset < 0 || byte_offset + part_byte_len > haystack_byte_len)
-                            continue;
-                        
-                        /* Match pattern bytes at this position */
-                        bool match = true;
-                        int needle_byte = 0;
-                        int hay_byte = byte_offset;
-                        int needle_char = 0;
-                        
-                        while (needle_byte < part_byte_len && match) {
-                            if (parsed->parts[0][needle_byte] == '_') {
-                                /* Underscore matches one CHARACTER */
-                                int char_len = biscuit_utf8_char_length((unsigned char)haystack[hay_byte]);
-                                hay_byte += char_len;
-                                needle_byte++;
-                                needle_char++;
-                            } else {
-                                /* Concrete character - must match exactly */
-                                if (haystack[hay_byte] != parsed->parts[0][needle_byte]) {
-                                    match = false;
-                                } else {
-                                    hay_byte++;
-                                    needle_byte++;
-                                }
-                            }
-                        }
-                        
-                        if (match) {
-                            found = true;
-                        }
-                    }
-                    
-                    if (found) {
-                        biscuit_roaring_add(result, rec_idx);
-                    }
-                }
-                
-                roaring_advance_uint32_iterator(iter);
-            }
-            
-            roaring_free_uint32_iterator(iter);
-            #else
+            /* Count total pattern characters (including underscores) */
+            int total_pattern_chars = 0;
             {
-                uint32_t *indices;
-                uint64_t count;
-                int j;
+                int temp_pos = 0;
+                while (temp_pos < part_byte_len) {
+                    if (parsed->parts[0][temp_pos] == '_') {
+                        total_pattern_chars++;
+                        temp_pos++;
+                    } else {
+                        int char_len = biscuit_utf8_char_length((unsigned char)parsed->parts[0][temp_pos]);
+                        if (temp_pos + char_len > part_byte_len)
+                            char_len = part_byte_len - temp_pos;
+                        temp_pos += char_len;
+                        total_pattern_chars++;
+                    }
+                }
+            }
+            
+            /* Try matching at each position in the string */
+            for (int start_pos = 0; start_pos <= idx->max_len - total_pattern_chars; start_pos++) {
+                RoaringBitmap *pos_match = NULL;
+                bool first_concrete = true;
                 
-                indices = biscuit_roaring_to_array(candidates, &count);
+                /* Match the pattern character-by-character at this position */
+                int part_byte_pos = 0;
+                int current_char_pos = start_pos;
                 
-                if (indices) {
-                    for (j = 0; j < (int)count; j++) {
-                        uint32_t rec_idx = indices[j];
+                while (part_byte_pos < part_byte_len) {
+                    unsigned char first_byte = (unsigned char)parsed->parts[0][part_byte_pos];
+                    
+                    /* Handle underscore wildcard - skip this position */
+                    if (first_byte == '_') {
+                        part_byte_pos++;
+                        current_char_pos++;
+                        continue;
+                    }
+                    
+                    /* Get character length */
+                    int char_len = biscuit_utf8_char_length(first_byte);
+                    if (part_byte_pos + char_len > part_byte_len)
+                        char_len = part_byte_len - part_byte_pos;
+                    
+                    /* Match all bytes of this character at current_char_pos */
+                    if (char_len == 1) {
+                        /* Single-byte character */
+                        RoaringBitmap *char_bm = biscuit_get_pos_bitmap(idx, first_byte, current_char_pos);
                         
-                        if (rec_idx < (uint32_t)idx->num_records && idx->data_cache[rec_idx]) {
-                            char *haystack = idx->data_cache[rec_idx];
-                            int haystack_byte_len = strlen(haystack);
-                            int haystack_char_len = biscuit_utf8_char_count(haystack, haystack_byte_len);
+                        if (!char_bm) {
+                            if (pos_match) biscuit_roaring_free(pos_match);
+                            pos_match = NULL;
+                            break;
+                        }
+                        
+                        if (first_concrete) {
+                            pos_match = biscuit_roaring_copy(char_bm);
+                            first_concrete = false;
+                        } else {
+                            biscuit_roaring_and_inplace(pos_match, char_bm);
+                            if (biscuit_roaring_is_empty(pos_match)) {
+                                biscuit_roaring_free(pos_match);
+                                pos_match = NULL;
+                                break;
+                            }
+                        }
+                    } else {
+                        /* Multi-byte character - all bytes must match at same position */
+                        RoaringBitmap *multibyte_result = NULL;
+                        int b;
+                        
+                        for (b = 0; b < char_len; b++) {
+                            unsigned char byte_val = (unsigned char)parsed->parts[0][part_byte_pos + b];
+                            RoaringBitmap *byte_bm = biscuit_get_pos_bitmap(idx, byte_val, current_char_pos);
                             
-                            bool found = false;
-                            int char_pos;
-                            for (char_pos = 0; char_pos <= haystack_char_len - part_char_len && !found; char_pos++) {
-                                int byte_offset = biscuit_utf8_char_to_byte_offset(haystack, haystack_byte_len, char_pos);
-                                
-                                if (byte_offset < 0 || byte_offset + part_byte_len > haystack_byte_len)
-                                    continue;
-                                
-                                bool match = true;
-                                int needle_byte = 0;
-                                int hay_byte = byte_offset;
-                                
-                                while (needle_byte < part_byte_len && match) {
-                                    if (parsed->parts[0][needle_byte] == '_') {
-                                        int char_len = biscuit_utf8_char_length((unsigned char)haystack[hay_byte]);
-                                        hay_byte += char_len;
-                                        needle_byte++;
-                                    } else {
-                                        if (haystack[hay_byte] != parsed->parts[0][needle_byte]) {
-                                            match = false;
-                                        } else {
-                                            hay_byte++;
-                                            needle_byte++;
-                                        }
-                                    }
-                                }
-                                
-                                if (match) {
-                                    found = true;
-                                }
+                            if (!byte_bm) {
+                                if (multibyte_result) biscuit_roaring_free(multibyte_result);
+                                multibyte_result = NULL;
+                                break;
                             }
                             
-                            if (found) {
-                                biscuit_roaring_add(result, rec_idx);
+                            if (b == 0) {
+                                multibyte_result = biscuit_roaring_copy(byte_bm);
+                            } else {
+                                biscuit_roaring_and_inplace(multibyte_result, byte_bm);
+                                if (biscuit_roaring_is_empty(multibyte_result)) {
+                                    biscuit_roaring_free(multibyte_result);
+                                    multibyte_result = NULL;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (!multibyte_result) {
+                            if (pos_match) biscuit_roaring_free(pos_match);
+                            pos_match = NULL;
+                            break;
+                        }
+                        
+                        if (first_concrete) {
+                            pos_match = multibyte_result;
+                            first_concrete = false;
+                        } else {
+                            biscuit_roaring_and_inplace(pos_match, multibyte_result);
+                            biscuit_roaring_free(multibyte_result);
+                            if (biscuit_roaring_is_empty(pos_match)) {
+                                biscuit_roaring_free(pos_match);
+                                pos_match = NULL;
+                                break;
                             }
                         }
                     }
-                    pfree(indices);
+                    
+                    part_byte_pos += char_len;
+                    current_char_pos++;
+                }
+                
+                /* If we got matches at this position, add them to result */
+                if (pos_match) {
+                    /* Apply length constraint */
+                    RoaringBitmap *length_filter = biscuit_get_length_ge(idx, start_pos + total_pattern_chars);
+                    if (length_filter) {
+                        biscuit_roaring_and_inplace(pos_match, length_filter);
+                        biscuit_roaring_free(length_filter);
+                    }
+                    
+                    biscuit_roaring_or_inplace(result, pos_match);
+                    biscuit_roaring_free(pos_match);
                 }
             }
-            #endif
-            
-            biscuit_roaring_free(candidates);
         }
     }
     /* ==================== TWO PART PATTERNS ==================== */
@@ -3942,14 +3931,22 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
         suffix_match = biscuit_match_part_at_end(idx, parsed->parts[1], 
                                                 parsed->part_byte_lens[1]);
         
-        biscuit_roaring_and_inplace(prefix_match, suffix_match);
-        biscuit_roaring_free(suffix_match);
-        
-        length_filter = biscuit_get_length_ge(idx, min_len);
-        biscuit_roaring_and_inplace(prefix_match, length_filter);
-        biscuit_roaring_free(length_filter);
-        
-        result = prefix_match;
+        if (!prefix_match || !suffix_match) {
+            if (prefix_match) biscuit_roaring_free(prefix_match);
+            if (suffix_match) biscuit_roaring_free(suffix_match);
+            result = biscuit_roaring_create();
+        } else {
+            biscuit_roaring_and_inplace(prefix_match, suffix_match);
+            biscuit_roaring_free(suffix_match);
+            
+            length_filter = biscuit_get_length_ge(idx, min_len);
+            if (length_filter) {
+                biscuit_roaring_and_inplace(prefix_match, length_filter);
+                biscuit_roaring_free(length_filter);
+            }
+            
+            result = prefix_match;
+        }
     }
     /* ==================== COMPLEX MULTI-PART PATTERNS ==================== */
     else {
@@ -3958,29 +3955,33 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
         result = biscuit_roaring_create();
         candidates = biscuit_get_length_ge(idx, min_len);
         
-        if (biscuit_roaring_is_empty(candidates)) {
-            biscuit_roaring_free(candidates);
+        if (!candidates || biscuit_roaring_is_empty(candidates)) {
+            if (candidates) biscuit_roaring_free(candidates);
         } else {
             if (!parsed->starts_percent) {
                 RoaringBitmap *first_part_match = biscuit_match_part_at_pos(
                     idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
                 
-                biscuit_roaring_and_inplace(first_part_match, candidates);
-                biscuit_roaring_free(candidates);
-                
-                if (!biscuit_roaring_is_empty(first_part_match)) {
-                    biscuit_recursive_windowed_match(
-                        result, idx,
-                        (const char **)parsed->parts, parsed->part_lens,
-                        parsed->part_count, parsed->ends_percent,
-                        1, parsed->part_lens[0], first_part_match, idx->max_len
-                    );
+                if (first_part_match) {
+                    biscuit_roaring_and_inplace(first_part_match, candidates);
+                    biscuit_roaring_free(candidates);
+                    
+                    if (!biscuit_roaring_is_empty(first_part_match)) {
+                        biscuit_recursive_windowed_match(
+                            result, idx,
+                            (const char **)parsed->parts, parsed->part_byte_lens,
+                            parsed->part_count, parsed->ends_percent,
+                            1, parsed->part_lens[0], first_part_match, idx->max_len
+                        );
+                    }
+                    biscuit_roaring_free(first_part_match);
+                } else {
+                    biscuit_roaring_free(candidates);
                 }
-                biscuit_roaring_free(first_part_match);
             } else {
                 biscuit_recursive_windowed_match(
                     result, idx,
-                    (const char **)parsed->parts, parsed->part_lens,
+                    (const char **)parsed->parts, parsed->part_byte_lens,
                     parsed->part_count, parsed->ends_percent,
                     0, 0, candidates, idx->max_len
                 );
@@ -3990,10 +3991,6 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
     }
 
     biscuit_free_parsed_pattern(parsed);
-    
-    if (result) {
-        uint64_t final_count = biscuit_roaring_count(result);
-    }
 
     if (result && idx->tombstone_count > 0) {
         biscuit_roaring_andnot_inplace(result, idx->tombstones);
@@ -4004,8 +4001,6 @@ static RoaringBitmap* biscuit_query_pattern(BiscuitIndex *idx, const char *patte
 
 /* ==================== UPDATED: biscuit_build_multicolumn WITH ILIKE SUPPORT ==================== */
 /* ==================== COMPLETE FIXED: biscuit_build_multicolumn() ==================== */
-/* ==================== COMPLETE FIXED: biscuit_build_multicolumn() ==================== */
-
 static IndexBuildResult *
 biscuit_build_multicolumn(Relation heap, Relation index, IndexInfo *indexInfo)
 {
@@ -6768,235 +6763,295 @@ log_query_plan(QueryPlan *plan)
 /* ==================== FIXED: UTF-8-AWARE MULTI-COLUMN PATTERN MATCHING ==================== */
 
 /*
- * Match a pattern part at a specific character position (multi-column version)
+ * Match a pattern part at a specific CHARACTER position (multi-column LIKE)
  * Handles multi-byte UTF-8 characters correctly
  */
 static RoaringBitmap* 
 biscuit_match_col_part_at_pos(ColumnIndex *col, const char *part, 
-                              int part_len, int start_pos) {
+                              int part_byte_len, int start_char_pos) {
     RoaringBitmap *result = NULL;
-    RoaringBitmap *char_bm;
     RoaringBitmap *len_filter;
     int part_byte_pos = 0;
-    int char_pos = start_pos;
+    int current_char_pos = start_char_pos;  /* Current CHARACTER position in the string */
     int concrete_chars = 0;
+    bool first_concrete = true;
     
     /* Process pattern character by character (not byte by byte) */
-    while (part_byte_pos < part_len) {
+    while (part_byte_pos < part_byte_len) {
         unsigned char first_byte = (unsigned char)part[part_byte_pos];
         
-        /* Handle underscore wildcard */
+        /* Handle underscore wildcard - matches ANY single character */
         if (first_byte == '_') {
             part_byte_pos++;
-            char_pos++;
+            current_char_pos++;  /* Move to next character position */
             continue;
         }
         
-        /* Get UTF-8 character length */
-        int char_len = biscuit_utf8_char_length(first_byte);
-        if (part_byte_pos + char_len > part_len)
-            char_len = part_len - part_byte_pos;
+        /* Get UTF-8 character length in bytes */
+        int char_byte_len = biscuit_utf8_char_length(first_byte);
+        if (part_byte_pos + char_byte_len > part_byte_len)
+            char_byte_len = part_byte_len - part_byte_pos;
         
         concrete_chars++;
         
-        /* For multi-byte characters, we need to match ALL bytes at this position */
-        if (char_len == 1) {
+        /* CRITICAL: For multi-byte characters, ALL bytes must be indexed at 
+         * the SAME character position */
+        if (char_byte_len == 1) {
             /* Single-byte character - simple case */
-            char_bm = biscuit_get_col_pos_bitmap(col, first_byte, char_pos);
+            RoaringBitmap *char_bm = biscuit_get_col_pos_bitmap(col, first_byte, current_char_pos);
             
             if (!char_bm) {
                 if (result) biscuit_roaring_free(result);
                 return biscuit_roaring_create();
             }
             
-            if (!result) {
+            if (first_concrete) {
                 result = biscuit_roaring_copy(char_bm);
+                first_concrete = false;
             } else {
                 biscuit_roaring_and_inplace(result, char_bm);
                 if (biscuit_roaring_is_empty(result))
                     return result;
             }
         } else {
-            /* Multi-byte character - must match ALL bytes at same char_pos */
+            /* Multi-byte character - must match ALL bytes at current_char_pos */
+            RoaringBitmap *multibyte_result = NULL;
             int b;
-            for (b = 0; b < char_len; b++) {
+            
+            for (b = 0; b < char_byte_len; b++) {
                 unsigned char byte_val = (unsigned char)part[part_byte_pos + b];
+                RoaringBitmap *byte_bm = biscuit_get_col_pos_bitmap(col, byte_val, current_char_pos);
                 
-                char_bm = biscuit_get_col_pos_bitmap(col, byte_val, char_pos);
-                
-                if (!char_bm) {
+                if (!byte_bm) {
+                    if (multibyte_result) biscuit_roaring_free(multibyte_result);
                     if (result) biscuit_roaring_free(result);
                     return biscuit_roaring_create();
                 }
                 
-                if (!result) {
-                    result = biscuit_roaring_copy(char_bm);
+                if (b == 0) {
+                    /* First byte of multi-byte char */
+                    multibyte_result = biscuit_roaring_copy(byte_bm);
                 } else {
-                    biscuit_roaring_and_inplace(result, char_bm);
-                    if (biscuit_roaring_is_empty(result))
-                        return result;
+                    /* Subsequent bytes - must ALL be present at same position */
+                    biscuit_roaring_and_inplace(multibyte_result, byte_bm);
+                    if (biscuit_roaring_is_empty(multibyte_result)) {
+                        biscuit_roaring_free(multibyte_result);
+                        if (result) biscuit_roaring_free(result);
+                        return biscuit_roaring_create();
+                    }
                 }
+            }
+            
+            /* Now intersect this character's result with overall result */
+            if (first_concrete) {
+                result = multibyte_result;
+                first_concrete = false;
+            } else {
+                biscuit_roaring_and_inplace(result, multibyte_result);
+                biscuit_roaring_free(multibyte_result);
+                if (biscuit_roaring_is_empty(result))
+                    return result;
             }
         }
         
-        part_byte_pos += char_len;
-        char_pos++;
+        part_byte_pos += char_byte_len;
+        current_char_pos++;  /* Move to next CHARACTER position */
     }
     
-    /* All wildcards case */
+    /* All wildcards case - just need length >= min */
     if (concrete_chars == 0) {
-        int pattern_char_count = biscuit_utf8_char_count(part, part_len);
-        result = biscuit_get_col_length_ge(col, start_pos + pattern_char_count);
+        int pattern_char_count = biscuit_utf8_char_count(part, part_byte_len);
+        if (result) biscuit_roaring_free(result);
+        result = biscuit_get_col_length_ge(col, start_char_pos + pattern_char_count);
     } else {
-        int pattern_char_count = biscuit_utf8_char_count(part, part_len);
-        len_filter = biscuit_get_col_length_ge(col, start_pos + pattern_char_count);
+        /* Apply length constraint: string must be long enough */
+        int pattern_char_count = biscuit_utf8_char_count(part, part_byte_len);
+        len_filter = biscuit_get_col_length_ge(col, start_char_pos + pattern_char_count);
         if (len_filter) {
-            biscuit_roaring_and_inplace(result, len_filter);
-            biscuit_roaring_free(len_filter);
+            if (result) {
+                biscuit_roaring_and_inplace(result, len_filter);
+            } else {
+                result = len_filter;
+                len_filter = NULL;
+            }
+            if (len_filter) biscuit_roaring_free(len_filter);
         }
     }
     
-    return result;
+    return result ? result : biscuit_roaring_create();
 }
 
 /*
- * Match a pattern part at the end using negative indexing (multi-column version)
+ * Match a pattern part at the END using negative CHARACTER indexing
  * Handles multi-byte UTF-8 characters correctly
  */
 static RoaringBitmap* 
-biscuit_match_col_part_at_end(ColumnIndex *col, const char *part, int part_len) {
+biscuit_match_col_part_at_end(ColumnIndex *col, const char *part, int part_byte_len) {
     RoaringBitmap *result = NULL;
-    RoaringBitmap *char_bm;
     RoaringBitmap *len_filter;
     int concrete_chars = 0;
+    bool first_concrete = true;
     
-    /* Count characters in pattern (not bytes) */
-    int pattern_char_count = biscuit_utf8_char_count(part, part_len);
+    /* Count CHARACTERS in pattern (not bytes) */
+    int pattern_char_count = biscuit_utf8_char_count(part, part_byte_len);
     
-    /* Process pattern from end to beginning */
+    /* Process pattern LEFT-TO-RIGHT, but assign negative positions */
     int part_byte_pos = 0;
-    int char_offset_from_end = 0;  /* 0 = last char, 1 = second-to-last, etc. */
+    int char_index = 0;  /* 0 = first char in pattern, 1 = second, etc. */
     
-    while (part_byte_pos < part_len) {
+    while (part_byte_pos < part_byte_len) {
         unsigned char first_byte = (unsigned char)part[part_byte_pos];
         
         /* Handle underscore wildcard */
         if (first_byte == '_') {
             part_byte_pos++;
-            char_offset_from_end++;
+            char_index++;
             continue;
         }
         
         /* Get UTF-8 character length */
-        int char_len = biscuit_utf8_char_length(first_byte);
-        if (part_byte_pos + char_len > part_len)
-            char_len = part_len - part_byte_pos;
+        int char_byte_len = biscuit_utf8_char_length(first_byte);
+        if (part_byte_pos + char_byte_len > part_byte_len)
+            char_byte_len = part_byte_len - part_byte_pos;
         
         concrete_chars++;
         
-        /* Calculate negative position */
-        int neg_pos = -(pattern_char_count - char_offset_from_end);
+        /* CRITICAL FIX: Calculate negative position correctly
+         * 
+         * For pattern '%안녕' (2 characters):
+         *   char_index=0 ('안') → neg_pos = -(2-0) = -2 (second-to-last position)
+         *   char_index=1 ('녕') → neg_pos = -(2-1) = -1 (last position)
+         * 
+         * For pattern '%X' (1 character):
+         *   char_index=0 ('X') → neg_pos = -(1-0) = -1 (last position)
+         */
+        int neg_pos = -(pattern_char_count - char_index);
         
-        /* Match all bytes of this character at negative position */
-        if (char_len == 1) {
+        /* Match all bytes of this character at the SAME negative position */
+        if (char_byte_len == 1) {
             /* Single-byte character */
-            char_bm = biscuit_get_col_neg_bitmap(col, first_byte, neg_pos);
+            RoaringBitmap *char_bm = biscuit_get_col_neg_bitmap(col, first_byte, neg_pos);
             
             if (!char_bm) {
                 if (result) biscuit_roaring_free(result);
                 return biscuit_roaring_create();
             }
             
-            if (!result) {
+            if (first_concrete) {
                 result = biscuit_roaring_copy(char_bm);
+                first_concrete = false;
             } else {
                 biscuit_roaring_and_inplace(result, char_bm);
                 if (biscuit_roaring_is_empty(result))
                     return result;
             }
         } else {
-            /* Multi-byte character - match ALL bytes */
+            /* Multi-byte character - ALL bytes must be at same neg_pos */
+            RoaringBitmap *multibyte_result = NULL;
             int b;
-            for (b = 0; b < char_len; b++) {
+            
+            for (b = 0; b < char_byte_len; b++) {
                 unsigned char byte_val = (unsigned char)part[part_byte_pos + b];
+                RoaringBitmap *byte_bm = biscuit_get_col_neg_bitmap(col, byte_val, neg_pos);
                 
-                char_bm = biscuit_get_col_neg_bitmap(col, byte_val, neg_pos);
-                
-                if (!char_bm) {
+                if (!byte_bm) {
+                    if (multibyte_result) biscuit_roaring_free(multibyte_result);
                     if (result) biscuit_roaring_free(result);
                     return biscuit_roaring_create();
                 }
                 
-                if (!result) {
-                    result = biscuit_roaring_copy(char_bm);
+                if (b == 0) {
+                    multibyte_result = biscuit_roaring_copy(byte_bm);
                 } else {
-                    biscuit_roaring_and_inplace(result, char_bm);
-                    if (biscuit_roaring_is_empty(result))
-                        return result;
+                    biscuit_roaring_and_inplace(multibyte_result, byte_bm);
+                    if (biscuit_roaring_is_empty(multibyte_result)) {
+                        biscuit_roaring_free(multibyte_result);
+                        if (result) biscuit_roaring_free(result);
+                        return biscuit_roaring_create();
+                    }
                 }
+            }
+            
+            /* Intersect with overall result */
+            if (first_concrete) {
+                result = multibyte_result;
+                first_concrete = false;
+            } else {
+                biscuit_roaring_and_inplace(result, multibyte_result);
+                biscuit_roaring_free(multibyte_result);
+                if (biscuit_roaring_is_empty(result))
+                    return result;
             }
         }
         
-        part_byte_pos += char_len;
-        char_offset_from_end++;
+        part_byte_pos += char_byte_len;
+        char_index++;  /* Move to next character in pattern */
     }
     
     /* All wildcards case */
     if (concrete_chars == 0) {
+        if (result) biscuit_roaring_free(result);
         result = biscuit_get_col_length_ge(col, pattern_char_count);
     } else {
+        /* Apply length constraint */
         len_filter = biscuit_get_col_length_ge(col, pattern_char_count);
         if (len_filter) {
-            biscuit_roaring_and_inplace(result, len_filter);
-            biscuit_roaring_free(len_filter);
+            if (result) {
+                biscuit_roaring_and_inplace(result, len_filter);
+            } else {
+                result = len_filter;
+                len_filter = NULL;
+            }
+            if (len_filter) biscuit_roaring_free(len_filter);
         }
     }
     
-    return result;
+    return result ? result : biscuit_roaring_create();
 }
-
 /* ==================== ILIKE VERSIONS (MULTI-COLUMN) ==================== */
 
+/*
+ * Match a pattern part at a specific CHARACTER position (multi-column ILIKE)
+ * Uses lowercase index for case-insensitive matching
+ */
 static RoaringBitmap* 
 biscuit_match_col_part_at_pos_ilike(ColumnIndex *col, const char *part, 
-                                    int part_len, int start_pos) {
+                                    int part_byte_len, int start_char_pos) {
     RoaringBitmap *result = NULL;
-    RoaringBitmap *char_bm;
     RoaringBitmap *len_filter;
     int part_byte_pos = 0;
-    int char_pos = start_pos;
+    int current_char_pos = start_char_pos;
     int concrete_chars = 0;
+    bool first_concrete = true;
     
-    /* Process pattern character by character */
-    while (part_byte_pos < part_len) {
+    while (part_byte_pos < part_byte_len) {
         unsigned char first_byte = (unsigned char)part[part_byte_pos];
         
         /* Handle underscore wildcard */
         if (first_byte == '_') {
             part_byte_pos++;
-            char_pos++;
+            current_char_pos++;
             continue;
         }
         
-        /* Get UTF-8 character length */
-        int char_len = biscuit_utf8_char_length(first_byte);
-        if (part_byte_pos + char_len > part_len)
-            char_len = part_len - part_byte_pos;
+        int char_byte_len = biscuit_utf8_char_length(first_byte);
+        if (part_byte_pos + char_byte_len > part_byte_len)
+            char_byte_len = part_byte_len - part_byte_pos;
         
         concrete_chars++;
         
-        /* Match all bytes of this character */
-        if (char_len == 1) {
+        if (char_byte_len == 1) {
             /* Single-byte character */
-            char_bm = biscuit_get_col_pos_bitmap_lower(col, first_byte, char_pos);
+            RoaringBitmap *char_bm = biscuit_get_col_pos_bitmap_lower(col, first_byte, current_char_pos);
             
             if (!char_bm) {
                 if (result) biscuit_roaring_free(result);
                 return biscuit_roaring_create();
             }
             
-            if (!result) {
+            if (first_concrete) {
                 result = biscuit_roaring_copy(char_bm);
+                first_concrete = false;
             } else {
                 biscuit_roaring_and_inplace(result, char_bm);
                 if (biscuit_roaring_is_empty(result))
@@ -7004,93 +7059,118 @@ biscuit_match_col_part_at_pos_ilike(ColumnIndex *col, const char *part,
             }
         } else {
             /* Multi-byte character */
+            RoaringBitmap *multibyte_result = NULL;
             int b;
-            for (b = 0; b < char_len; b++) {
+            
+            for (b = 0; b < char_byte_len; b++) {
                 unsigned char byte_val = (unsigned char)part[part_byte_pos + b];
+                RoaringBitmap *byte_bm = biscuit_get_col_pos_bitmap_lower(col, byte_val, current_char_pos);
                 
-                char_bm = biscuit_get_col_pos_bitmap_lower(col, byte_val, char_pos);
-                
-                if (!char_bm) {
+                if (!byte_bm) {
+                    if (multibyte_result) biscuit_roaring_free(multibyte_result);
                     if (result) biscuit_roaring_free(result);
                     return biscuit_roaring_create();
                 }
                 
-                if (!result) {
-                    result = biscuit_roaring_copy(char_bm);
+                if (b == 0) {
+                    multibyte_result = biscuit_roaring_copy(byte_bm);
                 } else {
-                    biscuit_roaring_and_inplace(result, char_bm);
-                    if (biscuit_roaring_is_empty(result))
-                        return result;
+                    biscuit_roaring_and_inplace(multibyte_result, byte_bm);
+                    if (biscuit_roaring_is_empty(multibyte_result)) {
+                        biscuit_roaring_free(multibyte_result);
+                        if (result) biscuit_roaring_free(result);
+                        return biscuit_roaring_create();
+                    }
                 }
+            }
+            
+            if (first_concrete) {
+                result = multibyte_result;
+                first_concrete = false;
+            } else {
+                biscuit_roaring_and_inplace(result, multibyte_result);
+                biscuit_roaring_free(multibyte_result);
+                if (biscuit_roaring_is_empty(result))
+                    return result;
             }
         }
         
-        part_byte_pos += char_len;
-        char_pos++;
+        part_byte_pos += char_byte_len;
+        current_char_pos++;
     }
     
     /* All wildcards case */
     if (concrete_chars == 0) {
-        int pattern_char_count = biscuit_utf8_char_count(part, part_len);
-        result = biscuit_get_col_length_ge_lower(col, start_pos + pattern_char_count);
+        int pattern_char_count = biscuit_utf8_char_count(part, part_byte_len);
+        if (result) biscuit_roaring_free(result);
+        result = biscuit_get_col_length_ge_lower(col, start_char_pos + pattern_char_count);
     } else {
-        int pattern_char_count = biscuit_utf8_char_count(part, part_len);
-        len_filter = biscuit_get_col_length_ge_lower(col, start_pos + pattern_char_count);
+        /* Apply length constraint */
+        int pattern_char_count = biscuit_utf8_char_count(part, part_byte_len);
+        len_filter = biscuit_get_col_length_ge_lower(col, start_char_pos + pattern_char_count);
         if (len_filter) {
-            biscuit_roaring_and_inplace(result, len_filter);
-            biscuit_roaring_free(len_filter);
+            if (result) {
+                biscuit_roaring_and_inplace(result, len_filter);
+            } else {
+                result = len_filter;
+                len_filter = NULL;
+            }
+            if (len_filter) biscuit_roaring_free(len_filter);
         }
     }
     
-    return result;
+    return result ? result : biscuit_roaring_create();
 }
 
+/*
+ * Match a pattern part at the END using negative CHARACTER indexing (ILIKE)
+ * Uses lowercase index for case-insensitive matching
+ */
 static RoaringBitmap* 
-biscuit_match_col_part_at_end_ilike(ColumnIndex *col, const char *part, int part_len) {
+biscuit_match_col_part_at_end_ilike(ColumnIndex *col, const char *part, int part_byte_len) {
     RoaringBitmap *result = NULL;
-    RoaringBitmap *char_bm;
     RoaringBitmap *len_filter;
     int concrete_chars = 0;
+    bool first_concrete = true;
     
-    /* Count characters in pattern */
-    int pattern_char_count = biscuit_utf8_char_count(part, part_len);
+    /* Count CHARACTERS in pattern */
+    int pattern_char_count = biscuit_utf8_char_count(part, part_byte_len);
     
-    /* Process pattern from beginning */
+    /* Process pattern LEFT-TO-RIGHT with negative indexing */
     int part_byte_pos = 0;
-    int char_offset_from_end = 0;
+    int char_index = 0;
     
-    while (part_byte_pos < part_len) {
+    while (part_byte_pos < part_byte_len) {
         unsigned char first_byte = (unsigned char)part[part_byte_pos];
         
         /* Handle underscore wildcard */
         if (first_byte == '_') {
             part_byte_pos++;
-            char_offset_from_end++;
+            char_index++;
             continue;
         }
         
-        /* Get UTF-8 character length */
-        int char_len = biscuit_utf8_char_length(first_byte);
-        if (part_byte_pos + char_len > part_len)
-            char_len = part_len - part_byte_pos;
+        int char_byte_len = biscuit_utf8_char_length(first_byte);
+        if (part_byte_pos + char_byte_len > part_byte_len)
+            char_byte_len = part_byte_len - part_byte_pos;
         
         concrete_chars++;
         
-        /* Calculate negative position */
-        int neg_pos = -(pattern_char_count - char_offset_from_end);
+        /* Calculate negative position correctly */
+        int neg_pos = -(pattern_char_count - char_index);
         
-        /* Match all bytes */
-        if (char_len == 1) {
+        if (char_byte_len == 1) {
             /* Single-byte character */
-            char_bm = biscuit_get_col_neg_bitmap_lower(col, first_byte, neg_pos);
+            RoaringBitmap *char_bm = biscuit_get_col_neg_bitmap_lower(col, first_byte, neg_pos);
             
             if (!char_bm) {
                 if (result) biscuit_roaring_free(result);
                 return biscuit_roaring_create();
             }
             
-            if (!result) {
+            if (first_concrete) {
                 result = biscuit_roaring_copy(char_bm);
+                first_concrete = false;
             } else {
                 biscuit_roaring_and_inplace(result, char_bm);
                 if (biscuit_roaring_is_empty(result))
@@ -7098,140 +7178,155 @@ biscuit_match_col_part_at_end_ilike(ColumnIndex *col, const char *part, int part
             }
         } else {
             /* Multi-byte character */
+            RoaringBitmap *multibyte_result = NULL;
             int b;
-            for (b = 0; b < char_len; b++) {
+            
+            for (b = 0; b < char_byte_len; b++) {
                 unsigned char byte_val = (unsigned char)part[part_byte_pos + b];
+                RoaringBitmap *byte_bm = biscuit_get_col_neg_bitmap_lower(col, byte_val, neg_pos);
                 
-                char_bm = biscuit_get_col_neg_bitmap_lower(col, byte_val, neg_pos);
-                
-                if (!char_bm) {
+                if (!byte_bm) {
+                    if (multibyte_result) biscuit_roaring_free(multibyte_result);
                     if (result) biscuit_roaring_free(result);
                     return biscuit_roaring_create();
                 }
                 
-                if (!result) {
-                    result = biscuit_roaring_copy(char_bm);
+                if (b == 0) {
+                    multibyte_result = biscuit_roaring_copy(byte_bm);
                 } else {
-                    biscuit_roaring_and_inplace(result, char_bm);
-                    if (biscuit_roaring_is_empty(result))
-                        return result;
+                    biscuit_roaring_and_inplace(multibyte_result, byte_bm);
+                    if (biscuit_roaring_is_empty(multibyte_result)) {
+                        biscuit_roaring_free(multibyte_result);
+                        if (result) biscuit_roaring_free(result);
+                        return biscuit_roaring_create();
+                    }
                 }
+            }
+            
+            if (first_concrete) {
+                result = multibyte_result;
+                first_concrete = false;
+            } else {
+                biscuit_roaring_and_inplace(result, multibyte_result);
+                biscuit_roaring_free(multibyte_result);
+                if (biscuit_roaring_is_empty(result))
+                    return result;
             }
         }
         
-        part_byte_pos += char_len;
-        char_offset_from_end++;
+        part_byte_pos += char_byte_len;
+        char_index++;
     }
     
     /* All wildcards case */
     if (concrete_chars == 0) {
+        if (result) biscuit_roaring_free(result);
         result = biscuit_get_col_length_ge_lower(col, pattern_char_count);
     } else {
         len_filter = biscuit_get_col_length_ge_lower(col, pattern_char_count);
         if (len_filter) {
-            biscuit_roaring_and_inplace(result, len_filter);
-            biscuit_roaring_free(len_filter);
+            if (result) {
+                biscuit_roaring_and_inplace(result, len_filter);
+            } else {
+                result = len_filter;
+                len_filter = NULL;
+            }
+            if (len_filter) biscuit_roaring_free(len_filter);
         }
     }
     
-    return result;
+    return result ? result : biscuit_roaring_create();
 }
-
 /* ==================== FIXED: UTF-8-AWARE RECURSIVE WINDOWED MATCHING (MULTI-COLUMN) ==================== */
 
 /*
  * Recursive windowed matching for multi-column patterns (case-sensitive)
- * Handles multi-byte UTF-8 characters correctly
+ * Handles CHARACTER-based positioning for multi-byte UTF-8
  */
 static void 
 biscuit_recursive_windowed_match_col(
     RoaringBitmap *result, ColumnIndex *col,
-    const char **parts, int *part_lens, int part_count,
-    bool ends_percent, int part_idx, int min_pos,
-    RoaringBitmap *current_candidates, int max_len)
+    const char **parts, int *part_byte_lens, int part_count,
+    bool ends_percent, int part_idx, int min_char_pos,
+    RoaringBitmap *current_candidates, int max_char_len)
 {
-    int remaining_len, max_pos, pos, i;
+    int remaining_char_len, max_char_pos, char_pos, i;
     RoaringBitmap *end_match;
     RoaringBitmap *length_constraint;
     RoaringBitmap *part_match;
     RoaringBitmap *next_candidates;
-    int min_required_length;
-    int next_min_pos;
+    int min_required_char_length;
+    int next_min_char_pos;
     
-    /* Base case: all parts have been matched */
+    /* Base case: all parts matched */
     if (part_idx >= part_count) {
         biscuit_roaring_or_inplace(result, current_candidates);
         return;
     }
     
     /* Calculate minimum CHARACTER length needed for remaining parts */
-    remaining_len = 0;
+    remaining_char_len = 0;
     for (i = part_idx + 1; i < part_count; i++) {
-        remaining_len += biscuit_utf8_char_count(parts[i], part_lens[i]);
+        remaining_char_len += biscuit_utf8_char_count(parts[i], part_byte_lens[i]);
     }
     
-    /* CRITICAL FIX: Last part without trailing % must match at end */
+    /* Last part without trailing % must match at end */
     if (part_idx == part_count - 1 && !ends_percent) {
-        /* Use negative indexing to match at the end */
-        end_match = biscuit_match_col_part_at_end(col, parts[part_idx], part_lens[part_idx]);
+        end_match = biscuit_match_col_part_at_end(col, parts[part_idx], part_byte_lens[part_idx]);
         
         if (!end_match) {
             return;
         }
         
-        /* Intersect with current candidates */
         biscuit_roaring_and_inplace(end_match, current_candidates);
         
         /* Ensure minimum CHARACTER length constraint */
-        min_required_length = min_pos + biscuit_utf8_char_count(parts[part_idx], part_lens[part_idx]);
-        length_constraint = biscuit_get_col_length_ge(col, min_required_length);
+        min_required_char_length = min_char_pos + biscuit_utf8_char_count(parts[part_idx], part_byte_lens[part_idx]);
+        length_constraint = biscuit_get_col_length_ge(col, min_required_char_length);
         if (length_constraint) {
             biscuit_roaring_and_inplace(end_match, length_constraint);
             biscuit_roaring_free(length_constraint);
         }
         
-        /* Add to result */
         biscuit_roaring_or_inplace(result, end_match);
         biscuit_roaring_free(end_match);
         return;
     }
     
     /* Middle part: try all valid CHARACTER positions */
-    int current_part_char_len = biscuit_utf8_char_count(parts[part_idx], part_lens[part_idx]);
-    max_pos = max_len - current_part_char_len - remaining_len;
+    int current_part_char_len = biscuit_utf8_char_count(parts[part_idx], part_byte_lens[part_idx]);
+    max_char_pos = max_char_len - current_part_char_len - remaining_char_len;
     
-    if (min_pos > max_pos) {
+    if (min_char_pos > max_char_pos) {
         /* No valid position for this part */
         return;
     }
     
     /* Try each valid CHARACTER position for current part */
-    for (pos = min_pos; pos <= max_pos; pos++) {
+    for (char_pos = min_char_pos; char_pos <= max_char_pos; char_pos++) {
         /* Match part at this CHARACTER position */
-        part_match = biscuit_match_col_part_at_pos(col, parts[part_idx], part_lens[part_idx], pos);
+        part_match = biscuit_match_col_part_at_pos(col, parts[part_idx], part_byte_lens[part_idx], char_pos);
         
         if (!part_match) {
             continue;
         }
         
-        /* Intersect with current candidates */
         next_candidates = biscuit_roaring_copy(current_candidates);
         biscuit_roaring_and_inplace(next_candidates, part_match);
         biscuit_roaring_free(part_match);
         
-        /* Skip if no matches at this position */
         if (biscuit_roaring_is_empty(next_candidates)) {
             biscuit_roaring_free(next_candidates);
             continue;
         }
         
         /* Recurse for next part with updated CHARACTER position */
-        next_min_pos = pos + current_part_char_len;
+        next_min_char_pos = char_pos + current_part_char_len;
         
         biscuit_recursive_windowed_match_col(
-            result, col, parts, part_lens, part_count,
-            ends_percent, part_idx + 1, next_min_pos, 
-            next_candidates, max_len
+            result, col, parts, part_byte_lens, part_count,
+            ends_percent, part_idx + 1, next_min_char_pos, 
+            next_candidates, max_char_len
         );
         
         biscuit_roaring_free(next_candidates);
@@ -7240,22 +7335,22 @@ biscuit_recursive_windowed_match_col(
 
 /*
  * Recursive windowed matching for multi-column patterns (case-insensitive)
- * Handles multi-byte UTF-8 characters correctly
+ * Handles CHARACTER-based positioning for multi-byte UTF-8
  */
 static void 
 biscuit_recursive_windowed_match_col_ilike(
     RoaringBitmap *result, ColumnIndex *col,
-    const char **parts, int *part_lens, int part_count,
-    bool ends_percent, int part_idx, int min_pos,
-    RoaringBitmap *current_candidates, int max_len)
+    const char **parts, int *part_byte_lens, int part_count,
+    bool ends_percent, int part_idx, int min_char_pos,
+    RoaringBitmap *current_candidates, int max_char_len)
 {
-    int remaining_len, max_pos, pos, i;
+    int remaining_char_len, max_char_pos, char_pos, i;
     RoaringBitmap *end_match;
     RoaringBitmap *length_constraint;
     RoaringBitmap *part_match;
     RoaringBitmap *next_candidates;
-    int min_required_length;
-    int next_min_pos;
+    int min_required_char_length;
+    int next_min_char_pos;
     
     /* Base case */
     if (part_idx >= part_count) {
@@ -7264,14 +7359,14 @@ biscuit_recursive_windowed_match_col_ilike(
     }
     
     /* Calculate minimum CHARACTER length for remaining parts */
-    remaining_len = 0;
+    remaining_char_len = 0;
     for (i = part_idx + 1; i < part_count; i++) {
-        remaining_len += biscuit_utf8_char_count(parts[i], part_lens[i]);
+        remaining_char_len += biscuit_utf8_char_count(parts[i], part_byte_lens[i]);
     }
     
     /* Last part without trailing % must match at end */
     if (part_idx == part_count - 1 && !ends_percent) {
-        end_match = biscuit_match_col_part_at_end_ilike(col, parts[part_idx], part_lens[part_idx]);
+        end_match = biscuit_match_col_part_at_end_ilike(col, parts[part_idx], part_byte_lens[part_idx]);
         
         if (!end_match) {
             return;
@@ -7280,8 +7375,8 @@ biscuit_recursive_windowed_match_col_ilike(
         biscuit_roaring_and_inplace(end_match, current_candidates);
         
         /* CHARACTER length constraint */
-        min_required_length = min_pos + biscuit_utf8_char_count(parts[part_idx], part_lens[part_idx]);
-        length_constraint = biscuit_get_col_length_ge_lower(col, min_required_length);
+        min_required_char_length = min_char_pos + biscuit_utf8_char_count(parts[part_idx], part_byte_lens[part_idx]);
+        length_constraint = biscuit_get_col_length_ge_lower(col, min_required_char_length);
         if (length_constraint) {
             biscuit_roaring_and_inplace(end_match, length_constraint);
             biscuit_roaring_free(length_constraint);
@@ -7293,15 +7388,15 @@ biscuit_recursive_windowed_match_col_ilike(
     }
     
     /* Try all valid CHARACTER positions */
-    int current_part_char_len = biscuit_utf8_char_count(parts[part_idx], part_lens[part_idx]);
-    max_pos = max_len - current_part_char_len - remaining_len;
+    int current_part_char_len = biscuit_utf8_char_count(parts[part_idx], part_byte_lens[part_idx]);
+    max_char_pos = max_char_len - current_part_char_len - remaining_char_len;
     
-    if (min_pos > max_pos) {
+    if (min_char_pos > max_char_pos) {
         return;
     }
     
-    for (pos = min_pos; pos <= max_pos; pos++) {
-        part_match = biscuit_match_col_part_at_pos_ilike(col, parts[part_idx], part_lens[part_idx], pos);
+    for (char_pos = min_char_pos; char_pos <= max_char_pos; char_pos++) {
+        part_match = biscuit_match_col_part_at_pos_ilike(col, parts[part_idx], part_byte_lens[part_idx], char_pos);
         
         if (!part_match) {
             continue;
@@ -7317,12 +7412,12 @@ biscuit_recursive_windowed_match_col_ilike(
         }
         
         /* CHARACTER position advancement */
-        next_min_pos = pos + current_part_char_len;
+        next_min_char_pos = char_pos + current_part_char_len;
         
         biscuit_recursive_windowed_match_col_ilike(
-            result, col, parts, part_lens, part_count,
-            ends_percent, part_idx + 1, next_min_pos, 
-            next_candidates, max_len
+            result, col, parts, part_byte_lens, part_count,
+            ends_percent, part_idx + 1, next_min_char_pos, 
+            next_candidates, max_char_len
         );
         
         biscuit_roaring_free(next_candidates);
@@ -7435,7 +7530,7 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
             if (!parsed->starts_percent && !parsed->ends_percent) {
                 /* EXACT match */
                 result = biscuit_match_col_part_at_pos(col, parsed->parts[0], 
-                                                    parsed->part_lens[0], 0);
+                                                    parsed->part_byte_lens[0], 0);
                 if (result && min_len <= col->max_length && col->length_bitmaps[min_len]) {
                     biscuit_roaring_and_inplace(result, col->length_bitmaps[min_len]);
                 } else if (result) {
@@ -7447,25 +7542,227 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
             } else if (!parsed->starts_percent) {
                 /* PREFIX match */
                 result = biscuit_match_col_part_at_pos(col, parsed->parts[0], 
-                                                    parsed->part_lens[0], 0);
+                                                    parsed->part_byte_lens[0], 0);
                 if (!result) result = biscuit_roaring_create();
             } else if (!parsed->ends_percent) {
                 /* SUFFIX match */
                 result = biscuit_match_col_part_at_end(col, parsed->parts[0], 
-                                                    parsed->part_lens[0]);
+                                                    parsed->part_byte_lens[0]);
                 if (!result) result = biscuit_roaring_create();
             } else {
-                /* SUBSTRING match */
+                /* ==================== FIXED: SUBSTRING MATCH (MULTI-COLUMN) ==================== */
+                /* Pattern: '%abc%' - must validate complete UTF-8 characters */
+                
                 result = biscuit_roaring_create();
-                int max_len = col->max_length;
-                for (i = 0; i <= max_len - parsed->part_lens[0]; i++) {
-                    RoaringBitmap *part_match = biscuit_match_col_part_at_pos(
-                        col, parsed->parts[0], parsed->part_lens[0], i);
-                    if (part_match) {
-                        biscuit_roaring_or_inplace(result, part_match);
-                        biscuit_roaring_free(part_match);
+                
+                RoaringBitmap *candidates = NULL;
+                int part_byte_len = parsed->part_byte_lens[0];
+                int part_char_len = parsed->part_lens[0];
+                
+                /* Get candidates using first concrete byte of pattern */
+                if (part_byte_len > 0) {
+                    unsigned char first_byte = (unsigned char)parsed->parts[0][0];
+                    
+                    /* Skip underscores to find first concrete byte */
+                    int scan_pos = 0;
+                    while (scan_pos < part_byte_len && parsed->parts[0][scan_pos] == '_') {
+                        scan_pos++;
+                    }
+                    
+                    if (scan_pos < part_byte_len) {
+                        first_byte = (unsigned char)parsed->parts[0][scan_pos];
+                        
+                        /* Get all records with this byte */
+                        if (col->char_cache[first_byte]) {
+                            candidates = biscuit_roaring_copy(col->char_cache[first_byte]);
+                        }
                     }
                 }
+                
+                if (!candidates) {
+                    candidates = biscuit_roaring_create();
+                    #ifdef HAVE_ROARING
+                    roaring_bitmap_add_range(candidates, 0, idx->num_records);
+                    #else
+                    for (i = 0; i < idx->num_records; i++) {
+                        biscuit_roaring_add(candidates, i);
+                    }
+                    #endif
+                }
+                
+                /* Apply length filter */
+                RoaringBitmap *length_filter = biscuit_get_col_length_ge(col, part_char_len);
+                if (length_filter) {
+                    biscuit_roaring_and_inplace(candidates, length_filter);
+                    biscuit_roaring_free(length_filter);
+                }
+                
+                /* ✅ FIX: Validate each candidate with CHARACTER-BY-CHARACTER matching */
+                #ifdef HAVE_ROARING
+                roaring_uint32_iterator_t *iter = roaring_create_iterator(candidates);
+                
+                while (iter->has_value) {
+                    uint32_t rec_idx = iter->current_value;
+                    
+                    if (rec_idx < (uint32_t)idx->num_records && 
+                        idx->column_data_cache && 
+                        idx->column_data_cache[col_idx] &&
+                        idx->column_data_cache[col_idx][rec_idx]) {
+                        
+                        char *haystack = idx->column_data_cache[col_idx][rec_idx];
+                        int haystack_byte_len = strlen(haystack);
+                        int haystack_char_len = biscuit_utf8_char_count(haystack, haystack_byte_len);
+                        
+                        /* Try matching pattern at each CHARACTER position */
+                        bool found = false;
+                        int char_pos;
+                        for (char_pos = 0; char_pos <= haystack_char_len - part_char_len && !found; char_pos++) {
+                            /* Convert character position to byte offset */
+                            int byte_offset = biscuit_utf8_char_to_byte_offset(haystack, haystack_byte_len, char_pos);
+                            
+                            if (byte_offset < 0)
+                                continue;
+                            
+                            /* ✅ KEY FIX: Match CHARACTER by CHARACTER */
+                            bool match = true;
+                            int pattern_byte = 0;
+                            int haystack_byte = byte_offset;
+                            
+                            while (pattern_byte < part_byte_len && haystack_byte < haystack_byte_len && match) {
+                                /* Handle underscore wildcard */
+                                if (parsed->parts[0][pattern_byte] == '_') {
+                                    int hay_char_len = biscuit_utf8_char_length((unsigned char)haystack[haystack_byte]);
+                                    haystack_byte += hay_char_len;
+                                    pattern_byte++;
+                                    continue;
+                                }
+                                
+                                /* Get lengths of current UTF-8 characters */
+                                int pattern_char_len = biscuit_utf8_char_length((unsigned char)parsed->parts[0][pattern_byte]);
+                                int hay_char_len = biscuit_utf8_char_length((unsigned char)haystack[haystack_byte]);
+                                
+                                /* Character lengths must match */
+                                if (pattern_char_len != hay_char_len) {
+                                    match = false;
+                                    break;
+                                }
+                                
+                                /* Compare all bytes of the multi-byte character */
+                                int b;
+                                for (b = 0; b < pattern_char_len; b++) {
+                                    if (pattern_byte + b >= part_byte_len || 
+                                        haystack_byte + b >= haystack_byte_len ||
+                                        parsed->parts[0][pattern_byte + b] != haystack[haystack_byte + b]) {
+                                        match = false;
+                                        break;
+                                    }
+                                }
+                                
+                                if (!match)
+                                    break;
+                                
+                                /* Advance by full character length */
+                                pattern_byte += pattern_char_len;
+                                haystack_byte += hay_char_len;
+                            }
+                            
+                            /* Verify we consumed the entire pattern */
+                            if (match && pattern_byte == part_byte_len) {
+                                found = true;
+                            }
+                        }
+                        
+                        if (found) {
+                            biscuit_roaring_add(result, rec_idx);
+                        }
+                    }
+                    
+                    roaring_advance_uint32_iterator(iter);
+                }
+                
+                roaring_free_uint32_iterator(iter);
+                #else
+                {
+                    uint32_t *indices;
+                    uint64_t count;
+                    int j;
+                    
+                    indices = biscuit_roaring_to_array(candidates, &count);
+                    
+                    if (indices) {
+                        for (j = 0; j < (int)count; j++) {
+                            uint32_t rec_idx = indices[j];
+                            
+                            if (rec_idx < (uint32_t)idx->num_records && 
+                                idx->column_data_cache && 
+                                idx->column_data_cache[col_idx] &&
+                                idx->column_data_cache[col_idx][rec_idx]) {
+                                
+                                char *haystack = idx->column_data_cache[col_idx][rec_idx];
+                                int haystack_byte_len = strlen(haystack);
+                                int haystack_char_len = biscuit_utf8_char_count(haystack, haystack_byte_len);
+                                
+                                bool found = false;
+                                int char_pos;
+                                for (char_pos = 0; char_pos <= haystack_char_len - part_char_len && !found; char_pos++) {
+                                    int byte_offset = biscuit_utf8_char_to_byte_offset(haystack, haystack_byte_len, char_pos);
+                                    
+                                    if (byte_offset < 0)
+                                        continue;
+                                    
+                                    bool match = true;
+                                    int pattern_byte = 0;
+                                    int haystack_byte = byte_offset;
+                                    
+                                    while (pattern_byte < part_byte_len && haystack_byte < haystack_byte_len && match) {
+                                        if (parsed->parts[0][pattern_byte] == '_') {
+                                            int hay_char_len = biscuit_utf8_char_length((unsigned char)haystack[haystack_byte]);
+                                            haystack_byte += hay_char_len;
+                                            pattern_byte++;
+                                            continue;
+                                        }
+                                        
+                                        int pattern_char_len = biscuit_utf8_char_length((unsigned char)parsed->parts[0][pattern_byte]);
+                                        int hay_char_len = biscuit_utf8_char_length((unsigned char)haystack[haystack_byte]);
+                                        
+                                        if (pattern_char_len != hay_char_len) {
+                                            match = false;
+                                            break;
+                                        }
+                                        
+                                        int b;
+                                        for (b = 0; b < pattern_char_len; b++) {
+                                            if (pattern_byte + b >= part_byte_len || 
+                                                haystack_byte + b >= haystack_byte_len ||
+                                                parsed->parts[0][pattern_byte + b] != haystack[haystack_byte + b]) {
+                                                match = false;
+                                                break;
+                                            }
+                                        }
+                                        
+                                        if (!match)
+                                            break;
+                                        
+                                        pattern_byte += pattern_char_len;
+                                        haystack_byte += hay_char_len;
+                                    }
+                                    
+                                    if (match && pattern_byte == part_byte_len) {
+                                        found = true;
+                                    }
+                                }
+                                
+                                if (found) {
+                                    biscuit_roaring_add(result, rec_idx);
+                                }
+                            }
+                        }
+                        pfree(indices);
+                    }
+                }
+                #endif
+                
+                biscuit_roaring_free(candidates);
             }
         }
         /* ==================== OPTIMIZED TWO PART PATTERNS ==================== */
@@ -7476,9 +7773,9 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
             RoaringBitmap *length_filter;
             
             prefix_match = biscuit_match_col_part_at_pos(col, parsed->parts[0], 
-                                                        parsed->part_lens[0], 0);
+                                                        parsed->part_byte_lens[0], 0);
             suffix_match = biscuit_match_col_part_at_end(col, parsed->parts[1], 
-                                                        parsed->part_lens[1]);
+                                                        parsed->part_byte_lens[1]);
             
             if (!prefix_match || !suffix_match) {
                 if (prefix_match) biscuit_roaring_free(prefix_match);
@@ -7509,7 +7806,7 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
             } else {
                 if (!parsed->starts_percent) {
                     RoaringBitmap *first_part_match = biscuit_match_col_part_at_pos(
-                        col, parsed->parts[0], parsed->part_lens[0], 0);
+                        col, parsed->parts[0], parsed->part_byte_lens[0], 0);
                     
                     if (first_part_match) {
                         biscuit_roaring_and_inplace(first_part_match, candidates);
@@ -7518,7 +7815,7 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
                         if (!biscuit_roaring_is_empty(first_part_match)) {
                             biscuit_recursive_windowed_match_col(
                                 result, col,
-                                (const char **)parsed->parts, parsed->part_lens,
+                                (const char **)parsed->parts, parsed->part_byte_lens,
                                 parsed->part_count, parsed->ends_percent,
                                 1, parsed->part_lens[0], first_part_match, col->max_length
                             );
@@ -7530,7 +7827,7 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
                 } else {
                     biscuit_recursive_windowed_match_col(
                         result, col,
-                        (const char **)parsed->parts, parsed->part_lens,
+                        (const char **)parsed->parts, parsed->part_byte_lens,
                         parsed->part_count, parsed->ends_percent,
                         0, 0, candidates, col->max_length
                     );
@@ -7581,10 +7878,8 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
     
     col = &idx->column_indices[col_idx];
     
-    
-    
-    if (col->max_length <= 0) {
-        elog(WARNING, "Biscuit: Column %d has invalid max_length=%d", col_idx, col->max_length);
+    if (col->max_length_lower <= 0) {
+        elog(WARNING, "Biscuit: Column %d has invalid max_length_lower=%d", col_idx, col->max_length_lower);
         return biscuit_roaring_create();
     }
     
@@ -7596,8 +7891,9 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
     {
         /* ========== FAST PATH 1: Empty pattern '' ========== */
         if (plen == 0) {
-            if (col->length_bitmaps && col->length_bitmaps[0]) {
-                result = biscuit_roaring_copy(col->length_bitmaps[0]);
+            /* ✅ FIX: Use lowercase length bitmaps */
+            if (col->length_bitmaps_lower && col->length_bitmaps_lower[0]) {
+                result = biscuit_roaring_copy(col->length_bitmaps_lower[0]);
             } else {
                 result = biscuit_roaring_create();
             }
@@ -7607,8 +7903,9 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
         
         /* ========== FAST PATH 2: Single '%' matches everything ========== */
         if (plen == 1 && pattern_lower[0] == '%') {
-            if (col->length_ge_bitmaps && col->length_ge_bitmaps[0]) {
-                result = biscuit_roaring_copy(col->length_ge_bitmaps[0]);
+            /* ✅ FIX: Use lowercase length_ge bitmaps */
+            if (col->length_ge_bitmaps_lower && col->length_ge_bitmaps_lower[0]) {
+                result = biscuit_roaring_copy(col->length_ge_bitmaps_lower[0]);
             } else {
                 result = biscuit_roaring_create();
             }
@@ -7631,18 +7928,20 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
         /* ========== FAST PATH 4 & 5: Pure wildcard patterns ========== */
         if (only_wildcards) {
             if (percent_count > 0) {
-                /* FAST PATH 4: Has %, so length >= wildcard_count */
-                if (wildcard_count <= col->max_length && 
-                    col->length_ge_bitmaps[wildcard_count]) {
-                    result = biscuit_roaring_copy(col->length_ge_bitmaps[wildcard_count]);
+                /* ✅ FIX: Use lowercase length_ge bitmaps */
+                if (wildcard_count <= col->max_length_lower && 
+                    col->length_ge_bitmaps_lower && 
+                    col->length_ge_bitmaps_lower[wildcard_count]) {
+                    result = biscuit_roaring_copy(col->length_ge_bitmaps_lower[wildcard_count]);
                 } else {
                     result = biscuit_roaring_create();
                 }
             } else {
-                /* FAST PATH 5: Only underscores → EXACT length match */
-                if (wildcard_count <= col->max_length && 
-                    col->length_bitmaps[wildcard_count]) {
-                    result = biscuit_roaring_copy(col->length_bitmaps[wildcard_count]);
+                /* ✅ FIX: Use lowercase length bitmaps for exact match */
+                if (wildcard_count <= col->max_length_lower && 
+                    col->length_bitmaps_lower && 
+                    col->length_bitmaps_lower[wildcard_count]) {
+                    result = biscuit_roaring_copy(col->length_bitmaps_lower[wildcard_count]);
                 } else {
                     result = biscuit_roaring_create();
                 }
@@ -7658,8 +7957,9 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
         
         /* All percent signs */
         if (parsed->part_count == 0) {
-            if (col->length_ge_bitmaps && col->length_ge_bitmaps[0]) {
-                result = biscuit_roaring_copy(col->length_ge_bitmaps[0]);
+            /* ✅ FIX: Use lowercase length_ge bitmaps */
+            if (col->length_ge_bitmaps_lower && col->length_ge_bitmaps_lower[0]) {
+                result = biscuit_roaring_copy(col->length_ge_bitmaps_lower[0]);
             } else {
                 result = biscuit_roaring_create();
             }
@@ -7678,31 +7978,34 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
             if (!parsed->starts_percent && !parsed->ends_percent) {
                 /* EXACT: 'abc' or 'a_c' */
                 result = biscuit_match_col_part_at_pos_ilike(col, parsed->parts[0], 
-                                                             parsed->part_lens[0], 0);
-                if (result && min_len <= col->max_length && 
-                    col->length_bitmaps[min_len]) {
-                    biscuit_roaring_and_inplace(result, col->length_bitmaps[min_len]);
+                                                             parsed->part_byte_lens[0], 0);
+                /* ✅ FIX: Use lowercase length bitmaps */
+                if (result && min_len <= col->max_length_lower && 
+                    col->length_bitmaps_lower && 
+                    col->length_bitmaps_lower[min_len]) {
+                    biscuit_roaring_and_inplace(result, col->length_bitmaps_lower[min_len]);
                 } 
-                else if (!result || min_len > col->max_length) {
+                else if (!result || min_len > col->max_length_lower) {
                     if (result) biscuit_roaring_free(result);
                     result = biscuit_roaring_create();
                 }
             } else if (!parsed->starts_percent) {
                 /* PREFIX: 'abc%' */
                 result = biscuit_match_col_part_at_pos_ilike(col, parsed->parts[0], 
-                                                             parsed->part_lens[0], 0);
+                                                             parsed->part_byte_lens[0], 0);
                 if (!result) result = biscuit_roaring_create();
             } else if (!parsed->ends_percent) {
                 /* SUFFIX: '%abc' */
                 result = biscuit_match_col_part_at_end_ilike(col, parsed->parts[0], 
-                                                             parsed->part_lens[0]);
+                                                             parsed->part_byte_lens[0]);
                 if (!result) result = biscuit_roaring_create();
             } else {
                 /* SUBSTRING: '%abc%' */
                 result = biscuit_roaring_create();
-                for (i = 0; i <= col->max_length - parsed->part_lens[0]; i++) {
+                /* ✅ FIX: Use max_length_lower instead of max_length */
+                for (i = 0; i <= col->max_length_lower - parsed->part_lens[0]; i++) {
                     RoaringBitmap *part_match = biscuit_match_col_part_at_pos_ilike(
-                        col, parsed->parts[0], parsed->part_lens[0], i);
+                        col, parsed->parts[0], parsed->part_byte_lens[0], i);
                     if (part_match) {
                         biscuit_roaring_or_inplace(result, part_match);
                         biscuit_roaring_free(part_match);
@@ -7718,9 +8021,9 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
             RoaringBitmap *length_filter;
             
             prefix_match = biscuit_match_col_part_at_pos_ilike(col, parsed->parts[0], 
-                                                               parsed->part_lens[0], 0);
+                                                               parsed->part_byte_lens[0], 0);
             suffix_match = biscuit_match_col_part_at_end_ilike(col, parsed->parts[1], 
-                                                               parsed->part_lens[1]);
+                                                               parsed->part_byte_lens[1]);
             
             if (!prefix_match || !suffix_match) {
                 if (prefix_match) biscuit_roaring_free(prefix_match);
@@ -7730,6 +8033,7 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
                 biscuit_roaring_and_inplace(prefix_match, suffix_match);
                 biscuit_roaring_free(suffix_match);
                 
+                /* ✅ FIX: Use lowercase length_ge bitmaps */
                 length_filter = biscuit_get_col_length_ge_lower(col, min_len);
                 if (length_filter) {
                     biscuit_roaring_and_inplace(prefix_match, length_filter);
@@ -7744,6 +8048,7 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
             RoaringBitmap *candidates;
             
             result = biscuit_roaring_create();
+            /* ✅ FIX: Use lowercase length_ge bitmaps */
             candidates = biscuit_get_col_length_ge_lower(col, min_len);
             
             if (!candidates || biscuit_roaring_is_empty(candidates)) {
@@ -7751,19 +8056,20 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
             } else {
                 if (!parsed->starts_percent) {
                     RoaringBitmap *first_part_match = biscuit_match_col_part_at_pos_ilike(
-                        col, parsed->parts[0], parsed->part_lens[0], 0);
+                        col, parsed->parts[0], parsed->part_byte_lens[0], 0);
                     
                     if (first_part_match) {
                         biscuit_roaring_and_inplace(first_part_match, candidates);
                         biscuit_roaring_free(candidates);
                         
                         if (!biscuit_roaring_is_empty(first_part_match)) {
+                            /* ✅ FIX: Use max_length_lower */
                             biscuit_recursive_windowed_match_col_ilike(
                                 result, col,
-                                (const char **)parsed->parts, parsed->part_lens,
+                                (const char **)parsed->parts, parsed->part_byte_lens,
                                 parsed->part_count, parsed->ends_percent,
                                 1, parsed->part_lens[0], first_part_match, 
-                                col->max_length
+                                col->max_length_lower  /* ← CHANGED */
                             );
                         }
                         biscuit_roaring_free(first_part_match);
@@ -7771,11 +8077,12 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
                         biscuit_roaring_free(candidates);
                     }
                 } else {
+                    /* ✅ FIX: Use max_length_lower */
                     biscuit_recursive_windowed_match_col_ilike(
                         result, col,
-                        (const char **)parsed->parts, parsed->part_lens,
+                        (const char **)parsed->parts, parsed->part_byte_lens,
                         parsed->part_count, parsed->ends_percent,
-                        0, 0, candidates, col->max_length
+                        0, 0, candidates, col->max_length_lower  /* ← CHANGED */
                     );
                     biscuit_roaring_free(candidates);
                 }
@@ -7802,7 +8109,6 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
     
     return result ? result : biscuit_roaring_create();
 }
-
 /* ==================== OPTIMIZED MULTI-COLUMN RESCAN ==================== */
 
 

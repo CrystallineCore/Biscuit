@@ -9,47 +9,23 @@
 
 ---
 
-## What's new in 2.2.0?
+## What's new in 2.2.1?
 
-### ✨ Major Changes
+### 🐞 Bug Fixes
 
-**Switched from byte-based to character-based indexing**
+* **Fixed recursive pattern matching**
 
-* Biscuit now indexes **Unicode characters instead of raw UTF-8 bytes**.
-* Eliminates incorrect behavior caused by multi-byte UTF-8 sequences being treated as independent index entries.
-* Index structure now aligns with PostgreSQL’s character semantics rather than byte-level representation.
+  Resolved incorrect behavior when evaluating nested or repeated wildcard patterns during recursive matching.
 
-### 🛠️ UTF-8 & Internationalization Improvements
+* **Corrected underscore (`_`) handling in single-column indexing**
 
-**Enhanced UTF-8 compatibility**
+  `_` now correctly operates on character-based offsets (not byte offsets), in accordance with SQL `LIKE` / `ILIKE` semantics, eliminating false matches in multi-byte UTF-8 text.
 
-* Improved handling of multi-byte UTF-8 characters (e.g., accented Latin characters, non-Latin scripts).
-* Index lookups, comparisons, and filtering now operate on logical characters rather than byte fragments.
 
-**Correct UTF-8 support for `ILIKE`**
+### 🛡️ Correctness & Stability
 
-* `ILIKE` now works reliably with UTF-8 text, including case-insensitive matching on multi-byte characters.
-* Fixes previously incorrect matches and missed results in non-ASCII datasets.
-
-### 🐛 CRUD Correctness Fixes
-
-**Resolved multiple CRUD-related bugs**
-
-* Fixed inconsistencies during **INSERT**, **UPDATE**, and **DELETE** operations that could leave the index in an incorrect state.
-* Ensured index entries are properly added, updated, and removed in sync with heap tuples.
-* Improved stability under mixed read/write workloads.
-
-### 🛡️ Correctness & Planner Consistency
-
-* Improved alignment between Biscuit’s index behavior and PostgreSQL’s text semantics.
-* Reduced false positives during pattern matching and eliminated character-splitting artifacts.
-* More predictable planner behavior due to improved index consistency.
-
-### 🔧 Internal Refactoring
-
-* Refactored index layout and lookup logic to support character-aware traversal.
-* Hardened UTF-8 decoding paths and edge-case handling.
-* Simplified internal invariants for better maintainability and debugging.
+* Improved internal consistency between single-column and multi-column pattern evaluation paths.
+* Resolved observed edge cases that could lead to incorrect matches under complex wildcard patterns.
 
 ---
 

@@ -1,5 +1,25 @@
 # Biscuit Index Extension - Changelog
 
+## Version 2.2.1
+
+### 🐞 Bug Fixes
+
+* **Fixed recursive pattern matching**
+
+  Resolved incorrect behavior when evaluating nested or repeated wildcard patterns during recursive matching.
+
+* **Corrected underscore (`_`) handling in single-column indexing**
+
+  `_` now correctly operates on character-based offsets (not byte offsets), in accordance with SQL `LIKE` / `ILIKE` semantics, eliminating false matches in multi-byte UTF-8 text.
+
+
+### 🛡️ Correctness & Stability
+
+* Improved internal consistency between single-column and multi-column pattern evaluation paths.
+* Resolved observed edge cases that could lead to incorrect matches under complex wildcard patterns.
+
+---
+
 ## Version 2.2.0
 
 ### ✨ Major Changes

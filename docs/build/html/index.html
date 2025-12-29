@@ -1138,53 +1138,24 @@
 <li><p><strong>Memory Efficient</strong>: Uses Roaring Bitmaps for compact in-memory representation</p></li>
 </ul>
 </section>
-<section id="version-2-2-0">
-<h2>Version 2.2.0<a class="headerlink" href="#version-2-2-0" title="Link to this heading"></a></h2>
-<section id="major-changes">
-<h3>✨ Major Changes<a class="headerlink" href="#major-changes" title="Link to this heading"></a></h3>
-<p><strong>Switched from byte-based to character-based indexing</strong></p>
-<ul class="simple">
-<li><p>Biscuit now indexes <strong>Unicode characters instead of raw UTF-8 bytes</strong>.</p></li>
-<li><p>Eliminates incorrect behavior caused by multi-byte UTF-8 sequences being treated as independent index entries.</p></li>
-<li><p>Index structure now aligns with PostgreSQL’s character semantics rather than byte-level representation.</p></li>
+<section id="version-2-2-1">
+<h2>Version 2.2.1<a class="headerlink" href="#version-2-2-1" title="Link to this heading"></a></h2>
+<section id="bug-fixes">
+<h3>🐞 Bug Fixes<a class="headerlink" href="#bug-fixes" title="Link to this heading"></a></h3>
+<ul>
+<li><p><strong>Fixed recursive pattern matching</strong></p>
+<p>Resolved incorrect behavior when evaluating nested or repeated wildcard patterns during recursive matching.</p>
+</li>
+<li><p><strong>Corrected underscore (<code class="docutils literal notranslate"><span class="pre">_</span></code>) handling in single-column indexing</strong></p>
+<p><code class="docutils literal notranslate"><span class="pre">_</span></code> now correctly operates on character-based offsets (not byte offsets), in accordance with SQL <code class="docutils literal notranslate"><span class="pre">LIKE</span></code> / <code class="docutils literal notranslate"><span class="pre">ILIKE</span></code> semantics, eliminating false matches in multi-byte UTF-8 text.</p>
+</li>
 </ul>
 </section>
-<section id="utf-8-internationalization-improvements">
-<h3>🛠️ UTF-8 &amp; Internationalization Improvements<a class="headerlink" href="#utf-8-internationalization-improvements" title="Link to this heading"></a></h3>
-<p><strong>Enhanced UTF-8 compatibility</strong></p>
+<section id="correctness-stability">
+<h3>🛡️ Correctness &amp; Stability<a class="headerlink" href="#correctness-stability" title="Link to this heading"></a></h3>
 <ul class="simple">
-<li><p>Improved handling of multi-byte UTF-8 characters (e.g., accented Latin characters, non-Latin scripts).</p></li>
-<li><p>Index lookups, comparisons, and filtering now operate on logical characters rather than byte fragments.</p></li>
-</ul>
-<p><strong>Correct UTF-8 support for <code class="docutils literal notranslate"><span class="pre">ILIKE</span></code></strong></p>
-<ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">ILIKE</span></code> now works reliably with UTF-8 text, including case-insensitive matching on multi-byte characters.</p></li>
-<li><p>Fixes previously incorrect matches and missed results in non-ASCII datasets.</p></li>
-</ul>
-</section>
-<section id="crud-correctness-fixes">
-<h3>🐛 CRUD Correctness Fixes<a class="headerlink" href="#crud-correctness-fixes" title="Link to this heading"></a></h3>
-<p><strong>Resolved multiple CRUD-related bugs</strong></p>
-<ul class="simple">
-<li><p>Fixed inconsistencies during <strong>INSERT</strong>, <strong>UPDATE</strong>, and <strong>DELETE</strong> operations that could leave the index in an incorrect state.</p></li>
-<li><p>Ensured index entries are properly added, updated, and removed in sync with heap tuples.</p></li>
-<li><p>Improved stability under mixed read/write workloads.</p></li>
-</ul>
-</section>
-<section id="correctness-planner-consistency">
-<h3>🛡️ Correctness &amp; Planner Consistency<a class="headerlink" href="#correctness-planner-consistency" title="Link to this heading"></a></h3>
-<ul class="simple">
-<li><p>Improved alignment between Biscuit’s index behavior and PostgreSQL’s text semantics.</p></li>
-<li><p>Reduced false positives during pattern matching and eliminated character-splitting artifacts.</p></li>
-<li><p>More predictable planner behavior due to improved index consistency.</p></li>
-</ul>
-</section>
-<section id="internal-refactoring">
-<h3>🔧 Internal Refactoring<a class="headerlink" href="#internal-refactoring" title="Link to this heading"></a></h3>
-<ul class="simple">
-<li><p>Refactored index layout and lookup logic to support character-aware traversal.</p></li>
-<li><p>Hardened UTF-8 decoding paths and edge-case handling.</p></li>
-<li><p>Simplified internal invariants for better maintainability and debugging.</p></li>
+<li><p>Improved internal consistency between single-column and multi-column pattern evaluation paths.</p></li>
+<li><p>Resolved observed edge cases that could lead to incorrect matches under complex wildcard patterns.</p></li>
 </ul>
 </section>
 </section>
