@@ -82,18 +82,17 @@ clear_caches() {
 start_postgres() {
     log_info "Starting PostgreSQL..."
     sudo systemctl start postgresql
-    sleep 10  # Wait for PostgreSQL to fully start
-    
-    # Wait until PostgreSQL is ready
+    sleep 2  # Brief pause for systemctl to initiate startup
+    log_info "Waiting for PostgreSQL to accept connections..."
     for i in {1..30}; do
-        if sudo -u postgres psql -c "SELECT 1" > /dev/null 2>&1; then
+        if sudo -u postgres pg_isready -q; then
             log_info "PostgreSQL is ready"
             return 0
         fi
         sleep 1
     done
-    
-    log_error "PostgreSQL failed to start"
+    log_error "PostgreSQL failed to become ready"
+    sudo systemctl status postgresql --no-pager
     exit 1
 }
 
