@@ -1,7 +1,7 @@
 {
   "name": "biscuit",
-  "abstract": "A bitmap index optimized for LIKE and ILIKE wildcard pattern matching in PostgreSQL",
-  "description": "biscuit is a PostgreSQL index access method that accelerates LIKE and ILIKE wildcard pattern matching using in-memory bitmap indexing. It is designed for deterministic, case-insensitive, and multi-column pattern searches, complementing B-tree and pg_trgm indexes rather than replacing them.",
+  "abstract": "A bitmap index for wildcard pattern matching",
+  "description": "Biscuit is a fast bitmap-based deterministic pattern matching index for PostgreSQL.",
   "version": "2.2.1",
   "maintainer": [
     "Sivaprasad Murali <sivaprasad.off@gmail.com>"

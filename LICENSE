@@ -22,5 +22,5 @@ SOFTWARE.
 
 -------------------------------------------------------------------------------
 This software is part of the Biscuit PostgreSQL extension, which provides
-bitmap-based pattern matching for deterministic LIKE operations.
+bitmap-based pattern matching for deterministic LIKE/ILIKE operations.
 -------------------------------------------------------------------------------
