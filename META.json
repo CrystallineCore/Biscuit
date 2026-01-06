@@ -2,7 +2,7 @@
   "name": "biscuit",
   "abstract": "A bitmap index for wildcard pattern matching",
   "description": "Biscuit is a fast bitmap-based deterministic pattern matching index for PostgreSQL.",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "maintainer": [
     "Sivaprasad Murali <sivaprasad.off@gmail.com>"
   ],
@@ -11,7 +11,7 @@
     "biscuit": {
       "file": "sql/biscuit--1.0.sql",
       "docfile": "README.md",
-      "version": "2.2.1"
+      "version": "2.2.2"
     }
   },
   "tags": [

@@ -1,5 +1,23 @@
 # Biscuit Index Extension - Changelog
 
+
+## Version 2.2.2
+
+### ⚡ Performance Improvements
+
+* **Refined TID sorting implementation**
+
+  Replaced the previous hybrid dense/sparse block radix sorter with a uniform 4-pass radix sort covering the full 32-bit BlockNumber.
+
+  Sorting is now performed using four 8-bit passes, eliminating assumptions about block number density or range.
+
+### 🛡️ Correctness & Stability
+
+* **Aligned TID comparison with PostgreSQL core**
+
+  Replaced custom TID comparison logic with PostgreSQL’s native comparison routine to ensure consistent ordering behavior.
+
+
 ## Version 2.2.1
 
 ### 🐞 Bug Fixes

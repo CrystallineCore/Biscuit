@@ -575,7 +575,7 @@ RAISE NOTICE '';
 RAISE NOTICE '--- Index Memory Usage ---';
 END $$;
 
-SELECT pg_size_pretty(biscuit_index_memory_size('idx_biscuit_test'::regclass)) as memory_size;
+SELECT biscuit_size_pretty('idx_biscuit_test') as memory_size;
 
 DO $$
 BEGIN

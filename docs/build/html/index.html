@@ -1138,24 +1138,23 @@
 <li><p><strong>Memory Efficient</strong>: Uses Roaring Bitmaps for compact in-memory representation</p></li>
 </ul>
 </section>
-<section id="version-2-2-1">
-<h2>Version 2.2.1<a class="headerlink" href="#version-2-2-1" title="Link to this heading"></a></h2>
-<section id="bug-fixes">
-<h3>🐞 Bug Fixes<a class="headerlink" href="#bug-fixes" title="Link to this heading"></a></h3>
+<section id="version-2-2-2">
+<h2>Version 2.2.2<a class="headerlink" href="#version-2-2-2" title="Link to this heading"></a></h2>
+<section id="performance-improvements">
+<h3>⚡ Performance Improvements<a class="headerlink" href="#performance-improvements" title="Link to this heading"></a></h3>
 <ul>
-<li><p><strong>Fixed recursive pattern matching</strong></p>
-<p>Resolved incorrect behavior when evaluating nested or repeated wildcard patterns during recursive matching.</p>
-</li>
-<li><p><strong>Corrected underscore (<code class="docutils literal notranslate"><span class="pre">_</span></code>) handling in single-column indexing</strong></p>
-<p><code class="docutils literal notranslate"><span class="pre">_</span></code> now correctly operates on character-based offsets (not byte offsets), in accordance with SQL <code class="docutils literal notranslate"><span class="pre">LIKE</span></code> / <code class="docutils literal notranslate"><span class="pre">ILIKE</span></code> semantics, eliminating false matches in multi-byte UTF-8 text.</p>
+<li><p><strong>Refined TID sorting implementation</strong></p>
+<p>Replaced the previous hybrid dense/sparse block radix sorter with a uniform 4-pass radix sort covering the full 32-bit BlockNumber.</p>
+<p>Sorting is now performed using four 8-bit passes, eliminating assumptions about block number density or range.</p>
 </li>
 </ul>
 </section>
 <section id="correctness-stability">
 <h3>🛡️ Correctness &amp; Stability<a class="headerlink" href="#correctness-stability" title="Link to this heading"></a></h3>
-<ul class="simple">
-<li><p>Improved internal consistency between single-column and multi-column pattern evaluation paths.</p></li>
-<li><p>Resolved observed edge cases that could lead to incorrect matches under complex wildcard patterns.</p></li>
+<ul>
+<li><p><strong>Aligned TID comparison with PostgreSQL core</strong></p>
+<p>Replaced custom TID comparison logic with PostgreSQL’s native comparison routine to ensure consistent ordering behavior.</p>
+</li>
 </ul>
 </section>
 </section>

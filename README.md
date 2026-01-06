@@ -9,23 +9,21 @@
 
 ---
 
-## What's new in 2.2.1?
+## What's new in 2.2.2?
 
-### 🐞 Bug Fixes
+### ⚡ Performance Improvements
 
-* **Fixed recursive pattern matching**
+* **Refined TID sorting implementation**
 
-  Resolved incorrect behavior when evaluating nested or repeated wildcard patterns during recursive matching.
+  Replaced the previous hybrid dense/sparse block radix sorter with a uniform 4-pass radix sort covering the full 32-bit BlockNumber.
 
-* **Corrected underscore (`_`) handling in single-column indexing**
-
-  `_` now correctly operates on character-based offsets (not byte offsets), in accordance with SQL `LIKE` / `ILIKE` semantics, eliminating false matches in multi-byte UTF-8 text.
-
+  Sorting is now performed using four 8-bit passes, eliminating assumptions about block number density or range.
 
 ### 🛡️ Correctness & Stability
 
-* Improved internal consistency between single-column and multi-column pattern evaluation paths.
-* Resolved observed edge cases that could lead to incorrect matches under complex wildcard patterns.
+* **Aligned TID comparison with PostgreSQL core**
+
+  Replaced custom TID comparison logic with PostgreSQL’s native comparison routine to ensure consistent ordering behavior.
 
 ---
 

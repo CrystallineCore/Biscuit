@@ -31,6 +31,9 @@
 #include "access/htup_details.h"
 #include "utils/formatting.h"
 #include "utils/pg_locale.h"
+#include "mb/pg_wchar.h"
+#include "storage/itemptr.h"
+
 /*
 #ifdef HAVE_ROARING
 #pragma message("Biscuit: compiled WITH Roaring Bitmap support")
@@ -107,7 +110,7 @@ PG_FUNCTION_INFO_V1(biscuit_version);
 Datum
 biscuit_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("2.2.1"));
+    PG_RETURN_TEXT_P(cstring_to_text("2.2.2"));
 }
 
 // Get build information - Set-Returning Function
@@ -232,7 +235,7 @@ biscuit_build_info_json(PG_FUNCTION_ARGS)
     initStringInfo(&buf);
     
     appendStringInfo(&buf, "{");
-    appendStringInfo(&buf, "\"version\": \"2.2.1\",");
+    appendStringInfo(&buf, "\"version\": \"2.2.2\",");
     
 #ifdef HAVE_ROARING
     appendStringInfo(&buf, "\"roaring_enabled\": true,");
@@ -710,7 +713,7 @@ biscuit_utf8_validate_char(const char *str, int byte_pos, int byte_len)
  *   char_pos 2 → byte 2 ('f')
  *   char_pos 3 → byte 3 ('é' starts at 0xC3)
  */
-static int
+static inline int
 biscuit_utf8_char_to_byte_offset(const char *str, int byte_len, int char_pos)
 {
     int current_char = 0;
@@ -718,16 +721,15 @@ biscuit_utf8_char_to_byte_offset(const char *str, int byte_len, int char_pos)
     
     while (byte_pos < byte_len && current_char < char_pos) {
         int char_len = biscuit_utf8_char_length((unsigned char)str[byte_pos]);
-        
         if (byte_pos + char_len > byte_len)
             return -1;  // Invalid UTF-8
-        
         byte_pos += char_len;
         current_char++;
     }
     
     return (current_char == char_pos) ? byte_pos : -1;
 }
+
 /* ==================== QUERY TYPE DETECTION ==================== */
 
 /*
@@ -749,347 +751,212 @@ biscuit_utf8_char_to_byte_offset(const char *str, int byte_len, int char_pos)
 /* ==================== TYPE CONVERSION HELPER ==================== */
 
 /*
- * Convert ANY PostgreSQL datum to sortable text representation
+ * Convert text datum to string representation
+ * Currently supports: TEXT, VARCHAR, BPCHAR (char/character)
+ * 
+ * Future extensions can add support for other types by:
+ * 1. Adding operator class in SQL (e.g., biscuit_int_ops)
+ * 2. Adding case here for type conversion
+ * 3. Ensuring sortable string representation
  */
- static char*
+static char*
 biscuit_datum_to_text(Datum value, Oid typoid, FmgrInfo *outfunc, int *out_len)
 {
     char *result;
-    char *raw_text;
+    text *txt;
+    char *str;
+    int len;
     
-    /* Handle common types with optimized conversions */
     switch (typoid) {
-        case INT2OID:
-        case INT4OID:
-        case INT8OID:
-        {
-            int64 num;
-            char sign;  /* MOVED: declare at top of block */
-            uint64 abs_val;  /* MOVED: declare at top of block */
-            
-            if (typoid == INT2OID)
-                num = DatumGetInt16(value);
-            else if (typoid == INT4OID)
-                num = DatumGetInt32(value);
-            else
-                num = DatumGetInt64(value);
-            
-            /* FIXED: Sortable format with consistent width */
-            sign = (num >= 0) ? '+' : '-';  /* NOW after declarations */
-            abs_val = (num >= 0) ? num : -num;
-            result = psprintf("%c%020llu", sign, (unsigned long long)abs_val);
-            
-            *out_len = strlen(result);
-            break;
-        }
-        
-        case FLOAT4OID:
-        case FLOAT8OID:
-        {
-            /* Convert float to sortable string representation */
-            double fval = (typoid == FLOAT4OID) ? 
-                         DatumGetFloat4(value) : DatumGetFloat8(value);
-            result = psprintf("%.15e", fval);
-            *out_len = strlen(result);
-            break;
-        }
-        
         case TEXTOID:
         case VARCHAROID:
         case BPCHAROID:
         {
-            /* Already text - just extract */
-            text *txt = DatumGetTextPP(value);
-            char *str = VARDATA_ANY(txt);
-            int len = VARSIZE_ANY_EXHDR(txt);
+            txt = DatumGetTextPP(value);
+            str = VARDATA_ANY(txt);
+            len = VARSIZE_ANY_EXHDR(txt);
             result = pnstrdup(str, len);
             *out_len = len;
-            break;
-        }
-        
-        case DATEOID:
-        {
-            /* Date as zero-padded integer (days since epoch) */
-            DateADT date = DatumGetDateADT(value);
-            /* Store as sortable 10-digit number */
-            result = psprintf("%+010d", (int)date);
-            *out_len = 10;
-            break;
-        }
-        
-        case TIMESTAMPOID:
-        case TIMESTAMPTZOID:
-        {
-            /* Timestamp as sortable integer microseconds */
-            Timestamp ts = DatumGetTimestamp(value);
-            result = psprintf("%020lld", (long long)ts);
-            *out_len = 20;
-            break;
-        }
-        
-        case BOOLOID:
-        {
-            /* Boolean as 'f' or 't' */
-            bool b = DatumGetBool(value);
-            result = pstrdup(b ? "t" : "f");
-            *out_len = 1;
+            
+            // Free the detoasted copy if it was created
+            if ((void *)txt != (void *)DatumGetPointer(value))
+                pfree(txt);
             break;
         }
         
         default:
-        {
-            /* FALLBACK: Use PostgreSQL's output function */
-            raw_text = OutputFunctionCall(outfunc, value);
-            result = pstrdup(raw_text);
-            *out_len = strlen(result);
-            pfree(raw_text);
-            break;
-        }
+            /*
+             * Unsupported type - this should never happen since:
+             * 1. SQL only defines operator class for text
+             * 2. Expression indexes are blocked in build functions
+             * 
+             * If you hit this, add operator class in SQL first
+             */
+            ereport(ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("biscuit index does not support type %s",
+                            format_type_be(typoid)),
+                     errhint("Currently only TEXT, VARCHAR, and CHAR types are supported. "
+                            "Create an operator class for this type first.")));
     }
     
     return result;
 }
-
 /* ==================== TID SORTING (OPTIMIZATION 6) ==================== */
 
-static int
+static inline int
 biscuit_compare_tids(const void *a, const void *b)
 {
-    ItemPointer tid_a = (ItemPointer)a;
-    ItemPointer tid_b = (ItemPointer)b;
-    BlockNumber block_a = ItemPointerGetBlockNumber(tid_a);
-    BlockNumber block_b = ItemPointerGetBlockNumber(tid_b);
-    OffsetNumber offset_a;
-    OffsetNumber offset_b;
-    
-    if (block_a < block_b)
-        return -1;
-    if (block_a > block_b)
-        return 1;
-    
-    offset_a = ItemPointerGetOffsetNumber(tid_a);
-    offset_b = ItemPointerGetOffsetNumber(tid_b);
-    
-    if (offset_a < offset_b)
-        return -1;
-    if (offset_a > offset_b)
-        return 1;
-    
-    return 0;
+    return (int)ItemPointerCompare((ItemPointer)a, (ItemPointer)b);
 }
 
 /*
  * Radix sort for TIDs - optimized for large result sets with proper memory safety
- * Sorts by block number first, then by offset within each block
+ * Sorts by block number first (4 passes for full 32-bit), then by offset within each block
  * 
  * Performance: O(n) for n TIDs, but requires temporary buffer
  * Best for: 5000+ TIDs where O(n) beats O(n log n)
  * 
- * FIXED: Memory safety with PG_TRY/CATCH and proper cleanup
+ * FIXED: Properly handles full 32-bit block numbers and immediate fallback on invalid offsets
  */
- static void
- biscuit_radix_sort_tids(ItemPointerData *tids, int count)
- {
-     ItemPointerData *temp = NULL;
-     int *block_counts = NULL;
-     int *block_offsets = NULL;
-     int *counts_low = NULL;
-     int *counts_high = NULL;
-     int *offsets_low = NULL;
-     int *offsets_high = NULL;
-     BlockNumber max_block = 0;
-     int i;
-     
-     if (count <= 1)
-         return;
-     
-     PG_TRY();
-     {
-         /* Allocate temporary buffer - used throughout */
-         temp = (ItemPointerData *)palloc(count * sizeof(ItemPointerData));
-         
-         /* Find max block number to determine range */
-         for (i = 0; i < count; i++) {
-             BlockNumber block = ItemPointerGetBlockNumber(&tids[i]);
-             if (block > max_block)
-                 max_block = block;
-         }
-         
-         /* OPTIMIZATION: If blocks are dense, use counting sort on blocks */
-         if (max_block < (BlockNumber)(count * 2)) {
-             /* ==================== DENSE BLOCKS - COUNTING SORT ==================== */
-             int num_blocks = max_block + 1;
-             
-             block_counts = (int *)palloc0(num_blocks * sizeof(int));
-             block_offsets = (int *)palloc(num_blocks * sizeof(int));
-             
-             /* Count TIDs per block */
-             for (i = 0; i < count; i++) {
-                 BlockNumber block = ItemPointerGetBlockNumber(&tids[i]);
-                 block_counts[block]++;
-             }
-             
-             /* Calculate starting positions */
-             block_offsets[0] = 0;
-             for (i = 1; i < num_blocks; i++) {
-                 block_offsets[i] = block_offsets[i-1] + block_counts[i-1];
-             }
-             
-             /* Distribute TIDs into temp buffer by block */
-             for (i = 0; i < count; i++) {
-                 BlockNumber block = ItemPointerGetBlockNumber(&tids[i]);
-                 int pos = block_offsets[block]++;
-                 ItemPointerCopy(&tids[i], &temp[pos]);
-             }
-             
-             /* Copy back to original array */
-             memcpy(tids, temp, count * sizeof(ItemPointerData));
-             
-             /* Clean up dense-specific allocations */
-             pfree(block_counts);
-             pfree(block_offsets);
-             block_counts = NULL;
-             block_offsets = NULL;
-             
-         } else {
-             /* ==================== SPARSE BLOCKS - RADIX SORT ==================== */
-             
-             /* Allocate radix sort buffers */
-             counts_low = (int *)palloc0(256 * sizeof(int));
-             counts_high = (int *)palloc0(256 * sizeof(int));
-             offsets_low = (int *)palloc(256 * sizeof(int));
-             offsets_high = (int *)palloc(256 * sizeof(int));
-             
-             /* Pass 1: Sort by low byte of block number */
-             for (i = 0; i < count; i++) {
-                 BlockNumber block = ItemPointerGetBlockNumber(&tids[i]);
-                 counts_low[block & 0xFF]++;
-             }
-             
-             offsets_low[0] = 0;
-             for (i = 1; i < 256; i++) {
-                 offsets_low[i] = offsets_low[i-1] + counts_low[i-1];
-             }
-             
-             for (i = 0; i < count; i++) {
-                 BlockNumber block = ItemPointerGetBlockNumber(&tids[i]);
-                 int pos = offsets_low[block & 0xFF]++;
-                 ItemPointerCopy(&tids[i], &temp[pos]);
-             }
-             
-             /* Pass 2: Sort by high 24 bits of block number */
-             for (i = 0; i < count; i++) {
-                 BlockNumber block = ItemPointerGetBlockNumber(&temp[i]);
-                 counts_high[(block >> 8) & 0xFF]++;
-             }
-             
-             offsets_high[0] = 0;
-             for (i = 1; i < 256; i++) {
-                 offsets_high[i] = offsets_high[i-1] + counts_high[i-1];
-             }
-             
-             for (i = 0; i < count; i++) {
-                 BlockNumber block = ItemPointerGetBlockNumber(&temp[i]);
-                 int pos = offsets_high[(block >> 8) & 0xFF]++;
-                 ItemPointerCopy(&temp[i], &tids[pos]);
-             }
-             
-             /* Copy sorted results back to temp for offset sorting */
-             memcpy(temp, tids, count * sizeof(ItemPointerData));
-             
-             /* Clean up radix-specific allocations */
-             pfree(counts_low);
-             pfree(counts_high);
-             pfree(offsets_low);
-             pfree(offsets_high);
-             counts_low = NULL;
-             counts_high = NULL;
-             offsets_low = NULL;
-             offsets_high = NULL;
-         }
-         
-         /* ==================== SORT BY OFFSET WITHIN EACH BLOCK ==================== */
-         /* TIDs are now grouped by block in temp[], sort each block's offsets */
-         
-         int start = 0;
-         while (start < count) {
-             BlockNumber current_block = ItemPointerGetBlockNumber(&temp[start]);
-             int block_end = start + 1;
-             
-             /* Find end of current block */
-             while (block_end < count && 
-                    ItemPointerGetBlockNumber(&temp[block_end]) == current_block) {
-                 block_end++;
-             }
-             
-             int block_size = block_end - start;
-             
-             /* Sort offsets within this block using counting sort */
-             if (block_size > 1) {
-                 /* MaxHeapTuplesPerPage is typically ~290, so use 512 buckets */
-                 int offset_counts[512];
-                 int offset_positions[512];
-                 int i_inner, j;
-                 
-                 /* Initialize counts */
-                 for (j = 0; j < 512; j++) {
-                     offset_counts[j] = 0;
-                 }
-                 
-                 /* Count offsets */
-                 for (i_inner = start; i_inner < block_end; i_inner++) {
-                     OffsetNumber offset = ItemPointerGetOffsetNumber(&temp[i_inner]);
-                     if (offset < 512) {
-                         offset_counts[offset]++;
-                     } else {
-                         /* Safety check: offset out of range - should never happen */
-                         elog(WARNING, "Biscuit: Invalid offset %d at TID position %d, skipping",
-                              offset, i_inner);
-                     }
-                 }
-                 
-                 /* Calculate positions */
-                 offset_positions[0] = 0;
-                 for (j = 1; j < 512; j++) {
-                     offset_positions[j] = offset_positions[j-1] + offset_counts[j-1];
-                 }
-                 
-                 /* Distribute into tids array (using it as output) */
-                 for (i_inner = start; i_inner < block_end; i_inner++) {
-                     OffsetNumber offset = ItemPointerGetOffsetNumber(&temp[i_inner]);
-                     if (offset < 512) {
-                         int pos = start + offset_positions[offset]++;
-                         ItemPointerCopy(&temp[i_inner], &tids[pos]);
-                     }
-                 }
-             } else {
-                 /* Single TID in this block, just copy it */
-                 ItemPointerCopy(&temp[start], &tids[start]);
-             }
-             
-             start = block_end;
-         }
-         
-         /* Clean up main temp buffer */
-         pfree(temp);
-         temp = NULL;
-     }
-     PG_CATCH();
-     {
-         /* Emergency cleanup on error */
-         if (temp) pfree(temp);
-         if (block_counts) pfree(block_counts);
-         if (block_offsets) pfree(block_offsets);
-         if (counts_low) pfree(counts_low);
-         if (counts_high) pfree(counts_high);
-         if (offsets_low) pfree(offsets_low);
-         if (offsets_high) pfree(offsets_high);
-         
-         /* Re-throw the error */
-         PG_RE_THROW();
-     }
-     PG_END_TRY();
- }
+static void
+biscuit_radix_sort_tids(ItemPointerData *tids, int count)
+{
+    ItemPointerData *temp = NULL;
+    ItemPointerData *src, *dst;
+    int i, pass;
+    
+    if (count <= 1)
+        return;
+    
+    PG_TRY();
+    {
+        /* Allocate temporary buffer */
+        temp = (ItemPointerData *)palloc(count * sizeof(ItemPointerData));
+        
+        /* ==================== PHASE 1: SORT BY BLOCK NUMBER (4 PASSES) ==================== */
+        /* Sort all 32 bits of BlockNumber using 4 passes of 8 bits each */
+        
+        src = tids;
+        dst = temp;
+        
+        for (pass = 0; pass < 4; pass++) {
+            int counts[256] = {0};
+            int offsets[256];
+            int shift = pass * 8;
+            
+            /* Count occurrences of each byte value */
+            for (i = 0; i < count; i++) {
+                BlockNumber block = ItemPointerGetBlockNumber(&src[i]);
+                int byte_value = (block >> shift) & 0xFF;
+                counts[byte_value]++;
+            }
+            
+            /* Calculate output positions */
+            offsets[0] = 0;
+            for (i = 1; i < 256; i++) {
+                offsets[i] = offsets[i-1] + counts[i-1];
+            }
+            
+            /* Distribute items to output buffer */
+            for (i = 0; i < count; i++) {
+                BlockNumber block = ItemPointerGetBlockNumber(&src[i]);
+                int byte_value = (block >> shift) & 0xFF;
+                int pos = offsets[byte_value]++;
+                ItemPointerCopy(&src[i], &dst[pos]);
+            }
+            
+            /* Swap buffers for next pass */
+            ItemPointerData *swap = src;
+            src = dst;
+            dst = swap;
+        }
+        
+        /* After 4 passes with swapping:
+         * Pass 0: src=tids, dst=temp, writes to temp, swap → src=temp, dst=tids
+         * Pass 1: src=temp, dst=tids, writes to tids, swap → src=tids, dst=temp
+         * Pass 2: src=tids, dst=temp, writes to temp, swap → src=temp, dst=tids
+         * Pass 3: src=temp, dst=tids, writes to tids, swap → src=tids, dst=temp
+         * 
+         * After 4 passes: data is in tids (the original array), src points to tids
+         */
+        
+        /* ==================== PHASE 2: SORT BY OFFSET WITHIN EACH BLOCK ==================== */
+        /* Now tids[] contains records sorted by block number */
+        
+        int start = 0;
+        
+        while (start < count) {
+            BlockNumber current_block = ItemPointerGetBlockNumber(&tids[start]);
+            int block_end = start + 1;
+            
+            /* Find all TIDs in this block */
+            while (block_end < count && 
+                   ItemPointerGetBlockNumber(&tids[block_end]) == current_block) {
+                block_end++;
+            }
+            
+            int block_size = block_end - start;
+            
+            /* Sort offsets within this block */
+            if (block_size > 1) {
+                /* Use counting sort for offsets (MaxHeapTuplesPerPage is typically ~290) */
+                int offset_counts[512];
+                int offset_positions[512];
+                int j;
+                
+                /* Initialize counts to zero */
+                for (j = 0; j < 512; j++) {
+                    offset_counts[j] = 0;
+                }
+                
+                /* Count each offset value */
+                for (i = start; i < block_end; i++) {
+                    OffsetNumber offset = ItemPointerGetOffsetNumber(&tids[i]);
+                    if (offset < 512) {
+                        offset_counts[offset]++;
+                    } else {
+                        /* This should never happen - offsets are limited by MaxHeapTuplesPerPage */
+                        elog(WARNING, "Biscuit: Invalid offset %d encountered, falling back to qsort", offset);
+                        /* Fall back to qsort for this block */
+                        qsort(&tids[start], block_size, sizeof(ItemPointerData), 
+                              biscuit_compare_tids);
+                        goto next_block;
+                    }
+                }
+                
+                /* Calculate cumulative positions */
+                offset_positions[0] = 0;
+                for (j = 1; j < 512; j++) {
+                    offset_positions[j] = offset_positions[j-1] + offset_counts[j-1];
+                }
+                
+                /* Distribute into temp buffer */
+                for (i = start; i < block_end; i++) {
+                    OffsetNumber offset = ItemPointerGetOffsetNumber(&tids[i]);
+                    int pos = start + offset_positions[offset]++;
+                    ItemPointerCopy(&tids[i], &temp[pos]);
+                }
+                
+                /* Copy sorted block back to tids */
+                memcpy(&tids[start], &temp[start], block_size * sizeof(ItemPointerData));
+            }
+            
+            next_block:
+            start = block_end;
+        }
+        
+        /* Cleanup */
+        pfree(temp);
+    }
+    PG_CATCH();
+    {
+        if (temp)
+            pfree(temp);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+}
 /*
 * Sort TIDs for sequential heap access
 * This is critical for performance with large result sets
@@ -1117,12 +984,12 @@ biscuit_sort_tids_by_block(ItemPointerData *tids, int count)
 * Parallel worker structure for TID collection
 */
 typedef struct {
-BiscuitIndex *idx;
-uint32_t *indices;
-uint64_t start_idx;
-uint64_t end_idx;
-ItemPointerData *output;
-int output_count;
+    BiscuitIndex *idx;
+    uint32_t *indices;
+    uint64_t start_idx;
+    uint64_t end_idx;
+    ItemPointerData *output;
+    int output_count;
 } TIDCollectionWorker;
 
 /*
@@ -1132,20 +999,20 @@ int output_count;
 static void
 biscuit_collect_tids_worker(TIDCollectionWorker *worker)
 {
-uint64_t i;
-int out_idx = 0;
+    uint64_t i;
+    int out_idx = 0;
 
-for (i = worker->start_idx; i < worker->end_idx; i++) {
-    uint32_t rec_idx = worker->indices[i];
-    
-    if (rec_idx < (uint32_t)worker->idx->num_records) {
-        ItemPointerCopy(&worker->idx->tids[rec_idx], 
-                        &worker->output[out_idx]);
-        out_idx++;
+    for (i = worker->start_idx; i < worker->end_idx; i++) {
+        uint32_t rec_idx = worker->indices[i];
+        
+        if (rec_idx < (uint32_t)worker->idx->num_records) {
+            ItemPointerCopy(&worker->idx->tids[rec_idx], 
+                            &worker->output[out_idx]);
+            out_idx++;
+        }
     }
-}
 
-worker->output_count = out_idx;
+    worker->output_count = out_idx;
 }
 
 /*
