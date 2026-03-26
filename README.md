@@ -696,6 +696,6 @@ Sivaprasad Murali
 - **Documentation**: [ReadTheDocs Page](https://biscuit.readthedocs.io/) 
 ---
 
-**Happy pattern matching! Grab a biscuit 🍪 when pg_trgm feels half-baked!**
+**Happy pattern matching! Grab a biscuit 🍪 when others feel half-baked!**
 
 ---
