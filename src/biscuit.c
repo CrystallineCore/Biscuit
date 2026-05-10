@@ -81,7 +81,13 @@ typedef struct {
     } \
 } while(0)
 
-PG_MODULE_MAGIC;
+#define BISCUIT_LIBRARY_VERSION "2.2.2"
+
+#ifdef PG_MODULE_MAGIC_EXT
+    PG_MODULE_MAGIC_EXT(.name = "biscuit", .version = BISCUIT_LIBRARY_VERSION);
+#else
+    PG_MODULE_MAGIC;
+#endif
 
 /* Forward declaration of main index structure */
 typedef struct BiscuitIndex BiscuitIndex;
@@ -110,7 +116,7 @@ PG_FUNCTION_INFO_V1(biscuit_version);
 Datum
 biscuit_version(PG_FUNCTION_ARGS)
 {
-    PG_RETURN_TEXT_P(cstring_to_text("2.2.2"));
+    PG_RETURN_TEXT_P(cstring_to_text(BISCUIT_LIBRARY_VERSION));
 }
 
 // Get build information - Set-Returning Function
