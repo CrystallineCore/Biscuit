@@ -83,10 +83,10 @@ typedef struct {
 
 #define BISCUIT_LIBRARY_VERSION "2.2.2"
 
-#if PG_VERSION_NUM >= 180000
-PG_MODULE_MAGIC_EXT(.name = "biscuit", .version = BISCUIT_LIBRARY_VERSION);
+#ifdef PG_MODULE_MAGIC_EXT
+    PG_MODULE_MAGIC_EXT(.name = "biscuit", .version = BISCUIT_LIBRARY_VERSION);
 #else
-PG_MODULE_MAGIC;
+    PG_MODULE_MAGIC;
 #endif
 
 /* Forward declaration of main index structure */
