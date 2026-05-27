@@ -10,7 +10,7 @@ module_pathname = '$libdir/biscuit'
 
 # Supported PostgreSQL versions
 # Minimum version: PostgreSQL 12.0
-# Tested on: PostgreSQL 16
+# Tested on: PostgreSQL 18
 relocatable = false
 schema = public
 
