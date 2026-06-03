@@ -375,8 +375,13 @@ biscuit_load_skeleton(Relation index)
 
     /* ---- Heap scan: store TIDs + raw strings only ---- */
     slot_tbl = table_slot_create(heap, NULL);
-    scan     = table_beginscan(heap, SnapshotAny, 0, NULL);
-
+    
+    #if PG_VERSION_NUM >= 190000
+    scan = table_beginscan(heap, SnapshotAny, 0, NULL, 0);
+    #else
+        scan = table_beginscan(heap, SnapshotAny, 0, NULL);
+    #endif
+    
     while (table_scan_getnextslot(scan, ForwardScanDirection, slot_tbl))
     {
         slot_getallattrs(slot_tbl);

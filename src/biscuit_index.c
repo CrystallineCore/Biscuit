@@ -586,8 +586,11 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
             biscuit_init_crud_structures(idx);
 
             slot = table_slot_create(heap, NULL);
-            scan = table_beginscan(heap, SnapshotAny, 0, NULL);
-
+            #if PG_VERSION_NUM >= 190000
+                scan = table_beginscan(heap, SnapshotAny, 0, NULL, 0);
+            #else
+                scan = table_beginscan(heap, SnapshotAny, 0, NULL);
+            #endif
             while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
             {
                 Datum  val;
