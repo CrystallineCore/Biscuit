@@ -1,29 +1,89 @@
 # Biscuit - High-Performance Pattern Matching Index for PostgreSQL
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![PostgreSQL: 12+](https://img.shields.io/badge/PostgreSQL-16%2B-blue.svg)](https://www.postgresql.org/)
+[![PostgreSQL: 16+](https://img.shields.io/badge/PostgreSQL-16%2B-blue.svg)](https://www.postgresql.org/)
 [![Read the Docs](https://img.shields.io/badge/Read%20the%20Docs-8CA1AF?logo=readthedocs&logoColor=fff)](https://biscuit.readthedocs.io/)
 
 
 **Biscuit** is a specialized PostgreSQL index access method (IAM) designed for blazing-fast pattern matching on `LIKE` and `ILIKE` queries, with native support for multi-column searches. It eliminates the recheck overhead of trigram indexes while delivering significant performance improvements on wildcard-heavy queries. It stands for _**B**itmap **I**ndexed **S**earching with **C**omprehensive **U**nion and **I**ntersection **T**echniques_.
 
 ---
+## Stability Notice
 
-## What's new in 2.2.2?
+This extension is currently under active development and has not yet received the level of testing and operational experience expected of production-ready software.
 
-### ⚡ Performance Improvements
+Users are encouraged to evaluate the extension thoroughly in development and staging environments before considering deployment in production systems. In particular, testing should include representative datasets, workloads, upgrade procedures, backup and recovery workflows, and performance validation.
 
-* **Refined TID sorting implementation**
+Although the extension is intended to operate safely and reliably, defects or unexpected behavior may still be present. As with any new database component, appropriate backups and validation procedures should be maintained before use.
 
-  Replaced the previous hybrid dense/sparse block radix sorter with a uniform 4-pass radix sort covering the full 32-bit BlockNumber.
+At this stage, the extension is best suited for evaluation, experimentation, and non-critical workloads. Production deployment should be undertaken only after careful testing and assessment of its suitability for the intended environment.
 
-  Sorting is now performed using four 8-bit passes, eliminating assumptions about block number density or range.
+---
+## Version - 2.2.3
 
-### 🛡️ Correctness & Stability
+### Structural Changes
+ 
+- **Monolith split into modules.** The single `biscuit.c` file has been
+  decomposed into focused translation units, each with its own header:
+  | Module | Responsibility |
+  |---|---|
+  | `biscuit.c` | AM handler, SQL-callable functions, `_PG_init` |
+  | `biscuit_bitmap.{c,h}` | Roaring bitmap abstraction + fallback bitset |
+  | `biscuit_cache.{c,h}` | Session-scoped index cache |
+  | `biscuit_index.{c,h}` | Index build, load, disk I/O, CRUD helpers |
+  | `biscuit_pattern.{c,h}` | LIKE/ILIKE pattern parsing and bitmap matching |
+  | `biscuit_preload.{c,h}` | Background preload worker and skeleton loader |
+  | `biscuit_scan.{c,h}` | Scan lifecycle (beginscan/rescan/gettuple/getbitmap/endscan) |
+  | `biscuit_tid.{c,h}` | TID sorting (radix + qsort) and parallel collection |
+  | `biscuit_utf8.{c,h}` | UTF-8 character utilities and Datum→text helpers |
+  All shared types, constants, and macros have been consolidated into
+  `biscuit_common.h`. No SQL-level API changes.
+  
+- **Version bumped to `2.2.3`** (`BISCUIT_LIBRARY_VERSION`).
 
-* **Aligned TID comparison with PostgreSQL core**
+### New Features
 
-  Replaced custom TID comparison logic with PostgreSQL’s native comparison routine to ensure consistent ordering behavior.
+- **PostgreSQL 19 Beta 1 support.** `PG_MODULE_MAGIC_EXT` (introduced in PG 19)
+  is now used when available, with a fallback to `PG_MODULE_MAGIC` for older
+  versions. The extension can now be built and loaded against PG 19 development
+  builds without modification.
+
+
+### Improvements
+
+- **Memory context correctness.** The session cache (`biscuit_cache.c`) now
+  explicitly switches to `CacheMemoryContext` before allocating cache list
+  nodes, ensuring index structures survive transaction boundaries without
+  relying on caller context. The `biscuit_cleanup_index` stub correctly avoids
+  double-freeing memory owned by the context.
+
+- **`biscuit_complete_preload_local()`** added as a fast in-process upgrade
+  path: rebuilds bitmaps from the already-resident string cache without
+  reopening the relation or re-scanning the heap. Used by `beginscan` when
+  it detects the worker has finished between queries.
+
+- **TID collection refactored into `biscuit_tid.c`.** The unified entry point
+  `biscuit_collect_tids_optimized()` selects parallel vs. single-threaded
+  collection automatically and supports an optional `limit_hint` to avoid
+  collecting more TIDs than the executor needs.
+
+- **Fallback scan in `biscuit_preload.c`** supports NOT LIKE and NOT ILIKE
+  during warm-up via a hash-map TID→record-index lookup, maintaining correct
+  inversion semantics without bitmaps.
+
+- **UTF-8 helpers isolated in `biscuit_utf8.{c,h}`**, removing scattered
+  inline character-length and lowercase conversion code from the pattern and
+  index modules.
+
+- **`biscuit_columnindex_memory_usage()`** now validates `max_length >= 0`
+  before iterating length bitmap arrays and emits a `WARNING` on corrupt
+  state rather than reading out-of-bounds.
+
+### Bug Fixes
+
+- `biscuit_cache_remove()` no longer calls `pfree` on list nodes; they are
+  owned by `CacheMemoryContext` and must not be freed manually.
+
 
 ---
 

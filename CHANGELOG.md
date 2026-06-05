@@ -1,9 +1,75 @@
 # Biscuit Index Extension - Changelog
 
+## Version 2.2.3
+
+### Structural Changes
+ 
+- **Monolith split into modules.** The single `biscuit.c` file has been
+  decomposed into focused translation units, each with its own header:
+  | Module | Responsibility |
+  |---|---|
+  | `biscuit.c` | AM handler, SQL-callable functions, `_PG_init` |
+  | `biscuit_bitmap.{c,h}` | Roaring bitmap abstraction + fallback bitset |
+  | `biscuit_cache.{c,h}` | Session-scoped index cache |
+  | `biscuit_index.{c,h}` | Index build, load, disk I/O, CRUD helpers |
+  | `biscuit_pattern.{c,h}` | LIKE/ILIKE pattern parsing and bitmap matching |
+  | `biscuit_preload.{c,h}` | Background preload worker and skeleton loader |
+  | `biscuit_scan.{c,h}` | Scan lifecycle (beginscan/rescan/gettuple/getbitmap/endscan) |
+  | `biscuit_tid.{c,h}` | TID sorting (radix + qsort) and parallel collection |
+  | `biscuit_utf8.{c,h}` | UTF-8 character utilities and Datum→text helpers |
+  All shared types, constants, and macros have been consolidated into
+  `biscuit_common.h`. No SQL-level API changes.
+  
+- **Version bumped to `2.2.3`** (`BISCUIT_LIBRARY_VERSION`).
+
+### New Features
+
+- **PostgreSQL 19 Beta 1 support.** `PG_MODULE_MAGIC_EXT` (introduced in PG 19)
+  is now used when available, with a fallback to `PG_MODULE_MAGIC` for older
+  versions. The extension can now be built and loaded against PG 19 development
+  builds without modification.
+
+
+### Improvements
+
+- **Memory context correctness.** The session cache (`biscuit_cache.c`) now
+  explicitly switches to `CacheMemoryContext` before allocating cache list
+  nodes, ensuring index structures survive transaction boundaries without
+  relying on caller context. The `biscuit_cleanup_index` stub correctly avoids
+  double-freeing memory owned by the context.
+
+- **`biscuit_complete_preload_local()`** added as a fast in-process upgrade
+  path: rebuilds bitmaps from the already-resident string cache without
+  reopening the relation or re-scanning the heap. Used by `beginscan` when
+  it detects the worker has finished between queries.
+
+- **TID collection refactored into `biscuit_tid.c`.** The unified entry point
+  `biscuit_collect_tids_optimized()` selects parallel vs. single-threaded
+  collection automatically and supports an optional `limit_hint` to avoid
+  collecting more TIDs than the executor needs.
+
+- **Fallback scan in `biscuit_preload.c`** supports NOT LIKE and NOT ILIKE
+  during warm-up via a hash-map TID→record-index lookup, maintaining correct
+  inversion semantics without bitmaps.
+
+- **UTF-8 helpers isolated in `biscuit_utf8.{c,h}`**, removing scattered
+  inline character-length and lowercase conversion code from the pattern and
+  index modules.
+
+- **`biscuit_columnindex_memory_usage()`** now validates `max_length >= 0`
+  before iterating length bitmap arrays and emits a `WARNING` on corrupt
+  state rather than reading out-of-bounds.
+
+### Bug Fixes
+
+- `biscuit_cache_remove()` no longer calls `pfree` on list nodes; they are
+  owned by `CacheMemoryContext` and must not be freed manually.
+
+---
 
 ## Version 2.2.2
 
-### ⚡ Performance Improvements
+### Performance Improvements
 
 * **Refined TID sorting implementation**
 
@@ -11,16 +77,17 @@
 
   Sorting is now performed using four 8-bit passes, eliminating assumptions about block number density or range.
 
-### 🛡️ Correctness & Stability
+### Correctness & Stability
 
 * **Aligned TID comparison with PostgreSQL core**
 
   Replaced custom TID comparison logic with PostgreSQL’s native comparison routine to ensure consistent ordering behavior.
 
+---
 
 ## Version 2.2.1
 
-### 🐞 Bug Fixes
+### Bug Fixes
 
 * **Fixed recursive pattern matching**
 
@@ -31,7 +98,7 @@
   `_` now correctly operates on character-based offsets (not byte offsets), in accordance with SQL `LIKE` / `ILIKE` semantics, eliminating false matches in multi-byte UTF-8 text.
 
 
-### 🛡️ Correctness & Stability
+### Correctness & Stability
 
 * Improved internal consistency between single-column and multi-column pattern evaluation paths.
 * Resolved observed edge cases that could lead to incorrect matches under complex wildcard patterns.
@@ -40,7 +107,7 @@
 
 ## Version 2.2.0
 
-### ✨ Major Changes
+### Major Changes
 
 **Switched from byte-based to character-based indexing**
 
@@ -48,7 +115,7 @@
 * Eliminates incorrect behavior caused by multi-byte UTF-8 sequences being treated as independent index entries.
 * Index structure now aligns with PostgreSQL’s character semantics rather than byte-level representation.
 
-### 🛠️ UTF-8 & Internationalization Improvements
+### UTF-8 & Internationalization Improvements
 
 **Enhanced UTF-8 compatibility**
 
@@ -60,7 +127,7 @@
 * `ILIKE` now works reliably with UTF-8 text, including case-insensitive matching on multi-byte characters.
 * Fixes previously incorrect matches and missed results in non-ASCII datasets.
 
-### 🐛 CRUD Correctness Fixes
+### CRUD Correctness Fixes
 
 **Resolved multiple CRUD-related bugs**
 
@@ -68,13 +135,13 @@
 * Ensured index entries are properly added, updated, and removed in sync with heap tuples.
 * Improved stability under mixed read/write workloads.
 
-### 🛡️ Correctness & Planner Consistency
+### Correctness & Planner Consistency
 
 * Improved alignment between Biscuit’s index behavior and PostgreSQL’s text semantics.
 * Reduced false positives during pattern matching and eliminated character-splitting artifacts.
 * More predictable planner behavior due to improved index consistency.
 
-### 🔧 Internal Refactoring
+### Internal Refactoring
 
 * Refactored index layout and lookup logic to support character-aware traversal.
 * Hardened UTF-8 decoding paths and edge-case handling.
@@ -84,13 +151,13 @@
 
 ## Version 2.1.5
 
-### 🔧 Improvements
+### Improvements
 
 **Removed arbitrary limits on multi-column indexes**
 
 *  Biscuit no longer enforces hard-coded limits when creating indexes over multiple columns, allowing more flexible index definitions.
 
-### 🛡️ Safety & Correctness
+### Safety & Correctness
 
 **Restricted indexing to text-based datatypes**
 
@@ -107,12 +174,12 @@
 
 ## Version 2.1.4
 
-### 🛠️ Build & Packaging
+### Build & Packaging
 
 * Improved Makefile detection logic for CRoaring bitmap support by checking multiple common installation paths, increasing portability across systems and build environments.
 
 
-### ✨ New Features
+### New Features
 
 #### Build and configuration introspection
 
@@ -158,7 +225,7 @@ and configuration.
 
 ## Version 2.1.3
 
-### ✨ New Features
+### New Features
 
 #### Added Index Memory Introspection Utilities
 
@@ -201,7 +268,7 @@ SELECT * FROM biscuit_memory_usage;
 * `pg_size_pretty(pg_relation_size(...))` reports only the on-disk footprint of the Biscuit index.
 Since Biscuit maintains its primary structures in memory (cache buffers / AM cache), the reported disk size may significantly underrepresent the index’s effective total footprint during execution. Hence, we recommend the usage of `biscuit_size_pretty(...)` to view the actual size of the index.
 
-### ⚙️ Performance improvements
+### Performance improvements
 
 #### Removed redundant bitmaps
 
@@ -211,7 +278,7 @@ Separate bitmaps for length-based filtering for case-insensitive search were rem
 
 ## Version 2.1.2 (2025-12-11)
 
-### ✨ New Features
+### New Features
 
 #### ILIKE Operator Support (Case-Insensitive Matching)
 
@@ -256,7 +323,7 @@ Biscuit now indexes values of **any length**, including very long strings.
 
 ## Version 2.0.1 (2024-12-06)
 
-### 🐞 Bug Fixes
+### Bug Fixes
 
 #### Fixed Incorrect Results with Multiple Filter Predicates
 **Issue:** Queries with multiple `LIKE` or `NOT LIKE` predicates on the same column could return incorrect results.
@@ -299,7 +366,7 @@ WHERE col1 LIKE 'A%' AND col2 NOT LIKE '%test%' AND col1 LIKE '%end'
 - Efficient bitmap negation for exclusion queries
 - Example: `WHERE name NOT LIKE '%test%'`
 
-### 📝 Upgrade Notes
+### Upgrade Notes
 
 **Compatibility:**
 - Fully backward compatible with v2.0.0
@@ -313,7 +380,7 @@ WHERE col1 LIKE 'A%' AND col2 NOT LIKE '%test%' AND col1 LIKE '%end'
 
 ## Version 2.0.0 (2024-11-05)
 
-### 🎯 Major Features
+### Major Features
 
 #### Multi-Column Index Support
 - Create Biscuit indices on multiple columns simultaneously

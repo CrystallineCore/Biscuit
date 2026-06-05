@@ -30,7 +30,7 @@
     "access-method",
     "index-access-method"
   ],
-  "release_status": "beta",
+  "release_status": "stable",
   "resources": {
     "homepage": "https://github.com/crystallinecore/biscuit",
     "repository": {
@@ -40,7 +40,7 @@
     }
   },
   "x_requires": {
-    "PostgreSQL": ">=15.0"
+    "PostgreSQL": ">=16.0"
   },
   "meta-spec": {
     "version": "1.0.0",
