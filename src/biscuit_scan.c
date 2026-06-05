@@ -65,60 +65,46 @@ biscuit_beginscan(Relation index, int nkeys, int norderbys)
     scan = RelationGetIndexScan(index, nkeys, norderbys);
     so   = (BiscuitScanOpaque *) palloc(sizeof(BiscuitScanOpaque));
 
-    /* ---------------------------------------------------------------
-     * Cache lookup order:
-     *   1. rd_amcache  (cheapest, set by a previous scan in this session)
-     *   2. process-level cache (survives across transactions)
-     *   3. skeleton load  (new: fast, no bitmaps) + async bitmap build
-     * --------------------------------------------------------------- */
     so->index = (BiscuitIndex *) index->rd_amcache;
 
     if (!so->index)
-    {
         so->index = biscuit_cache_lookup(indexoid);
 
-        if (so->index)
+    if (so->index)
+    {
+        /*
+         * We have a cached index — but it may still be a skeleton.
+         * Upgrade it synchronously if the worker has signalled DONE
+         * and we haven't built the bitmaps yet in this session.
+         *
+         * This covers both the rd_amcache hit path and the
+         * process-cache hit path.
+         */
+        if (so->index->preload_state < BISCUIT_PRELOAD_DONE)
         {
-            index->rd_amcache = so->index;
-
-            /*
-             * If we got a skeleton (preload_state < DONE) from the cache —
-             * e.g. a previous session loaded only the skeleton before exiting —
-             * upgrade it to a fully-warm index in-place rather than relying
-             * on the background worker or shmem signalling.
-             */
-            if (so->index->preload_state < BISCUIT_PRELOAD_DONE)
+            uint32 shmem_state = biscuit_preload_state(indexoid);
+            if (shmem_state >= BISCUIT_PRELOAD_DONE)
             {
+                MemoryContext _oldctx = MemoryContextSwitchTo(CacheMemoryContext);
                 biscuit_complete_preload_local(so->index, indexoid);
-                index->rd_amcache = so->index;
-                biscuit_cache_insert(indexoid, so->index);
+                MemoryContextSwitchTo(_oldctx);
             }
+            /* else: still warming, rescan() will use fallback */
         }
-        else
-        {
-            /*
-             * Total cache miss (new session or first use after restart).
-             * Build the full index synchronously — bitmaps and all.
-             * biscuit_load_index() calls biscuit_build() which sets
-             * preload_state = BISCUIT_PRELOAD_DONE (3) and populates
-             * rd_amcache, so the very first rescan takes the fast bitmap
-             * path with no skeleton/fallback detour.
-             *
-             * The skeleton + background-worker path is an optimisation for
-             * indexes so large that the first query can't afford to wait.
-             * For correctness and simplicity we always build fully here;
-             * the background worker path can be re-enabled when shared
-             * memory initialisation (_PG_init) is confirmed working.
-             */
-            so->index = biscuit_load_index(index);
-            index->rd_amcache = so->index;
-            biscuit_register_callback();
-            biscuit_cache_insert(indexoid, so->index);
+        index->rd_amcache = so->index;
+    }
+    else
+    {
+        so->index = biscuit_load_skeleton(index);
+        so->index->preload_state = BISCUIT_PRELOAD_SKELETON;
+        index->rd_amcache = so->index;
+        biscuit_register_callback();
+        biscuit_cache_insert(indexoid, so->index);
+        biscuit_preload_request(indexoid);
 
-            elog(DEBUG1,
-                 "Biscuit: full index load for %u (%d records, bitmaps ready)",
-                 indexoid, so->index ? so->index->num_records : -1);
-        }
+        elog(DEBUG1,
+             "Biscuit: skeleton loaded for %u (%d records), bitmaps pending",
+             indexoid, so->index->num_records);
     }
 
     so->results            = NULL;
@@ -194,16 +180,29 @@ biscuit_rescan_multicolumn(IndexScanDesc scan,
 
         if (pred_is_not_like)
         {
-            RoaringBitmap *all = biscuit_roaring_create();
+            /*
+             * NOT LIKE inversion: the "all" set must contain only non-null
+             * indexed rows for this column.  Use the column's length_ge
+             * bitmap at index 0 (all strings of length >= 0, i.e. non-null)
+             * when available, otherwise fall back to the full record range.
+             */
+            ColumnIndex   *pred_col    = &so->index->column_indices[pred->column_index];
+            RoaringBitmap *all;
             int j;
+            if (pred_col->length_ge_bitmaps && pred_col->length_ge_bitmaps[0])
+            {
+                all = biscuit_roaring_copy(pred_col->length_ge_bitmaps[0]);
+            }
+            else
+            {
+                all = biscuit_roaring_create();
 #ifdef HAVE_ROARING
-            roaring_bitmap_add_range(all, 0, so->index->num_records);
+                roaring_bitmap_add_range(all, 0, so->index->num_records);
 #else
-            for (j = 0; j < so->index->num_records; j++)
-                biscuit_roaring_add(all, j);
+                for (j = 0; j < so->index->num_records; j++)
+                    biscuit_roaring_add(all, j);
 #endif
-            /* Exclude tombstones before inverting so deleted rows
-             * never appear in NOT LIKE / NOT ILIKE results. */
+            }
             if (so->index->tombstone_count > 0 && so->index->tombstones)
                 biscuit_roaring_andnot_inplace(all, so->index->tombstones);
             biscuit_roaring_andnot_inplace(all, col_result);
@@ -353,12 +352,21 @@ biscuit_rescan_multicolumn_fallback(IndexScanDesc scan,
             {
                 RoaringBitmap *all = biscuit_roaring_create();
                 int k;
-#ifdef HAVE_ROARING
-                roaring_bitmap_add_range(all, 0, (uint64_t) n);
-#else
-                for (k = 0; k < n; k++)
-                    biscuit_roaring_add(all, k);
-#endif
+                /* Only invert over non-null indexed records for this column */
+                if (col_idx >= 0 && col_idx < so->index->num_columns &&
+                    so->index->column_data_cache && so->index->column_data_cache[col_idx])
+                {
+                    for (k = 0; k < n; k++)
+                    {
+                        if (so->index->column_data_cache[col_idx][k])
+                            biscuit_roaring_add(all, k);
+                    }
+                }
+                else
+                {
+                    for (k = 0; k < n; k++)
+                        biscuit_roaring_add(all, k);
+                }
                 /* Exclude tombstones before inverting. */
                 if (so->index->tombstone_count > 0 && so->index->tombstones)
                     biscuit_roaring_andnot_inplace(all, so->index->tombstones);
@@ -423,11 +431,14 @@ biscuit_rescan(IndexScanDesc scan,
     /*
      * Count this as one index search.  PostgreSQL 17+ tracks this counter
      * in IndexScanDescData and displays it as "Index Searches" in EXPLAIN
-     * ANALYSE.  The AM is responsible for incrementing it; genam.c does not
+     * ANALYSE.  The AM is responsible for incrementing it; genam.h does not
      * do so automatically.  Increment here, after the early-return guards,
      * so only real searches are counted.
      */
-#if PG_VERSION_NUM >= 170000 && PG_VERSION_NUM < 180000
+#if PG_VERSION_NUM >= 180000
+    if (scan->instrument)
+        scan->instrument->nsearches++;
+#elif PG_VERSION_NUM >= 170000
     scan->xs_numIndexSearches++;
 #endif
 
@@ -468,8 +479,12 @@ biscuit_rescan(IndexScanDesc scan,
              * This path executes at most once per session (the first query
              * after the background worker signals DONE).
              */
-            biscuit_complete_preload_local(so->index,
-                                           RelationGetRelid(scan->indexRelation));
+            {
+                MemoryContext _oldctx = MemoryContextSwitchTo(CacheMemoryContext);
+                biscuit_complete_preload_local(so->index,
+                                               RelationGetRelid(scan->indexRelation));
+                MemoryContextSwitchTo(_oldctx);
+            }
 
             /* Refresh rd_amcache so subsequent beginscan hits this copy */
             scan->indexRelation->rd_amcache = so->index;
@@ -522,23 +537,16 @@ biscuit_rescan(IndexScanDesc scan,
                 switch (key->sk_strategy)
                 {
                     case BISCUIT_LIKE_STRATEGY:
-                        key_result = biscuit_query_pattern(so->index, pattern);
-                        is_not = false;
+                        key_result = biscuit_query_column_pattern(so->index, 0, pattern);
                         break;
-
                     case BISCUIT_NOT_LIKE_STRATEGY:
-                        key_result = biscuit_query_pattern(so->index, pattern);
-                        is_not = true;
+                        key_result = biscuit_query_column_pattern(so->index, 0, pattern);
                         break;
-
                     case BISCUIT_ILIKE_STRATEGY:
-                        key_result = biscuit_query_pattern_ilike(so->index, pattern);
-                        is_not = false;
+                        key_result = biscuit_query_column_pattern_ilike(so->index, 0, pattern);
                         break;
-
                     case BISCUIT_NOT_ILIKE_STRATEGY:
-                        key_result = biscuit_query_pattern_ilike(so->index, pattern);
-                        is_not = true;
+                        key_result = biscuit_query_column_pattern_ilike(so->index, 0, pattern);
                         break;
 
                     default:
@@ -558,16 +566,33 @@ biscuit_rescan(IndexScanDesc scan,
 
                 if (is_not)
                 {
-                    RoaringBitmap *all = biscuit_roaring_create();
+                    /*
+                     * NOT LIKE inversion: build the live non-null set.
+                     * We must NOT include records with a NULL data_cache
+                     * entry — those rows have NULL column values and were
+                     * never indexed, so they must not appear in NOT LIKE
+                     * results (NULL LIKE x is NULL, not TRUE).
+                     * Use length_ge_bitmaps_legacy[0] when available (it
+                     * was built to contain exactly the non-null live rows),
+                     * otherwise fall back to a record-by-record scan.
+                     */
+                    RoaringBitmap *all;
                     int j;
-#ifdef HAVE_ROARING
-                    roaring_bitmap_add_range(all, 0, so->index->num_records);
-#else
-                    for (j = 0; j < so->index->num_records; j++)
-                        biscuit_roaring_add(all, j);
-#endif
-                    /* Exclude tombstones before inverting so deleted rows
-                     * never appear in NOT LIKE results. */
+                    if (so->index->length_ge_bitmaps_legacy &&
+                        so->index->length_ge_bitmaps_legacy[0])
+                    {
+                        all = biscuit_roaring_copy(
+                            so->index->length_ge_bitmaps_legacy[0]);
+                    }
+                    else
+                    {
+                        all = biscuit_roaring_create();
+                        for (j = 0; j < so->index->num_records; j++)
+                        {
+                            if (so->index->data_cache[j])
+                                biscuit_roaring_add(all, j);
+                        }
+                    }
                     if (so->index->tombstone_count > 0 && so->index->tombstones)
                         biscuit_roaring_andnot_inplace(all, so->index->tombstones);
                     biscuit_roaring_andnot_inplace(all, key_result);
@@ -753,13 +778,12 @@ biscuit_rescan(IndexScanDesc scan,
                     {
                         RoaringBitmap *all = biscuit_roaring_create();
                         int k;
-#ifdef HAVE_ROARING
-                        roaring_bitmap_add_range(all, 0, (uint64_t) n);
-#else
+                        /* Only invert over non-null indexed records */
                         for (k = 0; k < n; k++)
-                            biscuit_roaring_add(all, k);
-#endif
-                        /* Exclude tombstones before inverting. */
+                        {
+                            if (so->index->data_cache[k])
+                                biscuit_roaring_add(all, k);
+                        }
                         if (so->index->tombstone_count > 0 && so->index->tombstones)
                             biscuit_roaring_andnot_inplace(all, so->index->tombstones);
                         biscuit_roaring_andnot_inplace(all, key_bitmap);

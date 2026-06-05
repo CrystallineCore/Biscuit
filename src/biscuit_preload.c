@@ -279,13 +279,13 @@ biscuit_load_skeleton(Relation index)
     MemoryContext     oldcontext;
     int               natts, col, ch;
 
-    if (!index->rd_indexcxt)
-        index->rd_indexcxt = AllocSetContextCreate(
-            CacheMemoryContext,
-            "Biscuit index context",
-            ALLOCSET_DEFAULT_SIZES);
-
-    oldcontext = MemoryContextSwitchTo(index->rd_indexcxt);
+    /*
+     * All skeleton data must live in CacheMemoryContext.  rd_indexcxt is
+     * owned by PostgreSQL and deleted by RelationClearRelation on any
+     * relcache invalidation, which would free our data while biscuit_cache
+     * still holds the pointer.  CacheMemoryContext is never reset by PG.
+     */
+    oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
 
     heap      = table_open(index->rd_index->indrelid, AccessShareLock);
     indexInfo = BuildIndexInfo(index);
@@ -584,291 +584,45 @@ preload_index_single_record(BiscuitIndex *idx,
         idx->max_len = char_count;
 }
 
-void
+void 
 biscuit_complete_preload(Oid indexoid)
 {
-    Relation      index;
-    BiscuitIndex *idx;
-    int           rec_idx, i, ch;
-    MemoryContext oldcontext;
-
-    elog(LOG, "Biscuit preload: starting bitmap build for index %u", indexoid);
-
-    index = index_open(indexoid, AccessShareLock);
-    if (!index)
-    {
-        elog(WARNING, "Biscuit preload: could not open index %u", indexoid);
-        return;
-    }
+    int                  oid_slot = (int)(indexoid % 64);
+    BiscuitPreloadShmem *sh       = biscuit_preload_shmem;
 
     /*
-     * The worker runs in a separate backend process.  biscuit_cache_lookup
-     * would search *this* backend's private cache, which never contains the
-     * skeleton that the querying session built.  Always build a fresh
-     * skeleton here so we have the raw string data to index from.
+     * The worker's only job is to signal DONE in the shmem slot.
+     *
+     * Each foreground session has already called biscuit_load_skeleton()
+     * during its first beginscan, so it holds TIDs and raw string data in
+     * its own CacheMemoryContext.  When rescan() next checks shmem and
+     * finds DONE it calls biscuit_complete_preload_local() on that
+     * existing skeleton — pure CPU work, zero extra I/O.
+     *
+     * A previous implementation did a full heap scan here (biscuit_load_skeleton
+     * + biscuit_complete_preload_local) and then discarded the result.  That
+     * wasted one extra heap scan per index per server start while providing
+     * no benefit: the worker's address space is separate from every session,
+     * so nothing built here is reachable by foreground backends.
+     *
+     * Verifying the index is still valid (index_open) before signalling DONE
+     * is a worthwhile safety check and is cheap — no heap scan, just a
+     * syscache lookup.
      */
-    idx = biscuit_load_skeleton(index);
-    if (!idx)
+    Relation index = index_open(indexoid, AccessShareLock);
+    if (!index)
     {
-        index_close(index, AccessShareLock);
+        elog(WARNING, "Biscuit preload: could not open index %u, skipping",
+             indexoid);
         return;
     }
-
-    /* Sanity: if somehow already fully loaded, skip */
-    if (idx->preload_state == BISCUIT_PRELOAD_DONE)
-    {
-        index_close(index, AccessShareLock);
-        return;
-    }
-
-    if (!index->rd_indexcxt)
-        index->rd_indexcxt = AllocSetContextCreate(
-            CacheMemoryContext, "Biscuit index context",
-            ALLOCSET_DEFAULT_SIZES);
-
-    oldcontext = MemoryContextSwitchTo(index->rd_indexcxt);
-
-    idx->preload_state = BISCUIT_PRELOAD_RUNNING;
-
-    PG_TRY();
-    {
-        if (idx->num_columns == 1)
-        {
-            /* ---- Build single-column bitmaps from data_cache ---- */
-            for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++)
-            {
-                const char *str;
-                int         byte_len;
-
-                if (!idx->data_cache[rec_idx])
-                    continue;
-
-                str      = idx->data_cache[rec_idx];
-                byte_len = strlen(str);
-
-                preload_index_single_record(idx, str, byte_len, rec_idx);
-                CHECK_FOR_INTERRUPTS();
-            }
-
-            /* Length bitmaps */
-            idx->max_length_legacy = idx->max_len + 1;
-            idx->max_length_lower += 1;
-
-            idx->length_bitmaps_legacy    = (RoaringBitmap **) palloc0(idx->max_length_legacy * sizeof(RoaringBitmap *));
-            idx->length_ge_bitmaps_legacy = (RoaringBitmap **) palloc0(idx->max_length_legacy * sizeof(RoaringBitmap *));
-            idx->length_bitmaps_lower     = (RoaringBitmap **) palloc0(idx->max_length_lower   * sizeof(RoaringBitmap *));
-            idx->length_ge_bitmaps_lower  = (RoaringBitmap **) palloc0(idx->max_length_lower   * sizeof(RoaringBitmap *));
-
-            for (ch = 0; ch < idx->max_length_legacy; ch++)
-                idx->length_ge_bitmaps_legacy[ch] = biscuit_roaring_create();
-            for (ch = 0; ch < idx->max_length_lower; ch++)
-                idx->length_ge_bitmaps_lower[ch] = biscuit_roaring_create();
-
-            for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++)
-            {
-                int bl;
-                int cl;
-
-                if (!idx->data_cache[rec_idx]) continue;
-
-                bl = strlen(idx->data_cache[rec_idx]);
-                cl = biscuit_utf8_char_count(idx->data_cache[rec_idx], bl);
-
-                if (cl < idx->max_length_legacy)
-                {
-                    if (!idx->length_bitmaps_legacy[cl])
-                        idx->length_bitmaps_legacy[cl] = biscuit_roaring_create();
-                    biscuit_roaring_add(idx->length_bitmaps_legacy[cl], rec_idx);
-                }
-                for (i = 0; i <= cl && i < idx->max_length_legacy; i++)
-                    biscuit_roaring_add(idx->length_ge_bitmaps_legacy[i], rec_idx);
-
-                if (idx->data_cache_lower[rec_idx])
-                {
-                    int lbl = strlen(idx->data_cache_lower[rec_idx]);
-                    int lcl = biscuit_utf8_char_count(idx->data_cache_lower[rec_idx], lbl);
-
-                    if (lcl < idx->max_length_lower)
-                    {
-                        if (!idx->length_bitmaps_lower[lcl])
-                            idx->length_bitmaps_lower[lcl] = biscuit_roaring_create();
-                        biscuit_roaring_add(idx->length_bitmaps_lower[lcl], rec_idx);
-                    }
-                    for (i = 0; i <= lcl && i < idx->max_length_lower; i++)
-                        biscuit_roaring_add(idx->length_ge_bitmaps_lower[i], rec_idx);
-                }
-            }
-        }
-        else
-        {
-            /* ---- Multi-column: per-column bitmap build ---- */
-            int col;
-
-            for (col = 0; col < idx->num_columns; col++)
-            {
-                ColumnIndex *cidx  = &idx->column_indices[col];
-                int          max_cl = 0;
-
-                for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++)
-                {
-                    const char *str;
-                    int         bl, cl, byte_pos, char_pos;
-
-                    if (!idx->column_data_cache[col][rec_idx]) continue;
-
-                    str  = idx->column_data_cache[col][rec_idx];
-                    bl   = strlen(str);
-                    cl   = biscuit_utf8_char_count(str, bl);
-
-                    if (cl > max_cl) max_cl = cl;
-
-                    byte_pos = char_pos = 0;
-                    while (byte_pos < bl)
-                    {
-                        unsigned char fb  = (unsigned char) str[byte_pos];
-                        int           chl = biscuit_utf8_char_length(fb);
-                        int           b;
-
-                        if (byte_pos + chl > bl) chl = bl - byte_pos;
-
-                        for (b = 0; b < chl; b++)
-                        {
-                            unsigned char uch = (unsigned char) str[byte_pos + b];
-                            RoaringBitmap *bm;
-                            int rch, no;
-
-                            /* pos_idx */
-                            if (char_pos >= cidx->pos_idx[uch].capacity)
-                            {
-                                /* grow CharIndex for this char */
-                                int newcap = cidx->pos_idx[uch].capacity * 2;
-                                cidx->pos_idx[uch].entries = (PosEntry *) repalloc(
-                                    cidx->pos_idx[uch].entries,
-                                    newcap * sizeof(PosEntry));
-                                cidx->pos_idx[uch].capacity = newcap;
-                            }
-                            /* find or create pos entry */
-                            bm = NULL;
-                            {
-                                int k;
-                                for (k = 0; k < cidx->pos_idx[uch].count; k++)
-                                    if (cidx->pos_idx[uch].entries[k].pos == char_pos)
-                                    { bm = cidx->pos_idx[uch].entries[k].bitmap; break; }
-                                if (!bm)
-                                {
-                                    PosEntry *pe = &cidx->pos_idx[uch].entries[cidx->pos_idx[uch].count++];
-                                    pe->pos    = char_pos;
-                                    pe->bitmap = biscuit_roaring_create();
-                                    bm         = pe->bitmap;
-                                }
-                            }
-                            biscuit_roaring_add(bm, rec_idx);
-
-                            /* neg_idx */
-                            rch = biscuit_utf8_char_count(str + byte_pos, bl - byte_pos);
-                            no  = -rch;
-                            bm  = NULL;
-                            {
-                                int k;
-                                for (k = 0; k < cidx->neg_idx[uch].count; k++)
-                                    if (cidx->neg_idx[uch].entries[k].pos == no)
-                                    { bm = cidx->neg_idx[uch].entries[k].bitmap; break; }
-                                if (!bm)
-                                {
-                                    PosEntry *pe = &cidx->neg_idx[uch].entries[cidx->neg_idx[uch].count++];
-                                    pe->pos    = no;
-                                    pe->bitmap = biscuit_roaring_create();
-                                    bm         = pe->bitmap;
-                                }
-                            }
-                            biscuit_roaring_add(bm, rec_idx);
-
-                            if (!cidx->char_cache[uch])
-                                cidx->char_cache[uch] = biscuit_roaring_create();
-                            biscuit_roaring_add(cidx->char_cache[uch], rec_idx);
-                        }
-                        byte_pos += chl;
-                        char_pos++;
-                    }
-
-                    CHECK_FOR_INTERRUPTS();
-                }
-
-                /* Length bitmaps for this column */
-                cidx->max_length = max_cl + 1;
-                cidx->length_bitmaps    = (RoaringBitmap **) palloc0(cidx->max_length * sizeof(RoaringBitmap *));
-                cidx->length_ge_bitmaps = (RoaringBitmap **) palloc0(cidx->max_length * sizeof(RoaringBitmap *));
-                for (i = 0; i < cidx->max_length; i++)
-                    cidx->length_ge_bitmaps[i] = biscuit_roaring_create();
-
-                for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++)
-                {
-                    int bl2;
-                    int cl2;
-
-                    if (!idx->column_data_cache[col][rec_idx]) continue;
-                    bl2 = strlen(idx->column_data_cache[col][rec_idx]);
-                    cl2 = biscuit_utf8_char_count(idx->column_data_cache[col][rec_idx], bl2);
-                    if (cl2 < cidx->max_length)
-                    {
-                        if (!cidx->length_bitmaps[cl2]) cidx->length_bitmaps[cl2] = biscuit_roaring_create();
-                        biscuit_roaring_add(cidx->length_bitmaps[cl2], rec_idx);
-                    }
-                    for (i = 0; i <= cl2 && i < cidx->max_length; i++)
-                        biscuit_roaring_add(cidx->length_ge_bitmaps[i], rec_idx);
-                }
-
-                cidx->max_length_lower = cidx->max_length;
-                cidx->length_bitmaps_lower    = (RoaringBitmap **) palloc0(cidx->max_length_lower * sizeof(RoaringBitmap *));
-                cidx->length_ge_bitmaps_lower = (RoaringBitmap **) palloc0(cidx->max_length_lower * sizeof(RoaringBitmap *));
-                for (i = 0; i < cidx->max_length_lower; i++)
-                    cidx->length_ge_bitmaps_lower[i] = biscuit_roaring_create();
-            }
-        }
-
-        /* Mark the local copy fully warm */
-        idx->preload_state = BISCUIT_PRELOAD_DONE;
-
-        /*
-         * Write DONE into the shared-memory slot_state so that every
-         * querying backend's rescan can detect completion via
-         * biscuit_preload_state().  We scan the ring buffer for our OID
-         * (same logic as biscuit_preload_state but with a write).
-         *
-         * Note: the worker's own biscuit_cache_insert below is harmless
-         * but irrelevant — querying sessions have their own private caches.
-         * The shmem flag is the only cross-process signal.
-         */
-        {
-            BiscuitPreloadShmem *_sh = biscuit_preload_shmem;
-            if (_sh)
-            {
-                int _oid_slot = (int)(indexoid % 64);
-                pg_atomic_write_u32(&_sh->slot_state[_oid_slot],
-                                    BISCUIT_PRELOAD_DONE);
-            }
-        }
-
-        /* Cache in the worker's own backend (cheap, not relied upon). */
-        biscuit_cache_insert(indexoid, idx);
-
-        elog(LOG,
-             "Biscuit preload: index %u fully loaded (%d records)",
-             indexoid, idx->num_records);
-    }
-    PG_CATCH();
-    {
-        idx->preload_state = BISCUIT_PRELOAD_FAILED;
-        elog(WARNING,
-             "Biscuit preload: bitmap build failed for index %u; "
-             "fallback scan will be used", indexoid);
-        MemoryContextSwitchTo(oldcontext);
-        PG_RE_THROW();
-    }
-    PG_END_TRY();
-
-    MemoryContextSwitchTo(oldcontext);
     index_close(index, AccessShareLock);
+
+    if (sh && oid_slot >= 0)
+        pg_atomic_write_u32(&sh->slot_state[oid_slot], BISCUIT_PRELOAD_DONE);
+
+    elog(LOG, "Biscuit preload: signalled DONE for index %u "
+              "(bitmaps built on demand per session)", indexoid);
 }
 
 /* ================================================================
@@ -966,8 +720,9 @@ biscuit_complete_preload_local(BiscuitIndex *idx, Oid indexoid)
 
         for (col = 0; col < idx->num_columns; col++)
         {
-            ColumnIndex *cidx  = &idx->column_indices[col];
-            int          max_cl = 0;
+            ColumnIndex *cidx        = &idx->column_indices[col];
+            int          max_cl      = 0;
+            int          max_cl_lower = 0;
 
             for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++)
             {
@@ -976,12 +731,22 @@ biscuit_complete_preload_local(BiscuitIndex *idx, Oid indexoid)
 
                 if (!idx->column_data_cache[col][rec_idx]) continue;
 
-                str  = idx->column_data_cache[col][rec_idx];
-                bl   = strlen(str);
-                cl   = biscuit_utf8_char_count(str, bl);
+                str = idx->column_data_cache[col][rec_idx];
+                bl  = strlen(str);
+                cl  = biscuit_utf8_char_count(str, bl);
 
                 if (cl > max_cl) max_cl = cl;
 
+                /* ---- Case-sensitive pass ----
+                 *
+                 * FIX 1: Use biscuit_get_col_pos_bitmap /
+                 * biscuit_set_col_pos_bitmap instead of direct array
+                 * indexing.  The set_* functions do a binary-search
+                 * insert with repalloc on capacity overflow; the old
+                 * code did entries[count++] with no bounds check,
+                 * overflowing the 8-slot skeleton allocation after the
+                 * 9th distinct (char, position) pair.
+                 */
                 byte_pos = char_pos = 0;
                 while (byte_pos < bl)
                 {
@@ -993,44 +758,31 @@ biscuit_complete_preload_local(BiscuitIndex *idx, Oid indexoid)
 
                     for (b = 0; b < chl; b++)
                     {
-                        unsigned char uch = (unsigned char) str[byte_pos + b];
+                        unsigned char  uch = (unsigned char) str[byte_pos + b];
                         RoaringBitmap *bm;
-                        int rch, no;
+                        int            rch, no;
 
-                        bm = NULL;
+                        /* positive-position bitmap */
+                        bm = biscuit_get_col_pos_bitmap(cidx, uch, char_pos);
+                        if (!bm)
                         {
-                            int k;
-                            for (k = 0; k < cidx->pos_idx[uch].count; k++)
-                                if (cidx->pos_idx[uch].entries[k].pos == char_pos)
-                                { bm = cidx->pos_idx[uch].entries[k].bitmap; break; }
-                            if (!bm)
-                            {
-                                PosEntry *pe = &cidx->pos_idx[uch].entries[cidx->pos_idx[uch].count++];
-                                pe->pos    = char_pos;
-                                pe->bitmap = biscuit_roaring_create();
-                                bm         = pe->bitmap;
-                            }
+                            bm = biscuit_roaring_create();
+                            biscuit_set_col_pos_bitmap(cidx, uch, char_pos, bm);
                         }
                         biscuit_roaring_add(bm, rec_idx);
 
+                        /* negative-position bitmap */
                         rch = biscuit_utf8_char_count(str + byte_pos, bl - byte_pos);
                         no  = -rch;
-                        bm  = NULL;
+                        bm  = biscuit_get_col_neg_bitmap(cidx, uch, no);
+                        if (!bm)
                         {
-                            int k;
-                            for (k = 0; k < cidx->neg_idx[uch].count; k++)
-                                if (cidx->neg_idx[uch].entries[k].pos == no)
-                                { bm = cidx->neg_idx[uch].entries[k].bitmap; break; }
-                            if (!bm)
-                            {
-                                PosEntry *pe = &cidx->neg_idx[uch].entries[cidx->neg_idx[uch].count++];
-                                pe->pos    = no;
-                                pe->bitmap = biscuit_roaring_create();
-                                bm         = pe->bitmap;
-                            }
+                            bm = biscuit_roaring_create();
+                            biscuit_set_col_neg_bitmap(cidx, uch, no, bm);
                         }
                         biscuit_roaring_add(bm, rec_idx);
 
+                        /* character-presence cache */
                         if (!cidx->char_cache[uch])
                             cidx->char_cache[uch] = biscuit_roaring_create();
                         biscuit_roaring_add(cidx->char_cache[uch], rec_idx);
@@ -1039,10 +791,70 @@ biscuit_complete_preload_local(BiscuitIndex *idx, Oid indexoid)
                     char_pos++;
                 }
 
+                /* ---- Case-insensitive pass ----
+                 *
+                 * FIX 2: This entire block was missing.  The old code
+                 * never populated pos_idx_lower, neg_idx_lower, or
+                 * char_cache_lower for multi-column indexes, so any
+                 * ILIKE query after a preload would dereference NULL or
+                 * stale pointers and segfault.
+                 */
+                {
+                    char *sl  = biscuit_str_tolower(str, bl);
+                    int   sll = (int) strlen(sl);
+                    int   lcc = biscuit_utf8_char_count(sl, sll);
+                    int   lbp = 0;
+                    int   lcp = 0;
+
+                    if (lcc > max_cl_lower) max_cl_lower = lcc;
+
+                    while (lbp < sll)
+                    {
+                        unsigned char fb2 = (unsigned char) sl[lbp];
+                        int           chl2 = biscuit_utf8_char_length(fb2);
+                        int           b;
+
+                        if (lbp + chl2 > sll) chl2 = sll - lbp;
+
+                        for (b = 0; b < chl2; b++)
+                        {
+                            unsigned char  uch = (unsigned char) sl[lbp + b];
+                            RoaringBitmap *bm;
+                            int            rc, no;
+
+                            bm = biscuit_get_col_pos_bitmap_lower(cidx, uch, lcp);
+                            if (!bm)
+                            {
+                                bm = biscuit_roaring_create();
+                                biscuit_set_col_pos_bitmap_lower(cidx, uch, lcp, bm);
+                            }
+                            biscuit_roaring_add(bm, rec_idx);
+
+                            rc = biscuit_utf8_char_count(sl + lbp, sll - lbp);
+                            no = -rc;
+                            bm = biscuit_get_col_neg_bitmap_lower(cidx, uch, no);
+                            if (!bm)
+                            {
+                                bm = biscuit_roaring_create();
+                                biscuit_set_col_neg_bitmap_lower(cidx, uch, no, bm);
+                            }
+                            biscuit_roaring_add(bm, rec_idx);
+
+                            if (!cidx->char_cache_lower[uch])
+                                cidx->char_cache_lower[uch] = biscuit_roaring_create();
+                            biscuit_roaring_add(cidx->char_cache_lower[uch], rec_idx);
+                        }
+                        lbp += chl2;
+                        lcp++;
+                    }
+
+                    pfree(sl);
+                }
+
                 CHECK_FOR_INTERRUPTS();
             }
 
-            /* Length bitmaps for this column */
+            /* ---- Case-sensitive length bitmaps ---- */
             cidx->max_length = max_cl + 1;
             cidx->length_bitmaps    = (RoaringBitmap **) palloc0(cidx->max_length * sizeof(RoaringBitmap *));
             cidx->length_ge_bitmaps = (RoaringBitmap **) palloc0(cidx->max_length * sizeof(RoaringBitmap *));
@@ -1058,18 +870,48 @@ biscuit_complete_preload_local(BiscuitIndex *idx, Oid indexoid)
                 cl2 = biscuit_utf8_char_count(idx->column_data_cache[col][rec_idx], bl2);
                 if (cl2 < cidx->max_length)
                 {
-                    if (!cidx->length_bitmaps[cl2]) cidx->length_bitmaps[cl2] = biscuit_roaring_create();
+                    if (!cidx->length_bitmaps[cl2])
+                        cidx->length_bitmaps[cl2] = biscuit_roaring_create();
                     biscuit_roaring_add(cidx->length_bitmaps[cl2], rec_idx);
                 }
                 for (i = 0; i <= cl2 && i < cidx->max_length; i++)
                     biscuit_roaring_add(cidx->length_ge_bitmaps[i], rec_idx);
             }
 
-            cidx->max_length_lower = cidx->max_length;
+            /* ---- Case-insensitive length bitmaps ----
+             *
+             * FIX 2 (cont): Previously max_length_lower was simply
+             * copied from max_length (wrong: lowercasing can change
+             * character count, e.g. German ß→ss), and the bitmaps were
+             * allocated but never filled.  Now we use the independently
+             * tracked max_cl_lower and populate correctly.
+             */
+            cidx->max_length_lower = max_cl_lower + 1;
             cidx->length_bitmaps_lower    = (RoaringBitmap **) palloc0(cidx->max_length_lower * sizeof(RoaringBitmap *));
             cidx->length_ge_bitmaps_lower = (RoaringBitmap **) palloc0(cidx->max_length_lower * sizeof(RoaringBitmap *));
             for (i = 0; i < cidx->max_length_lower; i++)
                 cidx->length_ge_bitmaps_lower[i] = biscuit_roaring_create();
+
+            for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++)
+            {
+                int   bl2, lcl;
+                char *sl;
+
+                if (!idx->column_data_cache[col][rec_idx]) continue;
+                bl2 = strlen(idx->column_data_cache[col][rec_idx]);
+                sl  = biscuit_str_tolower(idx->column_data_cache[col][rec_idx], bl2);
+                lcl = biscuit_utf8_char_count(sl, strlen(sl));
+                pfree(sl);
+
+                if (lcl < cidx->max_length_lower)
+                {
+                    if (!cidx->length_bitmaps_lower[lcl])
+                        cidx->length_bitmaps_lower[lcl] = biscuit_roaring_create();
+                    biscuit_roaring_add(cidx->length_bitmaps_lower[lcl], rec_idx);
+                }
+                for (i = 0; i <= lcl && i < cidx->max_length_lower; i++)
+                    biscuit_roaring_add(cidx->length_ge_bitmaps_lower[i], rec_idx);
+            }
         }
     }
 
@@ -1123,59 +965,161 @@ biscuit_fallback_scan(BiscuitIndex *idx,
     int    suffix_len  = 0;
     int    sub_len     = 0;
 
-    /* Simple pattern decomposition: find leading/trailing literal parts */
+    /* Simple pattern decomposition: find leading/trailing literal parts.
+     * Backslash-escape sequences are unescaped:
+     *   \% -> literal %   \_ -> literal _   \\ -> literal \
+     * Unescaped '_' is a single-char wildcard: we represent it as a
+     * single NUL placeholder so prefix/suffix length accounting is correct,
+     * but we cannot do a simple strncmp with wildcards present — we fall
+     * back to a full character-by-character match in that case.
+     */
     {
         const char *p   = pattern;
-        const char *end = pattern + strlen(pattern);
+        int         plen_raw = strlen(pattern);
+        const char *end = pattern + plen_raw;
         const char *q;
         int         pct_count = 0;
+        bool        has_underscore_wildcard = false;
 
         for (q = p; q < end; q++)
-            if (*q == '%') pct_count++;
-
-        if (pct_count == 0)
         {
-            /* exact match */
-            is_exact  = true;
-            prefix     = pstrdup(pattern);
-            prefix_len = strlen(prefix);
+            if (*q == '\\' && q + 1 < end)
+            {
+                q++; /* skip escaped char, not a wildcard */
+            }
+            else if (*q == '%')
+                pct_count++;
+            else if (*q == '_')
+                has_underscore_wildcard = true;
         }
-        else
+
+        if (pct_count == 0 && !has_underscore_wildcard)
         {
-            /* leading literal before first % */
-            const char *first_pct = strchr(p, '%');
-            const char *last_pct;
-            if (first_pct > p)
+            /* exact match — unescape the pattern */
+            char *unesc = (char *) palloc(plen_raw + 1);
+            int   ui    = 0;
+            for (q = p; q < end; q++)
             {
-                prefix_len = first_pct - p;
-                prefix     = pnstrdup(p, prefix_len);
-                has_prefix = true;
+                if (*q == '\\' && q + 1 < end)
+                    unesc[ui++] = *++q;
+                else
+                    unesc[ui++] = *q;
             }
+            unesc[ui] = '\0';
+            is_exact   = true;
+            prefix     = unesc;
+            prefix_len = ui;
+        }
+        else if (has_underscore_wildcard || pct_count > 0)
+        {
+            /*
+             * General pattern: extract unescaped prefix (before the first
+             * unescaped '%' or '_'), suffix (after the last unescaped '%'),
+             * and a middle substring for quick pre-filtering.
+             *
+             * When '_' wildcards appear, prefix matching is done
+             * character-by-character further down; we still extract the
+             * concrete prefix bytes up to (but not including) the first
+             * wildcard for a quick rejection test.
+             */
+            const char *first_wild = NULL;
+            const char *last_pct   = NULL;
 
-            /* trailing literal after last % */
-            last_pct = strrchr(p, '%');
-            if (last_pct < end - 1)
+            /* Find positions of first wildcard and last unescaped % */
+            for (q = p; q < end; q++)
             {
-                suffix     = pstrdup(last_pct + 1);
-                suffix_len = strlen(suffix);
-                has_suffix = true;
-            }
-
-            /* middle substring between first and last % */
-            if (last_pct > first_pct + 1)
-            {
-                const char *mid_start = first_pct + 1;
-                const char *mid_end   = last_pct;
-                /* find first literal run (no %) */
-                const char *s = mid_start;
-                const char *e;
-                while (s < mid_end && *s == '%') s++;
-                e = s;
-                while (e < mid_end && *e != '%') e++;
-                if (e > s)
+                if (*q == '\\' && q + 1 < end)
                 {
-                    substring = pnstrdup(s, e - s);
-                    sub_len   = e - s;
+                    q++;
+                    continue;
+                }
+                if (*q == '%' || *q == '_')
+                {
+                    if (!first_wild)
+                        first_wild = q;
+                    if (*q == '%')
+                        last_pct = q;
+                }
+            }
+
+            /* Unescaped prefix before first wildcard */
+            if (first_wild && first_wild > p)
+            {
+                char *unesc = (char *) palloc((first_wild - p) + 1);
+                int   ui    = 0;
+                for (q = p; q < first_wild; q++)
+                {
+                    if (*q == '\\' && q + 1 < first_wild)
+                        unesc[ui++] = *++q;
+                    else
+                        unesc[ui++] = *q;
+                }
+                unesc[ui]  = '\0';
+                prefix      = unesc;
+                prefix_len  = ui;
+                has_prefix  = (ui > 0);
+            }
+
+            /* Unescaped suffix after last unescaped % */
+            if (last_pct && last_pct < end - 1)
+            {
+                const char *sf = last_pct + 1;
+                char *unesc    = (char *) palloc((end - sf) + 1);
+                int   ui       = 0;
+                for (q = sf; q < end; q++)
+                {
+                    if (*q == '\\' && q + 1 < end)
+                        unesc[ui++] = *++q;
+                    else if (*q == '_')
+                    {
+                        /* suffix with wildcard: can't use simple strcmp */
+                        ui = 0;
+                        has_suffix = false;
+                        break;
+                    }
+                    else
+                        unesc[ui++] = *q;
+                }
+                if (ui > 0)
+                {
+                    unesc[ui]  = '\0';
+                    suffix      = unesc;
+                    suffix_len  = ui;
+                    has_suffix  = true;
+                }
+                else
+                    pfree(unesc);
+            }
+
+            /* Middle literal run for substring pre-filtering */
+            if (last_pct && first_wild && last_pct > first_wild)
+            {
+                const char *s = first_wild + 1;
+                const char *e_scan;
+                /* skip any leading %/_  */
+                while (s < last_pct && (*s == '%' || *s == '_')) s++;
+                e_scan = s;
+                while (e_scan < last_pct && *e_scan != '%' && *e_scan != '_')
+                {
+                    if (*e_scan == '\\' && e_scan + 1 < last_pct)
+                        e_scan++;
+                    e_scan++;
+                }
+                if (e_scan > s)
+                {
+                    /* Unescape the middle run */
+                    char *unesc = (char *) palloc((e_scan - s) + 1);
+                    int   ui    = 0;
+                    for (q = s; q < e_scan; q++)
+                    {
+                        if (*q == '\\' && q + 1 < e_scan)
+                            unesc[ui++] = *++q;
+                        else
+                            unesc[ui++] = *q;
+                    }
+                    unesc[ui]  = '\0';
+                    substring   = unesc;
+                    sub_len     = ui;
                 }
             }
         }

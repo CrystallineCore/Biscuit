@@ -1,17 +1,17 @@
 {
   "name": "biscuit",
   "abstract": "A bitmap index for wildcard pattern matching",
-  "description": "Biscuit is a fast bitmap-based deterministic pattern matching index for PostgreSQL.",
-  "version": "2.2.2",
+  "description": "Biscuit is a fast bitmap-based deterministic pattern matching index access method for PostgreSQL. This release is under active development and may contain bugs.",
+  "version": "2.2.3",
   "maintainer": [
     "Sivaprasad Murali <sivaprasad.off@gmail.com>"
   ],
   "license": "mit",
   "provides": {
     "biscuit": {
-      "file": "sql/biscuit--1.0.sql",
+      "file": "sql/biscuit--2.2.3.sql",
       "docfile": "README.md",
-      "version": "2.2.2"
+      "version": "2.2.3"
     }
   },
   "tags": [
@@ -26,9 +26,11 @@
     "text-search",
     "multi-column",
     "deterministic",
-    "postgresql-extension"
+    "postgresql-extension",
+    "access-method",
+    "index-access-method"
   ],
-  "release_status": "stable",
+  "release_status": "beta",
   "resources": {
     "homepage": "https://github.com/crystallinecore/biscuit",
     "repository": {
@@ -38,7 +40,7 @@
     }
   },
   "x_requires": {
-    "PostgreSQL": ">=12.0"
+    "PostgreSQL": ">=15.0"
   },
   "meta-spec": {
     "version": "1.0.0",

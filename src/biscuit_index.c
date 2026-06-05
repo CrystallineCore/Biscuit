@@ -530,15 +530,17 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
     TupleTableSlot   *slot;
     TableScanDesc     scan;
     MemoryContext     oldcontext;
-    MemoryContext     indexContext;
     int               ch, natts, col, rec_idx;
 
-    if (!index->rd_indexcxt)
-        index->rd_indexcxt = AllocSetContextCreate(
-            CacheMemoryContext, "Biscuit index context", ALLOCSET_DEFAULT_SIZES);
-
-    indexContext = index->rd_indexcxt;
-    oldcontext   = MemoryContextSwitchTo(indexContext);
+    /*
+     * All BiscuitIndex data must live in CacheMemoryContext, not in
+     * rd_indexcxt.  PostgreSQL calls MemoryContextDelete(rd_indexcxt) inside
+     * RelationClearRelation on any relcache invalidation (ANALYZE, DDL, cache
+     * sweeps), which would free all our data while the cache entry still holds
+     * the pointer.  CacheMemoryContext is never reset by PostgreSQL and is the
+     * correct long-lived home for session-scoped index structures.
+     */
+    oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
 
     PG_TRY();
     {
@@ -723,21 +725,22 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
             biscuit_init_crud_structures(idx);
 
             slot = table_slot_create(heap, NULL);
-            scan = table_beginscan(heap, SnapshotAny, 0, NULL);
-
+            #if PG_VERSION_NUM >= 190000
+                scan = table_beginscan(heap, SnapshotAny, 0, NULL, 0);
+            #else
+                scan = table_beginscan(heap, SnapshotAny, 0, NULL);
+            #endif
             while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
             {
-                bool   any_non_null = false;
+                
+                bool all_non_null = true;
                 slot_getallattrs(slot);
-
-                for (col = 0; col < natts; col++)
-                {
+                for (col = 0; col < natts; col++) {
                     bool isnull;
                     slot_getattr(slot, index->rd_index->indkey.values[col], &isnull);
-                    if (!isnull) { any_non_null = true; break; }
+                    if (isnull) { all_non_null = false; break; }
                 }
-
-                if (!any_non_null) continue;
+                if (!all_non_null) continue;
 
                 if (idx->num_records >= idx->capacity)
                 {
@@ -962,10 +965,7 @@ biscuit_insert(Relation index,
         index->rd_amcache = idx;
     }
 
-    if (index->rd_indexcxt)
-        oldcontext = MemoryContextSwitchTo(index->rd_indexcxt);
-    else
-        oldcontext = CurrentMemoryContext;
+    oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
 
     /* Check for duplicate TID (UPDATE path) */
     for (int i = 0; i < idx->num_records; i++)
@@ -998,7 +998,14 @@ biscuit_insert(Relation index,
 
     /* Try to reuse a free slot */
     if (!found_existing && biscuit_pop_free_slot(idx, &slot))
+    {
         is_reusing_slot = true;
+        /* Un-tombstone the recycled slot so NOT LIKE inversion
+         * doesn't exclude a live record. */
+        biscuit_roaring_remove(idx->tombstones, slot);
+        if (idx->tombstone_count > 0)
+            idx->tombstone_count--;
+    }
 
     if (!found_existing && !is_reusing_slot)
     {
@@ -1088,7 +1095,15 @@ biscuit_insert(Relation index,
                 int   out_len;
                 char *str = biscuit_datum_to_text(values[col], idx->column_types[col], &idx->output_funcs[col], &out_len);
                 idx->column_data_cache[col][slot] = str;
-                /* Per-column bitmap indexing mirrors single-column logic; omitted for brevity */
+
+                /*
+                 * FIX 3: The call below was previously missing ("omitted for brevity"),
+                 * causing every row inserted after index build to be silently absent
+                 * from all character/position/length bitmaps.  Subsequent queries
+                 * would return stale TIDs and could segfault when dereferencing
+                 * length_bitmaps for an unindexed slot.
+                 */
+                biscuit_index_column_record(idx, col, str, out_len, slot);
             }
             else
                 idx->column_data_cache[col][slot] = NULL;
@@ -1098,8 +1113,7 @@ biscuit_insert(Relation index,
     if (!found_existing && !is_reusing_slot)
         idx->insert_count++;
 
-    if (index->rd_indexcxt)
-        MemoryContextSwitchTo(oldcontext);
+    MemoryContextSwitchTo(oldcontext);
 
     return true;
 }
@@ -1128,10 +1142,7 @@ biscuit_bulkdelete(IndexVacuumInfo *info,
     if (!stats)
         stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));
 
-    if (index->rd_indexcxt)
-        oldcontext = MemoryContextSwitchTo(index->rd_indexcxt);
-    else
-        oldcontext = CurrentMemoryContext;
+    oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
 
     records_to_delete = biscuit_roaring_create();
 
@@ -1238,14 +1249,21 @@ biscuit_bulkdelete(IndexVacuumInfo *info,
                             biscuit_roaring_andnot_inplace(cidx->char_cache_lower[ch], records_to_delete);
                     }
 
-                    for (j = 0; j <= cidx->max_length; j++)
+                    /*
+                     * FIX 4: Was j <= cidx->max_length / j <= cidx->max_length_lower,
+                     * reading one slot past the end of the palloc'd arrays (valid
+                     * indices 0..max_length-1).  This caused the GPF in biscuit.so
+                     * at 15:05 on the first VACUUM after the earlier fixes, because
+                     * autovacuum hit this path before the extension was reloaded.
+                     */
+                    for (j = 0; j < cidx->max_length; j++)
                     {
                         if (cidx->length_bitmaps && cidx->length_bitmaps[j])
                             biscuit_roaring_andnot_inplace(cidx->length_bitmaps[j], records_to_delete);
                         if (cidx->length_ge_bitmaps && cidx->length_ge_bitmaps[j])
                             biscuit_roaring_andnot_inplace(cidx->length_ge_bitmaps[j], records_to_delete);
                     }
-                    for (j = 0; j <= cidx->max_length_lower; j++)
+                    for (j = 0; j < cidx->max_length_lower; j++)
                     {
                         if (cidx->length_bitmaps_lower && cidx->length_bitmaps_lower[j])
                             biscuit_roaring_andnot_inplace(cidx->length_bitmaps_lower[j], records_to_delete);
@@ -1266,15 +1284,25 @@ biscuit_bulkdelete(IndexVacuumInfo *info,
 
     biscuit_roaring_free(records_to_delete);
 
+    /* BEFORE clearing tombstones, purge stale bitmap data for
+    * tombstoned slots that were never reused (still on free_list). */
     if (idx->tombstone_count >= TOMBSTONE_CLEANUP_THRESHOLD)
     {
+        uint64_t  ts_count;
+        uint32_t *ts_slots = biscuit_roaring_to_array(idx->tombstones, &ts_count);
+        if (ts_slots)
+        {
+            uint64_t k;
+            for (k = 0; k < ts_count; k++)
+                biscuit_remove_from_all_indices(idx, ts_slots[k]);
+            pfree(ts_slots);
+        }
         biscuit_roaring_free(idx->tombstones);
         idx->tombstones      = biscuit_roaring_create();
         idx->tombstone_count = 0;
     }
 
-    if (index->rd_indexcxt)
-        MemoryContextSwitchTo(oldcontext);
+    MemoryContextSwitchTo(oldcontext);
 
     stats->num_pages   = 1;
     stats->pages_deleted = 0;

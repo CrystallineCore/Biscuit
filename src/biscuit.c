@@ -281,9 +281,11 @@ biscuit_index_stats(PG_FUNCTION_ARGS)
     {
         bool has_data = (idx->num_columns == 1 && idx->data_cache[i] != NULL) ||
                         (idx->num_columns > 1 && idx->column_data_cache[0][i] != NULL);
-        if (!has_data) continue;
 
         bool is_tombstoned = false;
+        if (!has_data) continue;
+        
+        
 #ifdef HAVE_ROARING
         is_tombstoned = roaring_bitmap_contains(idx->tombstones, (uint32_t) i);
 #else

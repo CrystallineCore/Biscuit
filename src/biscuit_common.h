@@ -53,11 +53,13 @@ typedef struct {
 
 /* ==================== STRATEGY NUMBERS ==================== */
 
+/* BTree strategy numbers for reference
 #define BTLessStrategyNumber            1
 #define BTLessEqualStrategyNumber       2
 #define BTEqualStrategyNumber           3
 #define BTGreaterEqualStrategyNumber    4
 #define BTGreaterStrategyNumber         5
+*/
 
 #define BISCUIT_LIKE_STRATEGY           1
 #define BISCUIT_NOT_LIKE_STRATEGY       2
@@ -72,7 +74,7 @@ typedef struct {
 #define CHAR_RANGE                      256
 #define TOMBSTONE_CLEANUP_THRESHOLD     1000
 #define RADIX_SORT_THRESHOLD            5000
-#define BISCUIT_LIBRARY_VERSION         "2.2.3 - Alpha"
+#define BISCUIT_LIBRARY_VERSION         "2.2.3 - Wafer"
 
 /* ==================== MEMORY MANAGEMENT MACROS ==================== */
 

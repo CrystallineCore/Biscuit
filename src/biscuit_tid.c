@@ -184,7 +184,7 @@ biscuit_collect_sorted_tids_single(BiscuitIndex *idx,
 
 #ifdef HAVE_ROARING
     {
-        roaring_uint32_iterator_t *iter = roaring_create_iterator(result);
+        roaring_uint32_iterator_t *iter = roaring_iterator_create(result);
 
         while (iter->has_value)
         {
@@ -194,9 +194,9 @@ biscuit_collect_sorted_tids_single(BiscuitIndex *idx,
                 ItemPointerCopy(&idx->tids[rec_idx], &tids[idx_out]);
                 idx_out++;
             }
-            roaring_advance_uint32_iterator(iter);
+            roaring_uint32_iterator_advance(iter);
         }
-        roaring_free_uint32_iterator(iter);
+        roaring_uint32_iterator_free(iter);
     }
 #else
     {
@@ -390,7 +390,7 @@ biscuit_collect_tids_optimized(BiscuitIndex *idx,
 
 #ifdef HAVE_ROARING
         {
-            roaring_uint32_iterator_t *iter = roaring_create_iterator(result);
+            roaring_uint32_iterator_t *iter = roaring_iterator_create(result);
 
             while (iter->has_value && idx_out < (int) collect_count)
             {
@@ -403,9 +403,9 @@ biscuit_collect_tids_optimized(BiscuitIndex *idx,
                     if (limit_hint > 0 && idx_out >= limit_hint)
                         break;
                 }
-                roaring_advance_uint32_iterator(iter);
+                roaring_uint32_iterator_advance(iter);
             }
-            roaring_free_uint32_iterator(iter);
+            roaring_uint32_iterator_free(iter);
         }
 #else
         {
