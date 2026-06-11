@@ -27,20 +27,13 @@ extern void biscuit_collect_sorted_tids_parallel(BiscuitIndex *idx,
                                                  bool needs_sorting);
 
 /*
- * Unified entry point: chooses parallel vs. single-threaded automatically
- * and supports an optional LIMIT hint (pass -1 for "no limit").
+ * Parallel worker entry point — registered via RegisterParallelWorkerMain()
+ * and also called directly by the leader process to participate as an extra
+ * worker.  The name string must match the one passed to CreateParallelContext.
  */
-extern void biscuit_collect_tids_optimized(BiscuitIndex *idx,
-                                           RoaringBitmap *result,
-                                           ItemPointerData **out_tids,
-                                           int *out_count,
-                                           bool needs_sorting,
-                                           int limit_hint);
+PGDLLEXPORT extern void biscuit_parallel_collect_worker(dsm_segment *seg, shm_toc *toc);
 
 /* Detect whether a scan is aggregate-only (no tuple fetch needed). */
 extern bool biscuit_is_aggregate_query(IndexScanDesc scan);
-
-/* Estimate a LIMIT hint from a scan descriptor (-1 = unknown). */
-extern int  biscuit_estimate_limit_hint(IndexScanDesc scan);
 
 #endif /* BISCUIT_TID_H */

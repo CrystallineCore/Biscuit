@@ -133,11 +133,9 @@ biscuit_rescan_multicolumn(IndexScanDesc scan,
     RoaringBitmap     *candidates;
     QueryPlan         *plan;
     bool               needs_sorting;
-    int                limit_hint;
     int                i;
 
     needs_sorting = so->needs_sorted_access;
-    limit_hint    = so->limit_remaining;
 
     /* Start with all records as candidates */
     candidates = biscuit_roaring_create();
@@ -217,9 +215,9 @@ biscuit_rescan_multicolumn(IndexScanDesc scan,
             break;
     }
 
-    biscuit_collect_tids_optimized(so->index, candidates,
-                                   &so->results, &so->num_results,
-                                   needs_sorting, limit_hint);
+    biscuit_collect_sorted_tids_parallel(so->index, candidates,
+                                         &so->results, &so->num_results,
+                                         needs_sorting);
 
     biscuit_roaring_free(candidates);
 
@@ -386,9 +384,9 @@ biscuit_rescan_multicolumn_fallback(IndexScanDesc scan,
         if (so->index->tombstone_count > 0 && so->index->tombstones)
             biscuit_roaring_andnot_inplace(candidates, so->index->tombstones);
 
-        biscuit_collect_tids_optimized(so->index, candidates,
-                                       &so->results, &so->num_results,
-                                       needs_sorting, so->limit_remaining);
+        biscuit_collect_sorted_tids_parallel(so->index, candidates,
+                                             &so->results, &so->num_results,
+                                             needs_sorting);
 
         biscuit_roaring_free(candidates);
     }
@@ -414,7 +412,6 @@ biscuit_rescan(IndexScanDesc scan,
     BiscuitScanOpaque *so = (BiscuitScanOpaque *) scan->opaque;
     bool               is_aggregate;
     bool               needs_sorting;
-    int                limit_hint;
     bool               bitmaps_ready;
 
     if (so->results)
@@ -444,11 +441,10 @@ biscuit_rescan(IndexScanDesc scan,
 
     is_aggregate   = biscuit_is_aggregate_query(scan);
     needs_sorting  = !is_aggregate;
-    limit_hint     = biscuit_estimate_limit_hint(scan);
 
     so->is_aggregate_only   = is_aggregate;
     so->needs_sorted_access = needs_sorting;
-    so->limit_remaining     = limit_hint;
+    so->limit_remaining     = -1;
 
     /*
      * Check whether the background worker has finished building the bitmaps.
@@ -530,6 +526,9 @@ biscuit_rescan(IndexScanDesc scan,
 
                 if (key->sk_flags & SK_ISNULL)
                     continue;
+
+                is_not = (key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY ||
+                          key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
 
                 pattern_text = DatumGetTextPP(key->sk_argument);
                 pattern      = text_to_cstring(pattern_text);
@@ -622,9 +621,9 @@ biscuit_rescan(IndexScanDesc scan,
             if (so->index->tombstone_count > 0)
                 biscuit_roaring_andnot_inplace(result, so->index->tombstones);
 
-            biscuit_collect_tids_optimized(so->index, result,
-                                           &so->results, &so->num_results,
-                                           needs_sorting, limit_hint);
+            biscuit_collect_sorted_tids_parallel(so->index, result,
+                                                 &so->results, &so->num_results,
+                                                 needs_sorting);
 
             biscuit_roaring_free(result);
         }
@@ -802,9 +801,9 @@ biscuit_rescan(IndexScanDesc scan,
                 if (so->index->tombstone_count > 0 && so->index->tombstones)
                     biscuit_roaring_andnot_inplace(candidates, so->index->tombstones);
 
-                biscuit_collect_tids_optimized(so->index, candidates,
-                                               &so->results, &so->num_results,
-                                               needs_sorting, limit_hint);
+                biscuit_collect_sorted_tids_parallel(so->index, candidates,
+                                                     &so->results, &so->num_results,
+                                                     needs_sorting);
 
                 biscuit_roaring_free(candidates);
             }

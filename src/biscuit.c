@@ -26,6 +26,7 @@
 #include "biscuit_index.h"
 #include "biscuit_scan.h"
 #include "biscuit_preload.h"
+#include "biscuit_tid.h"
 
 /* ================================================================
  * MODULE MAGIC
