@@ -78,7 +78,7 @@ typedef struct {
 #define CHAR_RANGE                      256
 #define TOMBSTONE_CLEANUP_THRESHOLD     1000
 #define RADIX_SORT_THRESHOLD            5000
-#define BISCUIT_LIBRARY_VERSION         "2.2.4 - Pickle"
+#define BISCUIT_LIBRARY_VERSION         "2.2.4 - Halwa"
 
 /* ==================== MEMORY MANAGEMENT MACROS ==================== */
 
