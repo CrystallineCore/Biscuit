@@ -3,6 +3,35 @@
  * Index scan lifecycle: beginscan, rescan (single- and multi-column),
  * gettuple, getbitmap, endscan.
  *
+ * PARALLEL SCAN FIX (see also biscuit_tid.c)
+ * ------------------------------------------
+ * Root cause of the duplicate-row bug
+ * ------------------------------------
+ * biscuit_rescan() always called biscuit_collect_sorted_tids_single(),
+ * which evaluates the full bitmap and returns ALL matching TIDs.  Because
+ * every Gather participant (leader + N workers) executes an independent
+ * amrescan, every participant collected the full result set and Gather
+ * assembled N copies — producing rows=N×expected in EXPLAIN ANALYZE.
+ *
+ * Fix
+ * ---
+ * Both the single-column and multi-column fast paths now call
+ * biscuit_collect_sorted_tids_parallel() when scan->parallel_scan != NULL.
+ * That function handles all coordination internally:
+ *
+ *   • Each participant evaluates the bitmap locally (read-only, deterministic
+ *     → identical result in every process, no DSM pointer sharing needed).
+ *   • An atomic CAS on pdesc->next_chunk (UNINIT→INITING) elects exactly one
+ *     initializer to write total_tids/total_chunks into the shared DSM
+ *     descriptor.  Others spin-wait with CHECK_FOR_INTERRUPTS + 1µs sleep.
+ *   • Every participant then claims a disjoint chunk range atomically and
+ *     returns only those TIDs to Gather — assembling exactly one result copy.
+ *
+ * No changes to BiscuitScanOpaque or biscuit_common.h are required.
+ * No IsParallelWorker() distinction is needed — every participant runs
+ * the same code path.
+ *
+ *
  * Lazy-load strategy
  * ------------------
  * Previously beginscan called biscuit_load_index() synchronously, which
@@ -69,7 +98,9 @@ biscuit_beginscan(Relation index, int nkeys, int norderbys)
 
     if (!so->index)
         so->index = biscuit_cache_lookup(indexoid);
-
+    
+    elog(DEBUG1, "Entered beginscan()");
+    
     if (so->index)
     {
         /*
@@ -124,6 +155,14 @@ biscuit_beginscan(Relation index, int nkeys, int norderbys)
  * Only reached when preload_state == BISCUIT_PRELOAD_DONE.
  * ================================================================ */
 
+/*
+ * biscuit_rescan_multicolumn
+ *
+ * scan is passed through so the function can dispatch to the parallel
+ * or single-threaded TID-collection path exactly as the single-column
+ * fast path in biscuit_rescan() does.  See that path for the full
+ * rationale.
+ */
 static void
 biscuit_rescan_multicolumn(IndexScanDesc scan,
                            ScanKey keys, int nkeys,
@@ -215,9 +254,22 @@ biscuit_rescan_multicolumn(IndexScanDesc scan,
             break;
     }
 
-    biscuit_collect_sorted_tids_parallel(so->index, candidates,
-                                         &so->results, &so->num_results,
-                                         needs_sorting);
+    /* Parallel-aware TID collection — same as single-column fast path. */
+    {
+        BiscuitParallelScanDesc *pdesc = NULL;
+
+        if (scan->parallel_scan != NULL)
+        {
+            pdesc = (BiscuitParallelScanDesc *)
+                        OffsetToPointer(scan->parallel_scan,
+                                        scan->parallel_scan->ps_offset_am);
+        }
+
+        biscuit_collect_sorted_tids_parallel(
+            so->index, candidates, pdesc,
+            &so->results, &so->num_results,
+            needs_sorting);
+    }
 
     biscuit_roaring_free(candidates);
 
@@ -384,7 +436,7 @@ biscuit_rescan_multicolumn_fallback(IndexScanDesc scan,
         if (so->index->tombstone_count > 0 && so->index->tombstones)
             biscuit_roaring_andnot_inplace(candidates, so->index->tombstones);
 
-        biscuit_collect_sorted_tids_parallel(so->index, candidates,
+        biscuit_collect_sorted_tids_single(so->index, candidates,
                                              &so->results, &so->num_results,
                                              needs_sorting);
 
@@ -494,7 +546,7 @@ biscuit_rescan(IndexScanDesc scan,
         }
         else if (shmem_state == BISCUIT_PRELOAD_FAILED)
         {
-            elog(WARNING,
+            elog(DEBUG1,
                  "Biscuit: preload worker failed for index %u; "
                  "using sequential fallback scan (may be slow)",
                  RelationGetRelid(scan->indexRelation));
@@ -504,6 +556,7 @@ biscuit_rescan(IndexScanDesc scan,
     /* ---------------------------------------------------------------
      * FAST PATH – bitmaps are available
      * --------------------------------------------------------------- */
+    elog(DEBUG1, "Entering Checkpoint - 1: 559");
     if (bitmaps_ready)
     {
         if (so->index->num_columns > 1)
@@ -562,7 +615,7 @@ biscuit_rescan(IndexScanDesc scan,
                     if (result) biscuit_roaring_free(result);
                     return;
                 }
-
+                
                 if (is_not)
                 {
                     /*
@@ -598,7 +651,6 @@ biscuit_rescan(IndexScanDesc scan,
                     biscuit_roaring_free(key_result);
                     key_result = all;
                 }
-
                 if (!result)
                     result = key_result;
                 else
@@ -621,9 +673,43 @@ biscuit_rescan(IndexScanDesc scan,
             if (so->index->tombstone_count > 0)
                 biscuit_roaring_andnot_inplace(result, so->index->tombstones);
 
-            biscuit_collect_sorted_tids_parallel(so->index, result,
-                                                 &so->results, &so->num_results,
-                                                 needs_sorting);
+            /*
+             * Parallel-aware TID collection.
+             *
+             * When scan->parallel_scan is set, the Gather node has launched
+             * background workers that will each call biscuit_rescan()
+             * independently on their own private IndexScanDesc.  Without
+             * coordination every participant evaluates the full bitmap and
+             * returns the full TID set, causing N× row duplication.
+             *
+             * Fix: biscuit_collect_sorted_tids_parallel() handles this
+             * transparently.  Every participant (leader and workers alike)
+             * evaluates the bitmap locally — the result is identical for all
+             * because the bitmap and index data are read-only and deterministic.
+             * An atomic CAS on pdesc->next_chunk elects exactly one initializer
+             * which writes total_tids/total_chunks into the shared DSM
+             * descriptor; the others spin-wait.  Then each participant atomically
+             * claims a disjoint chunk range and returns only those TIDs to its
+             * local Gather feeder — so the Gather node assembles exactly one
+             * copy of the full result.
+             *
+             * When scan->parallel_scan is NULL the function is identical to
+             * biscuit_collect_sorted_tids_single().
+             */
+             elog(DEBUG1, "Entering Checkpoint - 3: 700");
+            {
+                BiscuitParallelScanDesc *pdesc = NULL;
+                elog(DEBUG1, "Entering Checkpoint - 2: 702");
+                if (scan->parallel_scan != NULL)
+                    pdesc = (BiscuitParallelScanDesc *)
+                                OffsetToPointer(scan->parallel_scan,
+                                                scan->parallel_scan->ps_offset_am);
+              
+                biscuit_collect_sorted_tids_parallel(
+                    so->index, result, pdesc,
+                    &so->results, &so->num_results,
+                    needs_sorting);
+            }
 
             biscuit_roaring_free(result);
         }
@@ -655,7 +741,7 @@ biscuit_rescan(IndexScanDesc scan,
          * hash map once before the key loop (O(n)) and use it for O(1)
          * lookups per matched TID.
          */
-        elog(DEBUG2,
+        elog(DEBUG1,
              "Biscuit: index %u not yet warm (state=%u); using fallback scan",
              RelationGetRelid(scan->indexRelation),
              so->index->preload_state);
@@ -801,10 +887,23 @@ biscuit_rescan(IndexScanDesc scan,
                 if (so->index->tombstone_count > 0 && so->index->tombstones)
                     biscuit_roaring_andnot_inplace(candidates, so->index->tombstones);
 
-                biscuit_collect_sorted_tids_parallel(so->index, candidates,
+                /*biscuit_collect_sorted_tids_single(so->index, candidates,
                                                      &so->results, &so->num_results,
-                                                     needs_sorting);
-
+                                                     needs_sorting);*/
+               
+                {
+                    BiscuitParallelScanDesc *pdesc = NULL;
+                    elog(DEBUG1, "Entering Checkpoint - 2: 702");
+                    if (scan->parallel_scan != NULL)
+                        pdesc = (BiscuitParallelScanDesc *)
+                                    OffsetToPointer(scan->parallel_scan,
+                                                    scan->parallel_scan->ps_offset_am);
+                  
+                     biscuit_collect_sorted_tids_parallel(
+                        so->index, candidates, pdesc,
+                        &so->results, &so->num_results,
+                        needs_sorting);
+                }
                 biscuit_roaring_free(candidates);
             }
 
@@ -886,4 +985,6 @@ biscuit_endscan(IndexScanDesc scan)
             pfree(so->results);
         pfree(so);
     }
+    
+    elog(DEBUG1, "Exited scan");
 }

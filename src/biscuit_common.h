@@ -41,6 +41,7 @@
 #include "storage/dsm.h"
 #include "storage/shm_toc.h"
 #include "port/atomics.h"
+#include "nodes/execnodes.h"
 
 /* ==================== ROARING BITMAP TYPES ==================== */
 
@@ -78,7 +79,7 @@ typedef struct {
 #define CHAR_RANGE                      256
 #define TOMBSTONE_CLEANUP_THRESHOLD     1000
 #define RADIX_SORT_THRESHOLD            5000
-#define BISCUIT_LIBRARY_VERSION         "2.2.4 - Halwa"
+#define BISCUIT_LIBRARY_VERSION         "2.2.4 - Parallelised"
 
 /* ==================== MEMORY MANAGEMENT MACROS ==================== */
 

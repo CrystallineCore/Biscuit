@@ -28,39 +28,89 @@
 /*
  * BiscuitParallelScanDesc
  *
- * Lives in the parallel query DSM segment, written once by
- * biscuit_initparallelscan() and read by every worker.  Workers advance
- * next_chunk atomically; all other fields are read-only after init.
+ * Lives in the parallel query DSM segment.  Carries the pre-computed
+ * per-participant TID partition table so each worker can self-identify and
+ * read its own disjoint [start, end) range without any runtime coordination.
  *
- * Layout rules:
- *   • next_chunk must be naturally aligned for pg_atomic_uint64 (8 bytes).
- *   • pad[] ensures the hot atomic word and the read-only fields do not share
- *     a cache line, eliminating false-sharing between workers.
- *   • sizeof(BiscuitParallelScanDesc) is returned by
- *     biscuit_estimateparallelscan() so the executor reserves exactly the
- *     right amount of DSM space.
+ * Parallel design — pre-partition, self-identify, local evaluate
+ * --------------------------------------------------------------
+ * PostgreSQL parallel workers are separate OS processes with disjoint virtual
+ * address spaces.  Only memory inside this DSM struct is shared.
+ *
+ * Key observations that drive the design:
+ *
+ *   A. The bitmap is read-only and deterministic: every process that evaluates
+ *      it against the same index with the same query produces an identical
+ *      sorted TID array.  So every participant can evaluate locally — no need
+ *      to ship the TID array across process boundaries.
+ *
+ *   B. MyParallelWorkerNumber is a process-local int set by PostgreSQL before
+ *      the first AM callback fires.  The leader has value -1; workers have
+ *      0, 1, 2, … in launch order.  This gives each participant a stable,
+ *      unique identity.
+ *
+ *   C. The executor tells us the worker count at estimateparallelscan /
+ *      initparallelscan time, before any bitmap evaluation.
+ *
+ * Putting it together:
+ *
+ *   Init (biscuit_initparallelscan):
+ *     • Record num_participants = 1 (leader) + nworkers.
+ *     • Set initialized = 0.  All slot [start,end) pairs remain 0.
+ *
+ *   First rescan (any participant — whoever calls biscuit_rescan first):
+ *     • CAS initialized: 0 → 1.  Winner evaluates the bitmap, computes the
+ *       full sorted TID count, and fills slots[0..num_participants-1] with
+ *       pre-computed [start, end) ranges.  The last slot absorbs any remainder
+ *       so uneven divisions are handled correctly.  Then sets initialized = 2.
+ *     • All other participants spin on initialized until it reaches 2.
+ *       No per-TID coordination ever happens.
+ *
+ *   Each rescan:
+ *     • Participant reads MyParallelWorkerNumber → slot index
+ *         leader  (-1) → slot 0
+ *         worker N     → slot N+1
+ *     • Evaluates bitmap locally, returns only tids[slots[i].start .. slots[i].end).
+ *
+ *   Rescan (biscuit_parallelrescan):
+ *     • Reset initialized = 0 and clear all slots so the next scan re-partitions.
+ *
+ * No atomic chunk counter.  No spin on chunk claims.  No false-sharing.
+ * The only shared writes are the one-time partition computation.
  */
-#define BISCUIT_PARALLEL_CHUNK_SIZE_DEFAULT  1024
 
+/* Maximum participants (1 leader + up to this many workers). */
+#define BISCUIT_MAX_PARALLEL_WORKERS  64
+
+/*
+ * BiscuitWorkerSlot — the TID index range assigned to one participant.
+ * start is inclusive, end is exclusive.  Both are indices into the local
+ * sorted TID array (identical across all processes for a given scan).
+ */
+typedef struct BiscuitWorkerSlot
+{
+    uint64_t    start;      /* first TID index for this participant */
+    uint64_t    end;        /* one past the last TID index          */
+} BiscuitWorkerSlot;
+
+/*
+ * initialized state values
+ *   0 – partition table not yet computed.
+ *   1 – computation in progress (one participant holds the lock).
+ *   2 – partition table ready; all participants may proceed.
+ */
 typedef struct BiscuitParallelScanDesc
 {
-    /*
-     * Atomically incremented by each worker to claim the next chunk index.
-     * A worker that reads a value >= total_chunks finds no work and exits.
-     * Only pg_atomic_fetch_add_u64() is used — no spinlocks, no LWLocks.
-     */
-    pg_atomic_uint64  next_chunk;       /* next chunk index to claim         */
-
-    uint64_t          total_chunks;     /* ceil(total_tids / chunk_size)     */
-    uint32_t          chunk_size;       /* TIDs per chunk (default 1024)     */
-    uint64_t          total_tids;       /* total live TIDs in this scan      */
+    pg_atomic_uint32  initialized;      /* 0=uninit, 1=computing, 2=ready    */
+    int32             num_participants; /* leader + workers                  */
+    uint64_t          total_tids;       /* filled in by the initializer      */
 
     /*
-     * Padding to a full cache line (64 bytes) so that next_chunk (written
-     * by every worker) and the read-only fields above do not share a line.
-     * Adjust if the fields above grow.
+     * Per-participant TID ranges.  Slot 0 is always the leader; slot i+1
+     * belongs to background worker i (MyParallelWorkerNumber == i).
+     * The last slot's end is clamped to total_tids to absorb any remainder.
      */
-    char              pad[64];
+    BiscuitWorkerSlot slots[BISCUIT_MAX_PARALLEL_WORKERS + 1];
 } BiscuitParallelScanDesc;
 
 /* Sort an array of TIDs for sequential heap access. */
@@ -73,25 +123,55 @@ extern void biscuit_collect_sorted_tids_single(BiscuitIndex *idx,
                                                int *out_count,
                                                bool needs_sorting);
 
+
 /*
- * ABI-compatibility shim — delegates to biscuit_collect_sorted_tids_single().
- * The DSM-based parallel implementation has been removed; callers that
- * previously used this entry point continue to work without modification.
+ * biscuit_collect_sorted_tids_parallel
+ *
+ * Parallel-aware TID collection.  Called by EVERY participant (leader and
+ * background workers) from biscuit_rescan() whenever scan->parallel_scan
+ * is non-NULL.
+ *
+ * Algorithm
+ * ---------
+ * 1. The first participant to arrive CASes pdesc->initialized from 0 → 1,
+ *    evaluates the bitmap, computes the full sorted TID count, divides it
+ *    evenly into pdesc->num_participants slices, writes each [start, end)
+ *    into pdesc->slots[], then sets initialized = 2.  The last slot absorbs
+ *    any remainder so uneven divisions are always correct.
+ *
+ * 2. All other participants spin on initialized until it reaches 2 (with
+ *    CHECK_FOR_INTERRUPTS and a 1 µs sleep to avoid burning a core).
+ *
+ * 3. Every participant reads its own slot using its stable worker identity:
+ *       leader  (MyParallelWorkerNumber == -1) → slot 0
+ *       worker N (MyParallelWorkerNumber ==  N) → slot N+1
+ *
+ * 4. Each participant evaluates the bitmap locally (identical result for all
+ *    — deterministic read-only operation) and returns only the TIDs in its
+ *    assigned [start, end) range.
+ *
+ * No per-TID atomic operations.  No chunk claiming races.  The Gather node
+ * assembles exactly one copy of the full result from the disjoint per-process
+ * slices.
+ *
+ * When pdesc is NULL the function is identical to
+ * biscuit_collect_sorted_tids_single() (non-parallel path).
  */
 extern void biscuit_collect_sorted_tids_parallel(BiscuitIndex *idx,
-                                                 RoaringBitmap *result,
-                                                 ItemPointerData **out_tids,
-                                                 int *out_count,
-                                                 bool needs_sorting);
+                                                  RoaringBitmap *result,
+                                                  BiscuitParallelScanDesc *pdesc,
+                                                  ItemPointerData **out_tids,
+                                                  int *out_count,
+                                                  bool needs_sorting);
 
 /*
  * Parallel worker entry point — registered via RegisterParallelWorkerMain()
- * for dynamic-loader compatibility.  No longer launches real workers; body
- * is a no-op stub.  The name string must match the one used in any existing
- * CreateParallelContext calls to avoid lookup failures on extension reload.
+ * for dynamic-loader compatibility.  Body is a no-op stub; retained so
+ * symbol lookup on extension reload does not fail.
  */
 PGDLLEXPORT extern void biscuit_parallel_collect_worker(dsm_segment *seg, shm_toc *toc);
 
+PGDLLIMPORT extern int ParallelWorkerNumber;
 /* Detect whether a scan is aggregate-only (no tuple fetch needed). */
 extern bool biscuit_is_aggregate_query(IndexScanDesc scan);
 
@@ -100,67 +180,35 @@ extern bool biscuit_is_aggregate_query(IndexScanDesc scan);
 /*
  * biscuit_estimateparallelscan
  *
- * AM callback: returns the number of bytes the executor must reserve in the
- * parallel DSM segment for the BiscuitParallelScanDesc.  Called once by the
- * leader before the segment is created.
+ * AM callback: returns sizeof(BiscuitParallelScanDesc) so the executor
+ * reserves exactly the right amount of DSM space.  nworkers is also stored
+ * so biscuit_initparallelscan can record num_participants.
  */
 extern Size biscuit_estimateparallelscan(Relation indexRelation, int nworkers, int nchunks);
 
 /*
  * biscuit_initparallelscan
  *
- * AM callback: called by the leader after the DSM segment has been created.
- * Initialises next_chunk to 0 and fills in the read-only fields.
- * @target  pointer to the BiscuitParallelScanDesc inside the DSM segment.
- *
- * Note: total_tids and chunk_size cannot be known at init time (the scan has
- * not yet been executed); they are set to sentinel values here and populated
- * by the first worker that enters biscuit_parallel_collect_chunk().  Only
- * next_chunk must be initialised to 0 at this stage so the executor can
- * safely call biscuit_parallelrescan() later.
+ * AM callback: zeroes the descriptor and records num_participants so the
+ * partition table can be sized correctly at first rescan.  Sets
+ * initialized = 0 (not yet computed).
  */
 extern void biscuit_initparallelscan(void *target);
 
 /*
  * biscuit_parallelrescan
  *
- * AM callback: resets next_chunk to 0 so the same DSM segment can be reused
- * for a rescan without re-allocating shared memory.
+ * AM callback: resets initialized = 0 and clears all slots so the next
+ * rescan re-partitions from scratch (handles Materialize node rewinds).
  */
 extern void biscuit_parallelrescan(IndexScanDesc scan);
 
-/* ==================== PARALLEL WORKER HELPERS ==================== */
-
-/*
- * biscuit_claim_next_chunk
- *
- * Atomically claims the next available chunk from the shared descriptor.
- * Returns true and sets *chunk_start / *chunk_end to the TID range the
- * caller owns.  Returns false when all chunks have been claimed.
- *
- * Only pg_atomic_fetch_add_u64() is used; no locks of any kind.
+/**
+ * biscuit_get_parallel_worker_count
+ * * Returns the number of parallel workers planned for this index scan.
+ * Returns 0 if this is a single-threaded execution or if parallel 
+ * scan state is not initialized.
  */
-extern bool biscuit_claim_next_chunk(BiscuitParallelScanDesc *pdesc,
-                                     uint64_t *chunk_start,
-                                     uint64_t *chunk_end);
-
-/*
- * biscuit_parallel_collect_chunk
- *
- * Worker loop.  Repeatedly calls biscuit_claim_next_chunk() and copies the
- * corresponding TID slice from all_tids (a worker-visible, read-only snapshot
- * of the full sorted TID array) into a worker-local palloc'd buffer pointed
- * to by *out_tids / *out_count.  The buffer is grown with repalloc() as
- * additional chunks are claimed.
- *
- * Workers never write to shared state other than through the atomic counter
- * inside BiscuitParallelScanDesc.
- */
-extern void biscuit_parallel_collect_chunk(BiscuitIndex *idx,
-                                           BiscuitParallelScanDesc *pdesc,
-                                           ItemPointerData *all_tids,
-                                           uint64_t total_tids,
-                                           ItemPointerData **out_tids,
-                                           int *out_count);
+extern int biscuit_get_parallel_worker_count(IndexScanDesc scan);
 
 #endif /* BISCUIT_TID_H */
