@@ -357,10 +357,7 @@ biscuit_rescan_multicolumn_fallback(IndexScanDesc scan,
             if (col_idx < 0 || col_idx >= so->index->num_columns)
                 continue;
 
-            is_ilike = (key->sk_strategy == BISCUIT_ILIKE_STRATEGY ||
-                        key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
-            is_not   = (key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY ||
-                        key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
+            
 
             pattern_text = DatumGetTextPP(key->sk_argument);
             pattern      = text_to_cstring(pattern_text);
@@ -397,6 +394,11 @@ biscuit_rescan_multicolumn_fallback(IndexScanDesc scan,
             }
             if (key_tids)
                 pfree(key_tids);
+
+            is_ilike = (key->sk_strategy == BISCUIT_ILIKE_STRATEGY ||
+                        key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
+            is_not   = (key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY ||
+                        key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
 
             if (is_not)
             {
@@ -580,8 +582,7 @@ biscuit_rescan(IndexScanDesc scan,
                 if (key->sk_flags & SK_ISNULL)
                     continue;
 
-                is_not = (key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY ||
-                          key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
+                
 
                 pattern_text = DatumGetTextPP(key->sk_argument);
                 pattern      = text_to_cstring(pattern_text);
@@ -616,6 +617,9 @@ biscuit_rescan(IndexScanDesc scan,
                     return;
                 }
                 
+                is_not = (key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY ||
+                          key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
+                          
                 if (is_not)
                 {
                     /*
