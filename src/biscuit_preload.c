@@ -469,6 +469,11 @@ biscuit_load_skeleton(Relation index)
 
     /* Mark as skeleton only — bitmaps not yet built */
     idx->preload_state = BISCUIT_PRELOAD_SKELETON;
+    
+    /* If the worker already signalled DONE, build bitmaps now
+     * so the returned index is immediately warm and consistent with shmem. */
+    if (biscuit_preload_state(RelationGetRelid(index)) >= BISCUIT_PRELOAD_DONE)
+        biscuit_complete_preload_local(idx, RelationGetRelid(index));
 
     MemoryContextSwitchTo(oldcontext);
 

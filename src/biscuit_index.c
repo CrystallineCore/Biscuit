@@ -23,7 +23,16 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
     GenericXLogState  *state;
     BiscuitMetaPageData *meta;
 
-    buf   = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
+    //buf   = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
+    
+    {
+        BlockNumber nblocks = RelationGetNumberOfBlocks(index);
+        if (nblocks == 0)
+            buf = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
+        else
+            buf = ReadBuffer(index, BISCUIT_METAPAGE_BLKNO);
+    }
+    
     LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 
     state = GenericXLogStart(index);
@@ -957,9 +966,41 @@ biscuit_insert(Relation index,
     idx = (BiscuitIndex *) index->rd_amcache;
     if (!idx)
     {
-        idx = biscuit_load_index(index);
+        /*
+         * rd_amcache was cleared by a relcache invalidation (PostgreSQL does
+         * this on any catalog access, including those triggered by INSERT's
+         * executor setup).  Check the global biscuit_cache first — it holds
+         * the live, already-mutated index built during a preceding scan or
+         * insert — before falling back to a full heap re-scan which would
+         * lose all in-flight inserts.
+         */
+        idx = biscuit_cache_lookup(RelationGetRelid(index));
+        if (!idx)
+            idx = biscuit_load_index(index);
         index->rd_amcache = idx;
     }
+
+    /*
+     * FIX 1 — SELECT → INSERT crash (segfault at 0xfffffffffffffff8).
+     *
+     * When a SELECT runs before any INSERT, beginscan calls
+     * biscuit_load_skeleton() which leaves all four length-bitmap arrays
+     * (length_bitmaps_legacy, length_ge_bitmaps_legacy, length_bitmaps_lower,
+     * length_ge_bitmaps_lower) as NULL and max_length_legacy / max_length_lower
+     * as 0.  The grow-path below then calls repalloc(NULL, ...) which reads
+     * the palloc chunk header at ptr-8 == 0xfffffffffffffff8 and crashes.
+     *
+     * Fix: if the index arrived as a skeleton (preload_state < DONE), complete
+     * the bitmap build inline now, before touching any length-bitmap pointer.
+     * biscuit_complete_preload_local() is idempotent and cheap when
+     * num_records is small; for large indexes this path is only hit once per
+     * session because the result is stored back into the cache below.
+     *
+     * This also fixes the mirrored hazard in the multi-column path where
+     * cidx->length_bitmaps / length_ge_bitmaps are NULL in a skeleton.
+     */
+    if (idx->preload_state < BISCUIT_PRELOAD_DONE)
+        biscuit_complete_preload_local(idx, RelationGetRelid(index));
 
     oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
 
@@ -976,13 +1017,14 @@ biscuit_insert(Relation index,
 
             if (idx->num_columns == 1)
             {
-                if (idx->data_cache[slot])      { pfree(idx->data_cache[slot]);      idx->data_cache[slot]      = NULL; }
-                if (idx->data_cache_lower[slot]) { pfree(idx->data_cache_lower[slot]); idx->data_cache_lower[slot] = NULL; }
+                if (idx->data_cache[slot])       { pfree(idx->data_cache[slot]);       idx->data_cache[slot]       = NULL; }
+                if (idx->data_cache_lower[slot])  { pfree(idx->data_cache_lower[slot]); idx->data_cache_lower[slot] = NULL; }
             }
             else
             {
                 for (col = 0; col < idx->num_columns; col++)
-                    if (idx->column_data_cache[col][slot]) { pfree(idx->column_data_cache[col][slot]); idx->column_data_cache[col][slot] = NULL; }
+                    if (idx->column_data_cache[col][slot])
+                        { pfree(idx->column_data_cache[col][slot]); idx->column_data_cache[col][slot] = NULL; }
             }
 
             /* Un-tombstone if needed */
@@ -1021,8 +1063,7 @@ biscuit_insert(Relation index,
                  * NULL for fresh slots.  Without this, repalloc leaves the
                  * memory uninitialised; the guard at "if (idx->data_cache_lower[slot])"
                  * below may pass on garbage and strlen/utf8_char_count then
-                 * dereferences a wild pointer, producing the segfault at
-                 * address 0xfffffffffffffff8 (-8).
+                 * dereferences a wild pointer.
                  */
                 memset(idx->data_cache       + old_capacity, 0,
                        (idx->capacity - old_capacity) * sizeof(char *));
@@ -1033,15 +1074,14 @@ biscuit_insert(Relation index,
             {
                 for (col = 0; col < idx->num_columns; col++)
                 {
-                    int old_cap = old_capacity; /* captured before the loop */
+                    int old_cap = old_capacity;
                     idx->column_data_cache[col] = (char **) repalloc(
                         idx->column_data_cache[col], idx->capacity * sizeof(char *));
                     /*
                      * FIX B: Same zero-init requirement for the multi-column
                      * cache arrays.  biscuit_bulkdelete reads column_data_cache[0][i]
                      * to detect live records; uninitialised bytes here cause it to
-                     * treat garbage as a valid pointer and skip or misclassify rows,
-                     * and the subsequent andnot/remove passes then touch freed memory.
+                     * treat garbage as a valid pointer and misclassify rows.
                      */
                     memset(idx->column_data_cache[col] + old_cap, 0,
                            (idx->capacity - old_cap) * sizeof(char *));
@@ -1058,60 +1098,93 @@ biscuit_insert(Relation index,
     {
         if (!isnull[0])
         {
-            text *txt     = DatumGetTextPP(values[0]);
-            char *str     = VARDATA_ANY(txt);
+            text *txt      = DatumGetTextPP(values[0]);
+            char *str      = VARDATA_ANY(txt);
             int   byte_len = VARSIZE_ANY_EXHDR(txt);
 
             idx->data_cache[slot] = pnstrdup(str, byte_len);
 
             /*
              * biscuit_index_single_record writes idx->data_cache_lower[slot]
-             * as a side-effect (line ~318).  It must run BEFORE the length-
-             * bitmap block below reads data_cache_lower[slot].
+             * as a side-effect.  It must run BEFORE the length-bitmap block
+             * below reads data_cache_lower[slot].
              */
             biscuit_index_single_record(idx, str, byte_len, slot);
 
             /* Grow length bitmaps if needed */
             {
-            int cl = biscuit_utf8_char_count(str, byte_len);
-            if (cl >= idx->max_length_legacy)
-            {
-                int old_ml = idx->max_length_legacy;
-                int new_ml = (cl + 1) * 2;
-                idx->length_bitmaps_legacy    = (RoaringBitmap **) repalloc(idx->length_bitmaps_legacy,    new_ml * sizeof(RoaringBitmap *));
-                idx->length_ge_bitmaps_legacy = (RoaringBitmap **) repalloc(idx->length_ge_bitmaps_legacy, new_ml * sizeof(RoaringBitmap *));
-                for (int i = old_ml; i < new_ml; i++) { idx->length_bitmaps_legacy[i] = NULL; idx->length_ge_bitmaps_legacy[i] = biscuit_roaring_create(); }
-                idx->max_length_legacy = new_ml;
-            }
-            if (!idx->length_bitmaps_legacy[cl]) idx->length_bitmaps_legacy[cl] = biscuit_roaring_create();
-            biscuit_roaring_add(idx->length_bitmaps_legacy[cl], slot);
-            for (int i = 0; i <= cl && i < idx->max_length_legacy; i++)
-                biscuit_roaring_add(idx->length_ge_bitmaps_legacy[i], slot);
-
-            /*
-             * Lowercase length bitmaps.
-             * data_cache_lower[slot] was populated by biscuit_index_single_record
-             * above; for a NULL-valued column this slot was zeroed by FIX A so
-             * the guard below is now always reliable.
-             */
-            if (idx->data_cache_lower[slot])
-            {
-                int lbl = strlen(idx->data_cache_lower[slot]);
-                int lcl = biscuit_utf8_char_count(idx->data_cache_lower[slot], lbl);
-                if (lcl >= idx->max_length_lower)
+                int cl = biscuit_utf8_char_count(str, byte_len);
+                if (cl >= idx->max_length_legacy)
                 {
-                    int old_ml = idx->max_length_lower;
-                    int new_ml = (lcl + 1) * 2;
-                    idx->length_bitmaps_lower    = (RoaringBitmap **) repalloc(idx->length_bitmaps_lower,    new_ml * sizeof(RoaringBitmap *));
-                    idx->length_ge_bitmaps_lower = (RoaringBitmap **) repalloc(idx->length_ge_bitmaps_lower, new_ml * sizeof(RoaringBitmap *));
-                    for (int i = old_ml; i < new_ml; i++) { idx->length_bitmaps_lower[i] = NULL; idx->length_ge_bitmaps_lower[i] = biscuit_roaring_create(); }
-                    idx->max_length_lower = new_ml;
+                    int old_ml = idx->max_length_legacy;
+                    int new_ml = (cl + 1) * 2;
+
+                    /*
+                     * FIX 1 (belt-and-suspenders): after biscuit_complete_preload_local
+                     * above these are guaranteed non-NULL, but guard anyway so that
+                     * any future caller path that skips the preload check cannot crash.
+                     */
+                    if (idx->length_bitmaps_legacy)
+                        idx->length_bitmaps_legacy    = (RoaringBitmap **) repalloc(idx->length_bitmaps_legacy,    new_ml * sizeof(RoaringBitmap *));
+                    else
+                        idx->length_bitmaps_legacy    = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
+
+                    if (idx->length_ge_bitmaps_legacy)
+                        idx->length_ge_bitmaps_legacy = (RoaringBitmap **) repalloc(idx->length_ge_bitmaps_legacy, new_ml * sizeof(RoaringBitmap *));
+                    else
+                        idx->length_ge_bitmaps_legacy = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
+
+                    for (int i = old_ml; i < new_ml; i++)
+                    {
+                        idx->length_bitmaps_legacy[i]    = NULL;
+                        idx->length_ge_bitmaps_legacy[i] = biscuit_roaring_create();
+                    }
+                    idx->max_length_legacy = new_ml;
                 }
-                if (!idx->length_bitmaps_lower[lcl]) idx->length_bitmaps_lower[lcl] = biscuit_roaring_create();
-                biscuit_roaring_add(idx->length_bitmaps_lower[lcl], slot);
-                for (int i = 0; i <= lcl && i < idx->max_length_lower; i++)
-                    biscuit_roaring_add(idx->length_ge_bitmaps_lower[i], slot);
-            }
+                if (!idx->length_bitmaps_legacy[cl])
+                    idx->length_bitmaps_legacy[cl] = biscuit_roaring_create();
+                biscuit_roaring_add(idx->length_bitmaps_legacy[cl], slot);
+                for (int i = 0; i <= cl && i < idx->max_length_legacy; i++)
+                    biscuit_roaring_add(idx->length_ge_bitmaps_legacy[i], slot);
+
+                /*
+                 * Lowercase length bitmaps.
+                 * data_cache_lower[slot] was populated by biscuit_index_single_record
+                 * above; for a NULL-valued column this slot was zeroed by FIX A so
+                 * the guard below is always reliable.
+                 */
+                if (idx->data_cache_lower[slot])
+                {
+                    int lbl = strlen(idx->data_cache_lower[slot]);
+                    int lcl = biscuit_utf8_char_count(idx->data_cache_lower[slot], lbl);
+                    if (lcl >= idx->max_length_lower)
+                    {
+                        int old_ml = idx->max_length_lower;
+                        int new_ml = (lcl + 1) * 2;
+
+                        if (idx->length_bitmaps_lower)
+                            idx->length_bitmaps_lower    = (RoaringBitmap **) repalloc(idx->length_bitmaps_lower,    new_ml * sizeof(RoaringBitmap *));
+                        else
+                            idx->length_bitmaps_lower    = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
+
+                        if (idx->length_ge_bitmaps_lower)
+                            idx->length_ge_bitmaps_lower = (RoaringBitmap **) repalloc(idx->length_ge_bitmaps_lower, new_ml * sizeof(RoaringBitmap *));
+                        else
+                            idx->length_ge_bitmaps_lower = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
+
+                        for (int i = old_ml; i < new_ml; i++)
+                        {
+                            idx->length_bitmaps_lower[i]    = NULL;
+                            idx->length_ge_bitmaps_lower[i] = biscuit_roaring_create();
+                        }
+                        idx->max_length_lower = new_ml;
+                    }
+                    if (!idx->length_bitmaps_lower[lcl])
+                        idx->length_bitmaps_lower[lcl] = biscuit_roaring_create();
+                    biscuit_roaring_add(idx->length_bitmaps_lower[lcl], slot);
+                    for (int i = 0; i <= lcl && i < idx->max_length_lower; i++)
+                        biscuit_roaring_add(idx->length_ge_bitmaps_lower[i], slot);
+                }
             } /* end cl block */
         }
         else
@@ -1127,13 +1200,9 @@ biscuit_insert(Relation index,
             if (!isnull[col])
             {
                 int   out_len;
-                char *str = biscuit_datum_to_text(values[col], idx->column_types[col], &idx->output_funcs[col], &out_len);
+                char *str = biscuit_datum_to_text(values[col], idx->column_types[col],
+                                                  &idx->output_funcs[col], &out_len);
                 idx->column_data_cache[col][slot] = str;
-
-                /*
-                 * FIX 3 (pre-existing): call was previously missing, causing
-                 * every post-build insert to be absent from all bitmaps.
-                 */
                 biscuit_index_column_record(idx, col, str, out_len, slot);
             }
             else
@@ -1143,6 +1212,21 @@ biscuit_insert(Relation index,
 
     if (!found_existing && !is_reusing_slot)
         idx->insert_count++;
+
+    /*
+     * FIX 2 — INSERT → SELECT returns 0.
+     *
+     * After modifying idx the preload_state is guaranteed DONE (we called
+     * biscuit_complete_preload_local at the top if it wasn't already).
+     * Write the warm index back into the global cache so the next beginscan
+     * — whether in this session or after an rd_amcache eviction — picks up
+     * the newly inserted record via the bitmap path instead of loading a
+     * stale skeleton that predates the insert.
+     *
+     * Without this, a SELECT immediately after a committed INSERT finds the
+     * pre-insert cache entry and returns 0 rows.
+     */
+    biscuit_cache_insert(RelationGetRelid(index), idx);
 
     MemoryContextSwitchTo(oldcontext);
 
