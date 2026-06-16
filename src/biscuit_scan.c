@@ -590,16 +590,16 @@ biscuit_rescan(IndexScanDesc scan,
                 switch (key->sk_strategy)
                 {
                     case BISCUIT_LIKE_STRATEGY:
-                        key_result = biscuit_query_column_pattern(so->index, 0, pattern);
+                        key_result = biscuit_query_pattern(so->index, pattern);
                         break;
                     case BISCUIT_NOT_LIKE_STRATEGY:
-                        key_result = biscuit_query_column_pattern(so->index, 0, pattern);
+                        key_result = biscuit_query_pattern(so->index, pattern);
                         break;
                     case BISCUIT_ILIKE_STRATEGY:
-                        key_result = biscuit_query_column_pattern_ilike(so->index, 0, pattern);
+                        key_result = biscuit_query_pattern_ilike(so->index, pattern);
                         break;
                     case BISCUIT_NOT_ILIKE_STRATEGY:
-                        key_result = biscuit_query_column_pattern_ilike(so->index, 0, pattern);
+                        key_result = biscuit_query_pattern_ilike(so->index, pattern);
                         break;
 
                     default:
