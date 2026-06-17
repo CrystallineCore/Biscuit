@@ -26,6 +26,7 @@
 #include "biscuit_index.h"
 #include "biscuit_scan.h"
 #include "biscuit_preload.h"
+#include "biscuit_tid.h"
 
 /* ================================================================
  * MODULE MAGIC
@@ -239,9 +240,9 @@ biscuit_handler(PG_FUNCTION_ARGS)
     amroutine->amendscan             = biscuit_endscan;
     amroutine->ammarkpos             = NULL;
     amroutine->amrestrpos            = NULL;
-    amroutine->amestimateparallelscan = NULL;
-    amroutine->aminitparallelscan    = NULL;
-    amroutine->amparallelrescan      = NULL;
+    amroutine->amestimateparallelscan = biscuit_estimateparallelscan;
+    amroutine->aminitparallelscan    = biscuit_initparallelscan;
+    amroutine->amparallelrescan      = biscuit_parallelrescan;
 
     PG_RETURN_POINTER(amroutine);
 }

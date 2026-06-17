@@ -19,71 +19,51 @@ Although the extension is intended to operate safely and reliably, defects or un
 At this stage, the extension is best suited for evaluation, experimentation, and non-critical workloads. Production deployment should be undertaken only after careful testing and assessment of its suitability for the intended environment.
 
 ---
-## Version - 2.2.3
-
-### Structural Changes
- 
-- **Monolith split into modules.** The single `biscuit.c` file has been
-  decomposed into focused translation units, each with its own header:
-  | Module | Responsibility |
-  |---|---|
-  | `biscuit.c` | AM handler, SQL-callable functions, `_PG_init` |
-  | `biscuit_bitmap.{c,h}` | Roaring bitmap abstraction + fallback bitset |
-  | `biscuit_cache.{c,h}` | Session-scoped index cache |
-  | `biscuit_index.{c,h}` | Index build, load, disk I/O, CRUD helpers |
-  | `biscuit_pattern.{c,h}` | LIKE/ILIKE pattern parsing and bitmap matching |
-  | `biscuit_preload.{c,h}` | Background preload worker and skeleton loader |
-  | `biscuit_scan.{c,h}` | Scan lifecycle (beginscan/rescan/gettuple/getbitmap/endscan) |
-  | `biscuit_tid.{c,h}` | TID sorting (radix + qsort) and parallel collection |
-  | `biscuit_utf8.{c,h}` | UTF-8 character utilities and Datum→text helpers |
-  All shared types, constants, and macros have been consolidated into
-  `biscuit_common.h`. No SQL-level API changes.
-  
-- **Version bumped to `2.2.3`** (`BISCUIT_LIBRARY_VERSION`).
+## Version 2.3.0 — Bagel
 
 ### New Features
 
-- **PostgreSQL 19 Beta 1 support.** `PG_MODULE_MAGIC_EXT` (introduced in PG 19)
-  is now used when available, with a fallback to `PG_MODULE_MAGIC` for older
-  versions. The extension can now be built and loaded against PG 19 development
-  builds without modification.
+* **Parallel index scan support:** Biscuit now integrates with parallel query execution in PostgreSQL, allowing Gather plans to distribute work across workers without duplicate results.
 
+* **Pre-lowercased cache for multi-column indexes:** Added `column_data_cache_lower` to accelerate ILIKE queries by eliminating repeated string normalization during scans.
 
-### Improvements
+* **LIKE / ILIKE matching:** Pattern matching now correctly handles `%`, `_`, escape sequences, and complex wildcard combinations.
 
-- **Memory context correctness.** The session cache (`biscuit_cache.c`) now
-  explicitly switches to `CacheMemoryContext` before allocating cache list
-  nodes, ensuring index structures survive transaction boundaries without
-  relying on caller context. The `biscuit_cleanup_index` stub correctly avoids
-  double-freeing memory owned by the context.
-
-- **`biscuit_complete_preload_local()`** added as a fast in-process upgrade
-  path: rebuilds bitmaps from the already-resident string cache without
-  reopening the relation or re-scanning the heap. Used by `beginscan` when
-  it detects the worker has finished between queries.
-
-- **TID collection refactored into `biscuit_tid.c`.** The unified entry point
-  `biscuit_collect_tids_optimized()` selects parallel vs. single-threaded
-  collection automatically and supports an optional `limit_hint` to avoid
-  collecting more TIDs than the executor needs.
-
-- **Fallback scan in `biscuit_preload.c`** supports NOT LIKE and NOT ILIKE
-  during warm-up via a hash-map TID→record-index lookup, maintaining correct
-  inversion semantics without bitmaps.
-
-- **UTF-8 helpers isolated in `biscuit_utf8.{c,h}`**, removing scattered
-  inline character-length and lowercase conversion code from the pattern and
-  index modules.
-
-- **`biscuit_columnindex_memory_usage()`** now validates `max_length >= 0`
-  before iterating length bitmap arrays and emits a `WARNING` on corrupt
-  state rather than reading out-of-bounds.
+* **Version updated to `2.3.0 - Bagel`.**
 
 ### Bug Fixes
 
-- `biscuit_cache_remove()` no longer calls `pfree` on list nodes; they are
-  owned by `CacheMemoryContext` and must not be freed manually.
 
+* Fixed a crash that could occur when INSERT operations followed SELECT queries on partially loaded indexes.
+
+* Fixed an issue where newly inserted rows could become invisible to subsequent queries due to stale session cache entries.
+
+* Fixed multi-column indexes failing to update length-based bitmap structures during inserts.
+
+* Fixed several memory initialization issues during cache growth that could cause incorrect results or instability.
+
+* Fixed insert operations losing in-memory changes after relcache invalidation.
+
+* Prevented the planner from selecting Biscuit for unqualified scans where no index predicates are present.
+
+* Fixed single-column scans using incorrect query paths for LIKE and ILIKE operations.
+
+
+* Fixed an issue where indexes could remain in a cold state even after background preloading had completed.
+
+* Improved cache update behavior to avoid unnecessary remove-and-reinsert cycles during inserts.
+
+### Performance Improvements
+
+* Eliminated per-row allocations during ILIKE fallback scans by using pre-lowercased caches.
+
+* Simplified TID collection by consolidating scan paths into a single parallel-aware implementation.
+
+### Internal Changes
+
+* Reworked the parallel scan infrastructure around a shared-memory descriptor model and added support for PostgreSQL's parallel index scan callbacks.
+
+* Removed unused LIMIT-tracking logic that was ineffective with the PostgreSQL access method API.
 
 ---
 

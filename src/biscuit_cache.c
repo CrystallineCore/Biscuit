@@ -51,9 +51,24 @@ biscuit_cache_insert(Oid indexoid, BiscuitIndex *idx)
     BiscuitIndexCacheEntry *entry;
     MemoryContext            oldcontext;
 
-    /* Remove any stale entry first */
-    biscuit_cache_remove(indexoid);
+    /*
+     * Fast path: an entry for this indexoid already exists.  Callers
+     * (e.g. biscuit_insert) call this once per tuple to make sure the
+     * global cache reflects the latest mutated BiscuitIndex, even though
+     * the pointer itself usually hasn't changed within a statement.
+     * Updating the existing node in place avoids a palloc + remove/insert
+     * cycle (and the associated DEBUG1 log spam) for every single row.
+     */
+    for (entry = biscuit_cache_head; entry != NULL; entry = entry->next)
+    {
+        if (entry->indexoid == indexoid)
+        {
+            entry->index = idx;
+            return;
+        }
+    }
 
+    /* No existing entry: allocate a new node in CacheMemoryContext */
     oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
 
     entry            = (BiscuitIndexCacheEntry *) palloc(sizeof(BiscuitIndexCacheEntry));

@@ -37,6 +37,11 @@
 #include "utils/pg_locale.h"
 #include "mb/pg_wchar.h"
 #include "storage/itemptr.h"
+#include "access/parallel.h"
+#include "storage/dsm.h"
+#include "storage/shm_toc.h"
+#include "port/atomics.h"
+#include "nodes/execnodes.h"
 
 /* ==================== ROARING BITMAP TYPES ==================== */
 
@@ -74,7 +79,7 @@ typedef struct {
 #define CHAR_RANGE                      256
 #define TOMBSTONE_CLEANUP_THRESHOLD     1000
 #define RADIX_SORT_THRESHOLD            5000
-#define BISCUIT_LIBRARY_VERSION         "2.2.3 - Wafer"
+#define BISCUIT_LIBRARY_VERSION         "2.3.0 - Bagel"
 
 /* ==================== MEMORY MANAGEMENT MACROS ==================== */
 
@@ -145,6 +150,24 @@ typedef struct BiscuitIndex {
 
     /* Per-column indices for multi-column indexes */
     ColumnIndex *column_indices;
+
+    /*
+     * Pre-lowercased string cache for multi-column indexes.
+     * column_data_cache_lower[col][rec] mirrors column_data_cache[col][rec]
+     * but with every string run through biscuit_str_tolower() at build /
+     * load time.  This lets biscuit_fallback_scan() use a direct pointer
+     * for ILIKE queries instead of allocating a new lowercased copy on
+     * every record on every scan call.
+     *
+     * Layout and lifecycle are identical to column_data_cache:
+     *   • Allocated as char**  per column, palloc0'd to idx->capacity slots.
+     *   • Grown with repalloc whenever column_data_cache is grown.
+     *   • NULL entries mirror NULL entries in column_data_cache.
+     *   • Freed / NULLed in the vacuum bulkdelete path alongside
+     *     column_data_cache entries.
+     * Only allocated when num_columns > 1; NULL otherwise.
+     */
+    char ***column_data_cache_lower;
 
     /* Single-column (legacy) fields */
     CharIndex pos_idx_legacy[CHAR_RANGE];

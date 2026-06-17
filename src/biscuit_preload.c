@@ -331,10 +331,11 @@ biscuit_load_skeleton(Relation index)
     }
     else
     {
-        idx->column_types      = (Oid *)        palloc(natts * sizeof(Oid));
-        idx->output_funcs      = (FmgrInfo *)   palloc(natts * sizeof(FmgrInfo));
-        idx->column_data_cache = (char ***)     palloc(natts * sizeof(char **));
-        idx->column_indices    = (ColumnIndex *) palloc0(natts * sizeof(ColumnIndex));
+        idx->column_types            = (Oid *)        palloc(natts * sizeof(Oid));
+        idx->output_funcs            = (FmgrInfo *)   palloc(natts * sizeof(FmgrInfo));
+        idx->column_data_cache       = (char ***)     palloc(natts * sizeof(char **));
+        idx->column_data_cache_lower = (char ***)     palloc(natts * sizeof(char **));
+        idx->column_indices          = (ColumnIndex *) palloc0(natts * sizeof(ColumnIndex));
 
         for (col = 0; col < natts; col++)
         {
@@ -347,7 +348,8 @@ biscuit_load_skeleton(Relation index)
             idx->column_types[col] = col_attr->atttypid;
             getTypeOutputInfo(col_attr->atttypid, &typoutput, &typIsVarlena);
             fmgr_info(typoutput, &idx->output_funcs[col]);
-            idx->column_data_cache[col] = (char **) palloc0(idx->capacity * sizeof(char *));
+            idx->column_data_cache[col]       = (char **) palloc0(idx->capacity * sizeof(char *));
+            idx->column_data_cache_lower[col] = (char **) palloc0(idx->capacity * sizeof(char *));
 
             for (ch = 0; ch < CHAR_RANGE; ch++)
             {
@@ -402,9 +404,14 @@ biscuit_load_skeleton(Relation index)
             else
             {
                 for (col = 0; col < natts; col++)
+                {
                     idx->column_data_cache[col] = (char **) repalloc(
                         idx->column_data_cache[col],
                         idx->capacity * sizeof(char *));
+                    idx->column_data_cache_lower[col] = (char **) repalloc(
+                        idx->column_data_cache_lower[col],
+                        idx->capacity * sizeof(char *));
+                }
             }
         }
 
@@ -457,6 +464,20 @@ biscuit_load_skeleton(Relation index)
                                               &out_len);
                 else
                     idx->column_data_cache[col][idx->num_records] = NULL;
+
+                /*
+                 * Pre-compute the lowercased copy for ILIKE fallback scans.
+                 * biscuit_fallback_scan() reads column_data_cache_lower
+                 * directly, avoiding a per-record palloc during query
+                 * execution.  Mirror NULL entries exactly.
+                 */
+                if (idx->column_data_cache[col][idx->num_records])
+                    idx->column_data_cache_lower[col][idx->num_records] =
+                        biscuit_str_tolower(
+                            idx->column_data_cache[col][idx->num_records],
+                            strlen(idx->column_data_cache[col][idx->num_records]));
+                else
+                    idx->column_data_cache_lower[col][idx->num_records] = NULL;
             }
         }
 
@@ -469,6 +490,11 @@ biscuit_load_skeleton(Relation index)
 
     /* Mark as skeleton only — bitmaps not yet built */
     idx->preload_state = BISCUIT_PRELOAD_SKELETON;
+    
+    /* If the worker already signalled DONE, build bitmaps now
+     * so the returned index is immediately warm and consistent with shmem. */
+    if (biscuit_preload_state(RelationGetRelid(index)) >= BISCUIT_PRELOAD_DONE)
+        biscuit_complete_preload_local(idx, RelationGetRelid(index));
 
     MemoryContextSwitchTo(oldcontext);
 
@@ -937,6 +963,82 @@ biscuit_complete_preload_local(BiscuitIndex *idx, Oid indexoid)
  * Sequential string scan used while bitmaps are not yet ready.
  * ================================================================ */
 
+/*
+ * biscuit_like_match
+ * -------------------
+ * Correct, UTF-8-aware backtracking LIKE/ILIKE matcher.  Honors the same
+ * escape convention as the rest of this extension (backslash escapes the
+ * following character, so '\%' / '\_' / '\\' are literals, not wildcards).
+ *
+ * '%' matches zero or more characters; '_' matches exactly one UTF-8
+ * character.  Backtracks on '%' the standard way: remember the last '%'
+ * position and the haystack position right after it, and on a mismatch
+ * retry by having that '%' consume one more character.
+ *
+ * hay/hay_len and pat/pat_len are byte buffers; ilike compares using
+ * lower-cased single bytes (callers pass already-lower-cased hay+pattern
+ * for ILIKE, matching the convention used elsewhere in this file).
+ */
+static bool
+biscuit_like_match(const char *hay, int hay_len, const char *pat, int pat_len)
+{
+    int hi = 0, pi = 0;
+    int star_pi = -1, star_hi = -1;
+
+    while (hi < hay_len)
+    {
+        if (pi < pat_len && pat[pi] == '\\' && pi + 1 < pat_len)
+        {
+            /* literal escaped char must match exactly (1 byte) */
+            if (hay[hi] == pat[pi + 1])
+            {
+                hi++;
+                pi += 2;
+                continue;
+            }
+        }
+        else if (pi < pat_len && pat[pi] == '_')
+        {
+            int cl = biscuit_utf8_char_length((unsigned char) hay[hi]);
+            if (hi + cl > hay_len)
+                cl = hay_len - hi;
+            hi += cl;
+            pi += 1;
+            continue;
+        }
+        else if (pi < pat_len && pat[pi] == '%')
+        {
+            star_pi = pi++;
+            star_hi = hi;
+            continue;
+        }
+        else if (pi < pat_len && hay[hi] == pat[pi])
+        {
+            hi++;
+            pi++;
+            continue;
+        }
+
+        /* mismatch: backtrack to the most recent '%' if any */
+        if (star_pi >= 0)
+        {
+            pi = star_pi + 1;
+            star_hi += biscuit_utf8_char_length((unsigned char) hay[star_hi]);
+            if (star_hi > hay_len)
+                return false;
+            hi = star_hi;
+            continue;
+        }
+        return false;
+    }
+
+    /* consume any trailing '%' (and reject any other trailing pattern) */
+    while (pi < pat_len && pat[pi] == '%')
+        pi++;
+
+    return pi == pat_len;
+}
+
 void
 biscuit_fallback_scan(BiscuitIndex *idx,
                       const char   *pattern,
@@ -949,181 +1051,16 @@ biscuit_fallback_scan(BiscuitIndex *idx,
     int              capacity = 256;
     int              count    = 0;
     ItemPointerData *tids     = (ItemPointerData *) palloc(capacity * sizeof(ItemPointerData));
+    const char      *match_pattern = pattern;
+    char            *pattern_lower = NULL;
+    int              pat_len;
 
-    /*
-     * Translate LIKE wildcards to a simple prefix+suffix+substring check.
-     * For the warm-up window this does not need to be perfectly optimal —
-     * just correct.  We use pg_strcasecmp for ILIKE.
-     */
-    bool   has_prefix  = false;
-    bool   has_suffix  = false;
-    bool   is_exact    = false;
-    char  *prefix      = NULL;
-    char  *suffix      = NULL;
-    char  *substring   = NULL;
-    int    prefix_len  = 0;
-    int    suffix_len  = 0;
-    int    sub_len     = 0;
-
-    /* Simple pattern decomposition: find leading/trailing literal parts.
-     * Backslash-escape sequences are unescaped:
-     *   \% -> literal %   \_ -> literal _   \\ -> literal \
-     * Unescaped '_' is a single-char wildcard: we represent it as a
-     * single NUL placeholder so prefix/suffix length accounting is correct,
-     * but we cannot do a simple strncmp with wildcards present — we fall
-     * back to a full character-by-character match in that case.
-     */
+    if (ilike)
     {
-        const char *p   = pattern;
-        int         plen_raw = strlen(pattern);
-        const char *end = pattern + plen_raw;
-        const char *q;
-        int         pct_count = 0;
-        bool        has_underscore_wildcard = false;
-
-        for (q = p; q < end; q++)
-        {
-            if (*q == '\\' && q + 1 < end)
-            {
-                q++; /* skip escaped char, not a wildcard */
-            }
-            else if (*q == '%')
-                pct_count++;
-            else if (*q == '_')
-                has_underscore_wildcard = true;
-        }
-
-        if (pct_count == 0 && !has_underscore_wildcard)
-        {
-            /* exact match — unescape the pattern */
-            char *unesc = (char *) palloc(plen_raw + 1);
-            int   ui    = 0;
-            for (q = p; q < end; q++)
-            {
-                if (*q == '\\' && q + 1 < end)
-                    unesc[ui++] = *++q;
-                else
-                    unesc[ui++] = *q;
-            }
-            unesc[ui] = '\0';
-            is_exact   = true;
-            prefix     = unesc;
-            prefix_len = ui;
-        }
-        else if (has_underscore_wildcard || pct_count > 0)
-        {
-            /*
-             * General pattern: extract unescaped prefix (before the first
-             * unescaped '%' or '_'), suffix (after the last unescaped '%'),
-             * and a middle substring for quick pre-filtering.
-             *
-             * When '_' wildcards appear, prefix matching is done
-             * character-by-character further down; we still extract the
-             * concrete prefix bytes up to (but not including) the first
-             * wildcard for a quick rejection test.
-             */
-            const char *first_wild = NULL;
-            const char *last_pct   = NULL;
-
-            /* Find positions of first wildcard and last unescaped % */
-            for (q = p; q < end; q++)
-            {
-                if (*q == '\\' && q + 1 < end)
-                {
-                    q++;
-                    continue;
-                }
-                if (*q == '%' || *q == '_')
-                {
-                    if (!first_wild)
-                        first_wild = q;
-                    if (*q == '%')
-                        last_pct = q;
-                }
-            }
-
-            /* Unescaped prefix before first wildcard */
-            if (first_wild && first_wild > p)
-            {
-                char *unesc = (char *) palloc((first_wild - p) + 1);
-                int   ui    = 0;
-                for (q = p; q < first_wild; q++)
-                {
-                    if (*q == '\\' && q + 1 < first_wild)
-                        unesc[ui++] = *++q;
-                    else
-                        unesc[ui++] = *q;
-                }
-                unesc[ui]  = '\0';
-                prefix      = unesc;
-                prefix_len  = ui;
-                has_prefix  = (ui > 0);
-            }
-
-            /* Unescaped suffix after last unescaped % */
-            if (last_pct && last_pct < end - 1)
-            {
-                const char *sf = last_pct + 1;
-                char *unesc    = (char *) palloc((end - sf) + 1);
-                int   ui       = 0;
-                for (q = sf; q < end; q++)
-                {
-                    if (*q == '\\' && q + 1 < end)
-                        unesc[ui++] = *++q;
-                    else if (*q == '_')
-                    {
-                        /* suffix with wildcard: can't use simple strcmp */
-                        ui = 0;
-                        has_suffix = false;
-                        break;
-                    }
-                    else
-                        unesc[ui++] = *q;
-                }
-                if (ui > 0)
-                {
-                    unesc[ui]  = '\0';
-                    suffix      = unesc;
-                    suffix_len  = ui;
-                    has_suffix  = true;
-                }
-                else
-                    pfree(unesc);
-            }
-
-            /* Middle literal run for substring pre-filtering */
-            if (last_pct && first_wild && last_pct > first_wild)
-            {
-                const char *s = first_wild + 1;
-                const char *e_scan;
-                /* skip any leading %/_  */
-                while (s < last_pct && (*s == '%' || *s == '_')) s++;
-                e_scan = s;
-                while (e_scan < last_pct && *e_scan != '%' && *e_scan != '_')
-                {
-                    if (*e_scan == '\\' && e_scan + 1 < last_pct)
-                        e_scan++;
-                    e_scan++;
-                }
-                if (e_scan > s)
-                {
-                    /* Unescape the middle run */
-                    char *unesc = (char *) palloc((e_scan - s) + 1);
-                    int   ui    = 0;
-                    for (q = s; q < e_scan; q++)
-                    {
-                        if (*q == '\\' && q + 1 < e_scan)
-                            unesc[ui++] = *++q;
-                        else
-                            unesc[ui++] = *q;
-                    }
-                    unesc[ui]  = '\0';
-                    substring   = unesc;
-                    sub_len     = ui;
-                }
-            }
-        }
+        pattern_lower = biscuit_str_tolower(pattern, strlen(pattern));
+        match_pattern = pattern_lower;
     }
+    pat_len = strlen(match_pattern);
 
     for (i = 0; i < idx->num_records; i++)
     {
@@ -1147,84 +1084,42 @@ biscuit_fallback_scan(BiscuitIndex *idx,
         else
         {
             if (col_idx < 0 || col_idx >= idx->num_columns) continue;
-            str = idx->column_data_cache[col_idx][i];
+            if (ilike)
+            {
+                /*
+                 * Use the pre-lowercased cache populated at build / skeleton
+                 * load time.  This avoids a palloc + memcpy + pfree on every
+                 * record for every ILIKE fallback scan.
+                 *
+                 * column_data_cache_lower is guaranteed non-NULL here: it is
+                 * allocated alongside column_data_cache in both biscuit_build
+                 * (biscuit_index.c) and biscuit_load_skeleton (this file).
+                 * Per-slot entries are NULL iff the source value was NULL,
+                 * which is caught by the "if (!str) continue" below.
+                 */
+                str = idx->column_data_cache_lower[col_idx][i];
+            }
+            else
+            {
+                str = idx->column_data_cache[col_idx][i];
+            }
         }
 
         if (!str) continue;
 
-        /* Match */
+        if (biscuit_like_match(str, strlen(str), match_pattern, pat_len))
         {
-            bool match = false;
-            int  slen  = strlen(str);
-
-            if (is_exact)
+            if (count >= capacity)
             {
-                match = (ilike ? pg_strcasecmp(str, prefix) == 0
-                               : strcmp(str, prefix) == 0);
+                capacity *= 2;
+                tids = (ItemPointerData *) repalloc(
+                    tids, capacity * sizeof(ItemPointerData));
             }
-            else
-            {
-                bool ok = true;
-
-                /* prefix check */
-                if (has_prefix && prefix_len > 0)
-                {
-                    if (ilike)
-                        ok = (pg_strncasecmp(str, prefix, prefix_len) == 0);
-                    else
-                        ok = (strncmp(str, prefix, prefix_len) == 0);
-                }
-
-                /* suffix check */
-                if (ok && has_suffix && suffix_len > 0 && slen >= suffix_len)
-                {
-                    const char *str_end = str + slen - suffix_len;
-                    if (ilike)
-                        ok = (pg_strcasecmp(str_end, suffix) == 0);
-                    else
-                        ok = (strcmp(str_end, suffix) == 0);
-                }
-                else if (ok && has_suffix && slen < suffix_len)
-                    ok = false;
-
-                /* substring check */
-                if (ok && substring && sub_len > 0)
-                {
-                    if (ilike)
-                    {
-                        /* case-insensitive substring: scan manually */
-                        bool found = false;
-                        int  j;
-                        for (j = 0; j <= slen - sub_len; j++)
-                        {
-                            if (pg_strncasecmp(str + j, substring, sub_len) == 0)
-                            { found = true; break; }
-                        }
-                        ok = found;
-                    }
-                    else
-                        ok = (strstr(str, substring) != NULL);
-                }
-
-                match = ok;
-            }
-
-            if (match)
-            {
-                if (count >= capacity)
-                {
-                    capacity *= 2;
-                    tids = (ItemPointerData *) repalloc(
-                        tids, capacity * sizeof(ItemPointerData));
-                }
-                ItemPointerCopy(&idx->tids[i], &tids[count++]);
-            }
+            ItemPointerCopy(&idx->tids[i], &tids[count++]);
         }
     }
 
-    if (prefix)    pfree(prefix);
-    if (suffix)    pfree(suffix);
-    if (substring) pfree(substring);
+    if (pattern_lower) pfree(pattern_lower);
 
     *out_tids  = tids;
     *out_count = count;

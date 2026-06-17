@@ -1,8 +1,8 @@
 # biscuit.control
 # Control file for PostgreSQL Biscuit extension
 
-default_version = '2.2.3'
-comment = 'Bitmap-based index access method for fast pattern matching (LIKE/ILIKE), union/intersection queries, and multi-column indexing.'
+default_version = '2.3.0'
+comment = 'Bitmap-based index access method for fast pattern matching (LIKE/ILIKE).'
 
 module_pathname = '$libdir/biscuit'
 
