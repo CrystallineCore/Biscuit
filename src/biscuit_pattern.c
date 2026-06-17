@@ -2327,16 +2327,23 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
                         while (iter->has_value)
                         {
                             uint32_t    rec = iter->current_value;
-                            const char *hay_orig;
+                            const char *hay;
+                            /*
+                             * Use the pre-lowercased cache populated at build /
+                             * skeleton-load / insert time.  This avoids a
+                             * palloc + tolower + pfree per candidate — the hot
+                             * path inside an already bitmap-pruned set.
+                             * column_data_cache_lower mirrors column_data_cache
+                             * slot-for-slot; a NULL entry means the source value
+                             * was NULL, so the same guard applies.
+                             */
                             if (rec < (uint32_t) idx->num_records &&
-                                idx->column_data_cache &&
-                                idx->column_data_cache[col_idx] &&
-                                (hay_orig = idx->column_data_cache[col_idx][rec]) != NULL)
+                                idx->column_data_cache_lower &&
+                                idx->column_data_cache_lower[col_idx] &&
+                                (hay = idx->column_data_cache_lower[col_idx][rec]) != NULL)
                             {
-                                char *hay_lower = biscuit_str_tolower(hay_orig, strlen(hay_orig));
-                                if (strstr(hay_lower, parsed->parts[0]) != NULL)
+                                if (strstr(hay, parsed->parts[0]) != NULL)
                                     biscuit_roaring_add(result, rec);
-                                pfree(hay_lower);
                             }
                             roaring_uint32_iterator_advance(iter);
                         }
@@ -2352,16 +2359,14 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
                             for (j = 0; j < (int) cnt; j++)
                             {
                                 uint32_t    rec = indices[j];
-                                const char *hay_orig;
+                                const char *hay;
                                 if (rec < (uint32_t) idx->num_records &&
-                                    idx->column_data_cache &&
-                                    idx->column_data_cache[col_idx] &&
-                                    (hay_orig = idx->column_data_cache[col_idx][rec]) != NULL)
+                                    idx->column_data_cache_lower &&
+                                    idx->column_data_cache_lower[col_idx] &&
+                                    (hay = idx->column_data_cache_lower[col_idx][rec]) != NULL)
                                 {
-                                    char *hay_lower = biscuit_str_tolower(hay_orig, strlen(hay_orig));
-                                    if (strstr(hay_lower, parsed->parts[0]) != NULL)
+                                    if (strstr(hay, parsed->parts[0]) != NULL)
                                         biscuit_roaring_add(result, rec);
-                                    pfree(hay_lower);
                                 }
                             }
                             pfree(indices);

@@ -331,10 +331,11 @@ biscuit_load_skeleton(Relation index)
     }
     else
     {
-        idx->column_types      = (Oid *)        palloc(natts * sizeof(Oid));
-        idx->output_funcs      = (FmgrInfo *)   palloc(natts * sizeof(FmgrInfo));
-        idx->column_data_cache = (char ***)     palloc(natts * sizeof(char **));
-        idx->column_indices    = (ColumnIndex *) palloc0(natts * sizeof(ColumnIndex));
+        idx->column_types            = (Oid *)        palloc(natts * sizeof(Oid));
+        idx->output_funcs            = (FmgrInfo *)   palloc(natts * sizeof(FmgrInfo));
+        idx->column_data_cache       = (char ***)     palloc(natts * sizeof(char **));
+        idx->column_data_cache_lower = (char ***)     palloc(natts * sizeof(char **));
+        idx->column_indices          = (ColumnIndex *) palloc0(natts * sizeof(ColumnIndex));
 
         for (col = 0; col < natts; col++)
         {
@@ -347,7 +348,8 @@ biscuit_load_skeleton(Relation index)
             idx->column_types[col] = col_attr->atttypid;
             getTypeOutputInfo(col_attr->atttypid, &typoutput, &typIsVarlena);
             fmgr_info(typoutput, &idx->output_funcs[col]);
-            idx->column_data_cache[col] = (char **) palloc0(idx->capacity * sizeof(char *));
+            idx->column_data_cache[col]       = (char **) palloc0(idx->capacity * sizeof(char *));
+            idx->column_data_cache_lower[col] = (char **) palloc0(idx->capacity * sizeof(char *));
 
             for (ch = 0; ch < CHAR_RANGE; ch++)
             {
@@ -402,9 +404,14 @@ biscuit_load_skeleton(Relation index)
             else
             {
                 for (col = 0; col < natts; col++)
+                {
                     idx->column_data_cache[col] = (char **) repalloc(
                         idx->column_data_cache[col],
                         idx->capacity * sizeof(char *));
+                    idx->column_data_cache_lower[col] = (char **) repalloc(
+                        idx->column_data_cache_lower[col],
+                        idx->capacity * sizeof(char *));
+                }
             }
         }
 
@@ -457,6 +464,20 @@ biscuit_load_skeleton(Relation index)
                                               &out_len);
                 else
                     idx->column_data_cache[col][idx->num_records] = NULL;
+
+                /*
+                 * Pre-compute the lowercased copy for ILIKE fallback scans.
+                 * biscuit_fallback_scan() reads column_data_cache_lower
+                 * directly, avoiding a per-record palloc during query
+                 * execution.  Mirror NULL entries exactly.
+                 */
+                if (idx->column_data_cache[col][idx->num_records])
+                    idx->column_data_cache_lower[col][idx->num_records] =
+                        biscuit_str_tolower(
+                            idx->column_data_cache[col][idx->num_records],
+                            strlen(idx->column_data_cache[col][idx->num_records]));
+                else
+                    idx->column_data_cache_lower[col][idx->num_records] = NULL;
             }
         }
 
@@ -1063,7 +1084,25 @@ biscuit_fallback_scan(BiscuitIndex *idx,
         else
         {
             if (col_idx < 0 || col_idx >= idx->num_columns) continue;
-            str = idx->column_data_cache[col_idx][i];
+            if (ilike)
+            {
+                /*
+                 * Use the pre-lowercased cache populated at build / skeleton
+                 * load time.  This avoids a palloc + memcpy + pfree on every
+                 * record for every ILIKE fallback scan.
+                 *
+                 * column_data_cache_lower is guaranteed non-NULL here: it is
+                 * allocated alongside column_data_cache in both biscuit_build
+                 * (biscuit_index.c) and biscuit_load_skeleton (this file).
+                 * Per-slot entries are NULL iff the source value was NULL,
+                 * which is caught by the "if (!str) continue" below.
+                 */
+                str = idx->column_data_cache_lower[col_idx][i];
+            }
+            else
+            {
+                str = idx->column_data_cache[col_idx][i];
+            }
         }
 
         if (!str) continue;

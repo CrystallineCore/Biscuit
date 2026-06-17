@@ -357,7 +357,18 @@ biscuit_rescan_multicolumn_fallback(IndexScanDesc scan,
             if (col_idx < 0 || col_idx >= so->index->num_columns)
                 continue;
 
-            
+            /*
+             * Derive is_ilike and is_not from THIS key's strategy before
+             * passing is_ilike to biscuit_fallback_scan.  Previously these
+             * assignments appeared after the call, leaving is_ilike
+             * uninitialised — an undefined-behaviour read that happened to
+             * produce the first key's value on every iteration, making all
+             * subsequent keys inherit the first key's case-sensitivity.
+             */
+            is_ilike = (key->sk_strategy == BISCUIT_ILIKE_STRATEGY ||
+                        key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
+            is_not   = (key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY ||
+                        key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
 
             pattern_text = DatumGetTextPP(key->sk_argument);
             pattern      = text_to_cstring(pattern_text);
@@ -394,11 +405,6 @@ biscuit_rescan_multicolumn_fallback(IndexScanDesc scan,
             }
             if (key_tids)
                 pfree(key_tids);
-
-            is_ilike = (key->sk_strategy == BISCUIT_ILIKE_STRATEGY ||
-                        key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
-            is_not   = (key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY ||
-                        key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
 
             if (is_not)
             {

@@ -697,10 +697,11 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
              * each with the same character-level logic.
              * (Abbreviated here — mirrors single-column per column.)
              */
-            idx->column_types      = (Oid *)        palloc(natts * sizeof(Oid));
-            idx->output_funcs      = (FmgrInfo *)   palloc(natts * sizeof(FmgrInfo));
-            idx->column_data_cache = (char ***)     palloc(natts * sizeof(char **));
-            idx->column_indices    = (ColumnIndex *) palloc0(natts * sizeof(ColumnIndex));
+            idx->column_types            = (Oid *)        palloc(natts * sizeof(Oid));
+            idx->output_funcs            = (FmgrInfo *)   palloc(natts * sizeof(FmgrInfo));
+            idx->column_data_cache       = (char ***)     palloc(natts * sizeof(char **));
+            idx->column_data_cache_lower = (char ***)     palloc(natts * sizeof(char **));
+            idx->column_indices          = (ColumnIndex *) palloc0(natts * sizeof(ColumnIndex));
 
             for (col = 0; col < natts; col++)
             {
@@ -713,7 +714,8 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
                 idx->column_types[col] = col_attr->atttypid;
                 getTypeOutputInfo(col_attr->atttypid, &typoutput, &typIsVarlena);
                 fmgr_info(typoutput, &idx->output_funcs[col]);
-                idx->column_data_cache[col] = (char **) palloc0(idx->capacity * sizeof(char *));
+                idx->column_data_cache[col]       = (char **) palloc0(idx->capacity * sizeof(char *));
+                idx->column_data_cache_lower[col] = (char **) palloc0(idx->capacity * sizeof(char *));
 
                 for (ch = 0; ch < CHAR_RANGE; ch++)
                 {
@@ -756,7 +758,12 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
                     idx->capacity *= 2;
                     idx->tids = (ItemPointerData *) repalloc(idx->tids, idx->capacity * sizeof(ItemPointerData));
                     for (col = 0; col < natts; col++)
-                        idx->column_data_cache[col] = (char **) repalloc(idx->column_data_cache[col], idx->capacity * sizeof(char *));
+                    {
+                        idx->column_data_cache[col] = (char **) repalloc(
+                            idx->column_data_cache[col], idx->capacity * sizeof(char *));
+                        idx->column_data_cache_lower[col] = (char **) repalloc(
+                            idx->column_data_cache_lower[col], idx->capacity * sizeof(char *));
+                    }
                 }
 
                 ItemPointerCopy(&slot->tts_tid, &idx->tids[idx->num_records]);
@@ -769,10 +776,16 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
                     char      *str;
 
                     val = slot_getattr(slot, index->rd_index->indkey.values[col], &isnull);
-                    if (isnull) { idx->column_data_cache[col][idx->num_records] = NULL; continue; }
+                    if (isnull)
+                    {
+                        idx->column_data_cache[col][idx->num_records]       = NULL;
+                        idx->column_data_cache_lower[col][idx->num_records] = NULL;
+                        continue;
+                    }
 
                     str = biscuit_datum_to_text(val, idx->column_types[col], &idx->output_funcs[col], &out_len);
-                    idx->column_data_cache[col][idx->num_records] = str;
+                    idx->column_data_cache[col][idx->num_records]       = str;
+                    idx->column_data_cache_lower[col][idx->num_records] = biscuit_str_tolower(str, out_len);
 
                     /*
                      * Populate all character-level and case-insensitive bitmaps
@@ -1023,8 +1036,19 @@ biscuit_insert(Relation index,
             else
             {
                 for (col = 0; col < idx->num_columns; col++)
+                {
                     if (idx->column_data_cache[col][slot])
-                        { pfree(idx->column_data_cache[col][slot]); idx->column_data_cache[col][slot] = NULL; }
+                    {
+                        pfree(idx->column_data_cache[col][slot]);
+                        idx->column_data_cache[col][slot] = NULL;
+                    }
+                    if (idx->column_data_cache_lower &&
+                        idx->column_data_cache_lower[col][slot])
+                    {
+                        pfree(idx->column_data_cache_lower[col][slot]);
+                        idx->column_data_cache_lower[col][slot] = NULL;
+                    }
+                }
             }
 
             /* Un-tombstone if needed */
@@ -1085,6 +1109,20 @@ biscuit_insert(Relation index,
                      */
                     memset(idx->column_data_cache[col] + old_cap, 0,
                            (idx->capacity - old_cap) * sizeof(char *));
+
+                    /*
+                     * FIX C: Grow and zero-init column_data_cache_lower in
+                     * lockstep.  Without this the array is shorter than
+                     * column_data_cache; fallback scans on newly-appended
+                     * slots read off the end of the allocation.
+                     */
+                    if (idx->column_data_cache_lower)
+                    {
+                        idx->column_data_cache_lower[col] = (char **) repalloc(
+                            idx->column_data_cache_lower[col], idx->capacity * sizeof(char *));
+                        memset(idx->column_data_cache_lower[col] + old_cap, 0,
+                               (idx->capacity - old_cap) * sizeof(char *));
+                    }
                 }
             }
         }
@@ -1203,10 +1241,24 @@ biscuit_insert(Relation index,
                 char *str = biscuit_datum_to_text(values[col], idx->column_types[col],
                                                   &idx->output_funcs[col], &out_len);
                 idx->column_data_cache[col][slot] = str;
+
+                /*
+                 * Pre-compute the lowercased copy so that biscuit_fallback_scan
+                 * can use column_data_cache_lower directly for ILIKE queries,
+                 * matching the invariant established at build / skeleton load time.
+                 * Mirror NULL to NULL for the null-column case handled below.
+                 */
+                if (idx->column_data_cache_lower)
+                    idx->column_data_cache_lower[col][slot] = biscuit_str_tolower(str, out_len);
+
                 biscuit_index_column_record(idx, col, str, out_len, slot);
             }
             else
+            {
                 idx->column_data_cache[col][slot] = NULL;
+                if (idx->column_data_cache_lower)
+                    idx->column_data_cache_lower[col][slot] = NULL;
+            }
         }
     }
 
@@ -1389,8 +1441,19 @@ biscuit_bulkdelete(IndexVacuumInfo *info,
 
                 for (j = 0; j < (int) delete_count; j++)
                     for (col = 0; col < idx->num_columns; col++)
+                    {
                         if (idx->column_data_cache[col][delete_indices[j]])
-                            { pfree(idx->column_data_cache[col][delete_indices[j]]); idx->column_data_cache[col][delete_indices[j]] = NULL; }
+                        {
+                            pfree(idx->column_data_cache[col][delete_indices[j]]);
+                            idx->column_data_cache[col][delete_indices[j]] = NULL;
+                        }
+                        if (idx->column_data_cache_lower &&
+                            idx->column_data_cache_lower[col][delete_indices[j]])
+                        {
+                            pfree(idx->column_data_cache_lower[col][delete_indices[j]]);
+                            idx->column_data_cache_lower[col][delete_indices[j]] = NULL;
+                        }
+                    }
             }
 
             pfree(delete_indices);
