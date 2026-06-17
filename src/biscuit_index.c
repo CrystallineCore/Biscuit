@@ -1253,6 +1253,101 @@ biscuit_insert(Relation index,
                     idx->column_data_cache_lower[col][slot] = biscuit_str_tolower(str, out_len);
 
                 biscuit_index_column_record(idx, col, str, out_len, slot);
+
+                /*
+                 * FIX 5 — multi-column length bitmaps never updated on insert.
+                 *
+                 * biscuit_index_column_record() only maintains the per-character
+                 * position/negative-position bitmaps and char_cache for this
+                 * column's ColumnIndex.  It does NOT touch cidx->length_bitmaps /
+                 * cidx->length_ge_bitmaps (or the _lower variants), which were
+                 * only ever populated in the bulk-build pass (biscuit_build).
+                 *
+                 * Because biscuit_insert never resets idx->preload_state after
+                 * mutating idx, preload_state stays BISCUIT_PRELOAD_DONE across
+                 * the insert.  biscuit_rescan() trusts that flag and goes
+                 * straight to the bitmap fast path (biscuit_rescan_multicolumn),
+                 * which consults these length bitmaps for length-based
+                 * predicates. Newly inserted rows were invisible there even
+                 * though column_data_cache, char_cache, and the position
+                 * bitmaps were all correctly updated above — hence "insert is
+                 * on disk and in data_cache, but warm queries don't see it".
+                 *
+                 * Mirror the legacy single-column growth/insert logic here,
+                 * operating on this column's ColumnIndex (cidx) instead of
+                 * the top-level idx fields.
+                 */
+                {
+                    ColumnIndex *cidx = &idx->column_indices[col];
+                    int          cl   = biscuit_utf8_char_count(str, out_len);
+
+                    if (cl >= cidx->max_length)
+                    {
+                        int old_ml = cidx->max_length;
+                        int new_ml = (cl + 1) * 2;
+
+                        if (cidx->length_bitmaps)
+                            cidx->length_bitmaps    = (RoaringBitmap **) repalloc(cidx->length_bitmaps,    new_ml * sizeof(RoaringBitmap *));
+                        else
+                            cidx->length_bitmaps    = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
+
+                        if (cidx->length_ge_bitmaps)
+                            cidx->length_ge_bitmaps = (RoaringBitmap **) repalloc(cidx->length_ge_bitmaps, new_ml * sizeof(RoaringBitmap *));
+                        else
+                            cidx->length_ge_bitmaps = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
+
+                        for (int i = old_ml; i < new_ml; i++)
+                        {
+                            cidx->length_bitmaps[i]    = NULL;
+                            cidx->length_ge_bitmaps[i] = biscuit_roaring_create();
+                        }
+                        cidx->max_length = new_ml;
+                    }
+                    if (!cidx->length_bitmaps[cl])
+                        cidx->length_bitmaps[cl] = biscuit_roaring_create();
+                    biscuit_roaring_add(cidx->length_bitmaps[cl], slot);
+                    for (int i = 0; i <= cl && i < cidx->max_length; i++)
+                        biscuit_roaring_add(cidx->length_ge_bitmaps[i], slot);
+
+                    /* Lowercase length bitmaps */
+                    if (idx->column_data_cache_lower)
+                    {
+                        const char *lstr = idx->column_data_cache_lower[col][slot];
+                        if (lstr)
+                        {
+                            int lbl = strlen(lstr);
+                            int lcl = biscuit_utf8_char_count(lstr, lbl);
+
+                            if (lcl >= cidx->max_length_lower)
+                            {
+                                int old_ml = cidx->max_length_lower;
+                                int new_ml = (lcl + 1) * 2;
+
+                                if (cidx->length_bitmaps_lower)
+                                    cidx->length_bitmaps_lower    = (RoaringBitmap **) repalloc(cidx->length_bitmaps_lower,    new_ml * sizeof(RoaringBitmap *));
+                                else
+                                    cidx->length_bitmaps_lower    = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
+
+                                if (cidx->length_ge_bitmaps_lower)
+                                    cidx->length_ge_bitmaps_lower = (RoaringBitmap **) repalloc(cidx->length_ge_bitmaps_lower, new_ml * sizeof(RoaringBitmap *));
+                                else
+                                    cidx->length_ge_bitmaps_lower = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
+
+                                for (int i = old_ml; i < new_ml; i++)
+                                {
+                                    cidx->length_bitmaps_lower[i]    = NULL;
+                                    cidx->length_ge_bitmaps_lower[i] = biscuit_roaring_create();
+                                }
+                                cidx->max_length_lower = new_ml;
+                            }
+                            if (!cidx->length_bitmaps_lower[lcl])
+                                cidx->length_bitmaps_lower[lcl] = biscuit_roaring_create();
+                            biscuit_roaring_add(cidx->length_bitmaps_lower[lcl], slot);
+                            for (int i = 0; i <= lcl && i < cidx->max_length_lower; i++)
+                                biscuit_roaring_add(cidx->length_ge_bitmaps_lower[i], slot);
+                        }
+                    }
+                } /* end multi-column length-bitmap block */
             }
             else
             {
