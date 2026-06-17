@@ -1012,10 +1012,11 @@ biscuit_insert(Relation index,
      * This also fixes the mirrored hazard in the multi-column path where
      * cidx->length_bitmaps / length_ge_bitmaps are NULL in a skeleton.
      */
+     
+    oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
     if (idx->preload_state < BISCUIT_PRELOAD_DONE)
         biscuit_complete_preload_local(idx, RelationGetRelid(index));
 
-    oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
 
     /* Check for duplicate TID (UPDATE path) */
     for (int i = 0; i < idx->num_records; i++)
