@@ -181,10 +181,22 @@ extern bool biscuit_is_aggregate_query(IndexScanDesc scan);
  * biscuit_estimateparallelscan
  *
  * AM callback: returns sizeof(BiscuitParallelScanDesc) so the executor
- * reserves exactly the right amount of DSM space.  nworkers is also stored
- * so biscuit_initparallelscan can record num_participants.
+ * reserves exactly the right amount of DSM space.
+ *
+ * The amestimateparallelscan_function typedef has changed signature across
+ * major PostgreSQL versions:
+ *
+ *   PG16  and earlier : Size (*)(void)
+ *   PG17              : Size (*)(int nkeys, int norderbys)
+ *   PG18  and later   : Size (*)(Relation indexRelation, int nworkers, int nchunks)
  */
+#if PG_VERSION_NUM >= 180000
 extern Size biscuit_estimateparallelscan(Relation indexRelation, int nworkers, int nchunks);
+#elif PG_VERSION_NUM >= 170000
+extern Size biscuit_estimateparallelscan(int nkeys, int norderbys);
+#else
+extern Size biscuit_estimateparallelscan(void);
+#endif
 
 /*
  * biscuit_initparallelscan

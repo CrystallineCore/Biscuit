@@ -60,10 +60,6 @@
 #include "postmaster/interrupt.h"
 #endif
 
-/* WAIT_EVENT_BGWORKER_MAIN was added in PG 17 */
-#if PG_VERSION_NUM < 170000
-#define WAIT_EVENT_BGWORKER_MAIN  WAIT_EVENT_BGWORKER_STARTUP
-#endif
 
 #ifndef WAIT_EVENT_BGWORKER_MAIN
 #define WAIT_EVENT_BGWORKER_MAIN 0

@@ -262,7 +262,7 @@ biscuit_rescan_multicolumn(IndexScanDesc scan,
         {
             pdesc = (BiscuitParallelScanDesc *)
                         OffsetToPointer(scan->parallel_scan,
-                                        scan->parallel_scan->ps_offset_am);
+                                        BISCUIT_PARALLEL_AM_OFFSET(scan->parallel_scan));
         }
 
         biscuit_collect_sorted_tids_parallel(
@@ -495,8 +495,6 @@ biscuit_rescan(IndexScanDesc scan,
 #if PG_VERSION_NUM >= 180000
     if (scan->instrument)
         scan->instrument->nsearches++;
-#elif PG_VERSION_NUM >= 170000
-    scan->xs_numIndexSearches++;
 #endif
 
     is_aggregate   = biscuit_is_aggregate_query(scan);
@@ -713,7 +711,7 @@ biscuit_rescan(IndexScanDesc scan,
                 if (scan->parallel_scan != NULL)
                     pdesc = (BiscuitParallelScanDesc *)
                                 OffsetToPointer(scan->parallel_scan,
-                                                scan->parallel_scan->ps_offset_am);
+                                                BISCUIT_PARALLEL_AM_OFFSET(scan->parallel_scan));
               
                 biscuit_collect_sorted_tids_parallel(
                     so->index, result, pdesc,
@@ -907,7 +905,7 @@ biscuit_rescan(IndexScanDesc scan,
                     if (scan->parallel_scan != NULL)
                         pdesc = (BiscuitParallelScanDesc *)
                                     OffsetToPointer(scan->parallel_scan,
-                                                    scan->parallel_scan->ps_offset_am);
+                                                    BISCUIT_PARALLEL_AM_OFFSET(scan->parallel_scan));
                   
                      biscuit_collect_sorted_tids_parallel(
                         so->index, candidates, pdesc,

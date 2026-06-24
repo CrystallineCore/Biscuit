@@ -79,7 +79,7 @@ typedef struct {
 #define CHAR_RANGE                      256
 #define TOMBSTONE_CLEANUP_THRESHOLD     1000
 #define RADIX_SORT_THRESHOLD            5000
-#define BISCUIT_LIBRARY_VERSION         "2.3.0 - Bagel"
+#define BISCUIT_LIBRARY_VERSION         "2.3.1 - Bagel"
 
 /* ==================== MEMORY MANAGEMENT MACROS ==================== */
 
@@ -293,5 +293,39 @@ typedef struct PatternCacheEntry {
     int num_tids;
     struct PatternCacheEntry *next;
 } PatternCacheEntry;
+
+/* ==================== CROSS-VERSION COMPATIBILITY ==================== */
+
+/*
+ * ParallelIndexScanDescData::ps_offset_am
+ *
+ * In PG18+ the AM-private offset field was renamed from ps_offset to
+ * ps_offset_am to clarify its purpose.  Use this macro everywhere so a
+ * single version check covers all call sites.
+ */
+#if PG_VERSION_NUM >= 180000
+#define BISCUIT_PARALLEL_AM_OFFSET(ps)  ((ps)->ps_offset_am)
+#else
+#define BISCUIT_PARALLEL_AM_OFFSET(ps)  ((ps)->ps_offset)
+#endif
+
+/*
+ * Index search counter
+ *
+ * xs_numIndexSearches was added to IndexScanDescData in PG17 and then
+ * replaced by scan->instrument->nsearches in PG18.  Use this macro to
+ * increment the counter in a version-safe way; it expands to nothing on
+ * PG16 and earlier where neither field exists.
+ */
+#if PG_VERSION_NUM >= 180000
+#define BISCUIT_COUNT_INDEX_SEARCH(scan) \
+    do { if ((scan)->instrument) (scan)->instrument->nsearches++; } while(0)
+#elif PG_VERSION_NUM >= 170000
+#define BISCUIT_COUNT_INDEX_SEARCH(scan) \
+    do { (scan)->xs_numIndexSearches++; } while(0)
+#else
+#define BISCUIT_COUNT_INDEX_SEARCH(scan) \
+    do { } while(0)
+#endif
 
 #endif /* BISCUIT_COMMON_H */

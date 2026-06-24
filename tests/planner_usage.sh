@@ -25,6 +25,23 @@ RESULTS_DIR="./benchmark_results_$(date +%Y%m%d_%H%M%S)"
 NUM_ITERATIONS=10 # Increased for statistical significance
 WARMUP_ITERATIONS=3
 
+# Environment-control configuration
+# Set PIN_CORES to a taskset-style list (e.g. "2-5") to pin the postgres
+# postmaster to specific cores. Leave empty to skip pinning.
+PIN_CORES=""
+# Swappiness to apply for the duration of the run (restored on exit)
+BENCHMARK_SWAPPINESS=0
+# How long to bump checkpoint_timeout/max_wal_size so a checkpoint can't
+# fire mid-iteration and unfairly penalize one index type
+BENCHMARK_CHECKPOINT_TIMEOUT="30min"
+BENCHMARK_MAX_WAL_SIZE="4GB"
+
+# State captured so we can restore the machine to its original config on exit
+ORIG_GOVERNOR=""
+ORIG_SWAPPINESS=""
+ORIG_NO_TURBO=""
+ENV_PREPARED=0
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -60,6 +77,91 @@ check_privileges() {
     if [ "$EUID" -ne 0 ] && [ "$(whoami)" != "postgres" ]; then
         log_error "This script must be run as root or postgres user"
         exit 1
+    fi
+}
+
+# Confirm passwordless sudo works for everything this script needs, BEFORE
+# we're 8 cold-cache iterations deep and a password prompt silently hangs
+# the run (this script is non-interactive: set -e + sudo prompts mid-loop
+# is how you lose an afternoon).
+check_sudo_noninteractive() {
+    log_info "Verifying passwordless sudo for required commands..."
+
+    # If we're already root (e.g. invoked as 'sudo ./script.sh'), every
+    # 'sudo' call inside this script is a no-op privilege-wise and will
+    # never prompt for a password. Skip the probing entirely in that case.
+    if [ "$EUID" -eq 0 ]; then
+        log_info "Running as root; sudo calls will not prompt. Skipping sudo probe."
+        return 0
+    fi
+
+    # sudo -n's *exit code* is ambiguous: if the wrapped command itself fails,
+    # sudo propagates that exit code too, which looks identical to "sudo
+    # needed a password and refused". The only reliable signal is sudo's own
+    # stderr message ("a password is required" / "sorry, a password..."), so
+    # we capture stderr and grep for that rather than trusting $?.
+    _sudo_blocked() {
+        local err
+        err="$(sudo -n "$@" 2>&1 >/dev/null)"
+        if echo "$err" | grep -qi "password is required\|sorry.*password\|sudo: a password\|sudo: no tty present"; then
+            return 0  # blocked: sudo itself refused
+        fi
+        return 1  # not blocked (command may have still failed on its own merits)
+    }
+
+    local check_failed=0
+
+    if _sudo_blocked systemctl is-active postgresql; then
+        log_error "Passwordless sudo failed for: sudo systemctl ... postgresql"
+        log_error "Add a NOPASSWD entry in /etc/sudoers (visudo) covering 'systemctl stop/start/status postgresql' for this user."
+        check_failed=1
+    fi
+
+    if _sudo_blocked sync; then
+        log_error "Passwordless sudo failed for: sudo sync"
+        check_failed=1
+    fi
+
+    if _sudo_blocked sh -c true; then
+        log_error "Passwordless sudo failed for: sudo sh -c <drop_caches command>"
+        log_error "Add a NOPASSWD entry covering 'sh -c echo 3 > /proc/sys/vm/drop_caches'."
+        check_failed=1
+    fi
+
+    if _sudo_blocked -u postgres true; then
+        log_error "Passwordless sudo failed for: sudo -u postgres ..."
+        log_error "Add a NOPASSWD entry covering '-u postgres' commands (pg_isready, psql)."
+        check_failed=1
+    fi
+
+    if [ "$check_failed" -eq 1 ]; then
+        log_error "Fix the sudoers entries above, or this script will hang on a password prompt mid-benchmark."
+        exit 1
+    fi
+
+    # Best-effort live check: only meaningful if postgres happens to be
+    # running already. Not fatal if it isn't (the benchmark starts it itself).
+    if sudo -n -u postgres pg_isready -q >/dev/null 2>&1; then
+        if ! sudo -n -u postgres psql -t -c "SELECT 1" >/dev/null 2>&1; then
+            log_warn "sudo -u postgres psql ran but the SELECT 1 test query failed -- check PostgreSQL connectivity/auth separately."
+        fi
+    fi
+    log_info "Passwordless sudo OK"
+}
+
+# Detect that we're not virtualized/containerized in a way that makes CPU
+# governor / turbo control meaningless (cloud VMs frequently hide or ignore
+# these knobs entirely; better to warn than silently no-op).
+warn_if_virtualized() {
+    if command -v systemd-detect-virt >/dev/null 2>&1; then
+        local virt
+        virt="$(systemd-detect-virt 2>/dev/null || true)"
+        if [ -n "$virt" ] && [ "$virt" != "none" ]; then
+            log_warn "Detected virtualization: $virt"
+            log_warn "CPU governor / turbo-boost controls may be ignored by the hypervisor."
+            log_warn "Disk cache flushing is also likely incomplete on cloud storage backends."
+            log_warn "Disclose this in your write-up as a benchmarking limitation."
+        fi
     fi
 }
 
@@ -101,11 +203,144 @@ restart_postgres_clean() {
     stop_postgres
     clear_caches
     start_postgres
+    pin_postgres_cores
 }
 
 ################################################################################
-# Count Verification Functions
+# Environment Control (CPU governor, turbo, swappiness, checkpoint settings)
 ################################################################################
+
+# Pin CPU governor to 'performance' on every core, disable turbo boost where
+# possible, and zero out swappiness, so clock speed and thermal state don't
+# drift across the ~30 restart cycles this script performs. All changes are
+# captured and restored in restore_environment() via a trap, even on error.
+prepare_environment() {
+    log_section "Preparing System Environment"
+
+    # --- CPU governor ---
+    if command -v cpupower >/dev/null 2>&1; then
+        ORIG_GOVERNOR="$(cpupower frequency-info -p 2>/dev/null | grep -oP 'governor "\K[^"]+' || true)"
+        if [ -n "$ORIG_GOVERNOR" ]; then
+            log_info "Current CPU governor: $ORIG_GOVERNOR (will restore on exit)"
+            if sudo cpupower frequency-set -g performance >/dev/null 2>&1; then
+                log_info "CPU governor set to: performance"
+            else
+                log_warn "Could not set CPU governor to performance (continuing anyway)"
+            fi
+        else
+            log_warn "Could not read current CPU governor; skipping governor pinning"
+        fi
+    else
+        log_warn "cpupower not found; CPU governor left at default (install linux-tools / cpupower for stable clocks)"
+    fi
+
+    # --- Turbo boost ---
+    if [ -f /sys/devices/system/cpu/intel_pstate/no_turbo ]; then
+        ORIG_NO_TURBO="$(cat /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || true)"
+        if [ -n "$ORIG_NO_TURBO" ]; then
+            log_info "Disabling Intel turbo boost for run-to-run clock stability"
+            echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo >/dev/null 2>&1 \
+                || log_warn "Could not disable turbo boost (intel_pstate)"
+        fi
+    elif [ -f /sys/devices/system/cpu/cpufreq/boost ]; then
+        ORIG_NO_TURBO="$(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || true)"
+        if [ -n "$ORIG_NO_TURBO" ]; then
+            log_info "Disabling AMD/generic CPU boost for run-to-run clock stability"
+            echo 0 | sudo tee /sys/devices/system/cpu/cpufreq/boost >/dev/null 2>&1 \
+                || log_warn "Could not disable CPU boost"
+        fi
+    else
+        log_warn "No turbo-boost control file found; skipping (results may show more variance)"
+    fi
+
+    # --- Swappiness ---
+    if [ -f /proc/sys/vm/swappiness ]; then
+        ORIG_SWAPPINESS="$(cat /proc/sys/vm/swappiness)"
+        log_info "Current vm.swappiness: $ORIG_SWAPPINESS (will restore on exit)"
+        echo "$BENCHMARK_SWAPPINESS" | sudo tee /proc/sys/vm/swappiness >/dev/null 2>&1 \
+            || log_warn "Could not set vm.swappiness"
+        log_info "vm.swappiness set to: $BENCHMARK_SWAPPINESS"
+    fi
+
+    ENV_PREPARED=1
+}
+
+# Reverse everything prepare_environment() touched. Registered via trap so
+# it runs on normal exit, error exit (set -e), or Ctrl-C — we never want to
+# leave a dev machine pinned to 'performance' / turbo-disabled silently.
+restore_environment() {
+    if [ "$ENV_PREPARED" -ne 1 ]; then
+        return 0
+    fi
+    log_section "Restoring System Environment"
+
+    if [ -n "$ORIG_GOVERNOR" ] && command -v cpupower >/dev/null 2>&1; then
+        sudo cpupower frequency-set -g "$ORIG_GOVERNOR" >/dev/null 2>&1 \
+            && log_info "CPU governor restored to: $ORIG_GOVERNOR" \
+            || log_warn "Could not restore CPU governor to $ORIG_GOVERNOR"
+    fi
+
+    if [ -n "$ORIG_NO_TURBO" ]; then
+        if [ -f /sys/devices/system/cpu/intel_pstate/no_turbo ]; then
+            echo "$ORIG_NO_TURBO" | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo >/dev/null 2>&1 \
+                && log_info "Turbo boost setting restored"
+        elif [ -f /sys/devices/system/cpu/cpufreq/boost ]; then
+            echo "$ORIG_NO_TURBO" | sudo tee /sys/devices/system/cpu/cpufreq/boost >/dev/null 2>&1 \
+                && log_info "CPU boost setting restored"
+        fi
+    fi
+
+    if [ -n "$ORIG_SWAPPINESS" ]; then
+        echo "$ORIG_SWAPPINESS" | sudo tee /proc/sys/vm/swappiness >/dev/null 2>&1 \
+            && log_info "vm.swappiness restored to: $ORIG_SWAPPINESS"
+    fi
+
+    ENV_PREPARED=0
+}
+
+# Apply temporary postgresql.conf overrides so a checkpoint can't fire
+# mid-iteration and unfairly penalize whichever index happens to be running
+# at the time. Requires ALTER SYSTEM privileges; settings take effect after
+# the next restart, which restart_postgres_clean() already performs.
+apply_postgres_overrides() {
+    log_info "Raising checkpoint_timeout/max_wal_size for run duration (avoids mid-iteration checkpoints)"
+    sudo -u postgres psql -c "ALTER SYSTEM SET checkpoint_timeout = '${BENCHMARK_CHECKPOINT_TIMEOUT}';" >/dev/null
+    sudo -u postgres psql -c "ALTER SYSTEM SET max_wal_size = '${BENCHMARK_MAX_WAL_SIZE}';" >/dev/null
+    sudo -u postgres psql -c "ALTER SYSTEM SET log_checkpoints = on;" >/dev/null
+}
+
+# Revert the ALTER SYSTEM overrides above. Like restore_environment, this is
+# best-effort and called from the exit trap.
+revert_postgres_overrides() {
+    sudo -u postgres psql -c "ALTER SYSTEM RESET checkpoint_timeout;" >/dev/null 2>&1 || true
+    sudo -u postgres psql -c "ALTER SYSTEM RESET max_wal_size;" >/dev/null 2>&1 || true
+    sudo -u postgres psql -c "ALTER SYSTEM RESET log_checkpoints;" >/dev/null 2>&1 || true
+}
+
+# Pin the postgres postmaster (and its children) to PIN_CORES via taskset,
+# if configured. Run after start_postgres() so the PID exists. Improves
+# L2/L3 cache locality consistency across runs on multi-core/multi-socket
+# machines; no-op if PIN_CORES is unset.
+pin_postgres_cores() {
+    if [ -z "$PIN_CORES" ]; then
+        return 0
+    fi
+    if ! command -v taskset >/dev/null 2>&1; then
+        log_warn "taskset not found; skipping core pinning"
+        return 0
+    fi
+    local pmpid
+    pmpid="$(sudo -u postgres pg_isready -q && pgrep -u postgres -f 'postgres.*-D' | head -1 || true)"
+    if [ -z "$pmpid" ]; then
+        log_warn "Could not find postgres postmaster PID; skipping core pinning"
+        return 0
+    fi
+    log_info "Pinning postgres (PID $pmpid and children) to cores: $PIN_CORES"
+    sudo taskset -apc "$PIN_CORES" "$pmpid" >/dev/null 2>&1 || log_warn "taskset failed to pin postmaster"
+    for child in $(pgrep -P "$pmpid" 2>/dev/null || true); do
+        sudo taskset -apc "$PIN_CORES" "$child" >/dev/null 2>&1 || true
+    done
+}
 
 compare_index_counts() {
     log_info "Comparing row counts across all indexes and iterations..."
@@ -1436,7 +1671,16 @@ main() {
     log_section "PostgreSQL Index Benchmark Suite"
     
     check_privileges
-    
+    check_sudo_noninteractive
+    warn_if_virtualized
+
+    # Ensure we ALWAYS restore the machine's environment (CPU governor,
+    # turbo, swappiness, postgresql.conf overrides) regardless of how the
+    # script exits — success, error (set -e), or interrupt.
+    trap 'restore_environment; revert_postgres_overrides' EXIT
+
+    prepare_environment
+
     mkdir -p "$RESULTS_DIR"
     log_info "Results directory: $RESULTS_DIR"
     
@@ -1453,10 +1697,21 @@ PostgreSQL Version: $(sudo -u postgres psql -t -c "SELECT version();")
 CPU Info: $(lscpu | grep "Model name" | cut -d: -f2 | xargs)
 Memory: $(free -h | grep Mem | awk '{print $2}')
 Disk: $(df -h / | tail -1 | awk '{print $2}')
+CPU Governor (pinned for run): performance
+Turbo Boost: disabled for run
+vm.swappiness (set for run): $BENCHMARK_SWAPPINESS
+Core Pinning: ${PIN_CORES:-none}
+Virtualization: $(systemd-detect-virt 2>/dev/null || echo "unknown")
 EOF
     
     # Also save PostgreSQL configuration
     sudo -u postgres psql -c "SHOW ALL;" > "$RESULTS_DIR/postgres_config.txt" 2>&1
+
+    # Start PostgreSQL once so we can apply ALTER SYSTEM overrides; the
+    # subsequent restart_postgres_clean() calls in run_index_benchmark will
+    # pick these up since they were persisted via ALTER SYSTEM.
+    start_postgres
+    apply_postgres_overrides
     
     INDEX_TYPES=("biscuit" "trigram" "btree")
     SHUFFLED=($(shuf -e "${INDEX_TYPES[@]}"))

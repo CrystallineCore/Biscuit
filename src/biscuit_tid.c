@@ -549,7 +549,7 @@ biscuit_get_parallel_worker_count(IndexScanDesc scan)
 
     pdesc = (BiscuitParallelScanDesc *)
                 OffsetToPointer(scan->parallel_scan,
-                                scan->parallel_scan->ps_offset_am);
+                                BISCUIT_PARALLEL_AM_OFFSET(scan->parallel_scan));
 
     return (pdesc->num_participants > 1) ? pdesc->num_participants - 1 : 2;
 }
@@ -569,15 +569,49 @@ biscuit_is_aggregate_query(IndexScanDesc scan)
  *
  * Returns sizeof(BiscuitParallelScanDesc) so the executor reserves exactly
  * the right amount of DSM space.
+ *
+ * The amestimateparallelscan_function typedef has changed signature across
+ * major PostgreSQL versions:
+ *
+ *   PG16  and earlier : Size (*)(void)
+ *   PG17              : Size (*)(int nkeys, int norderbys)
+ *   PG18  and later   : Size (*)(Relation indexRelation, int nworkers, int nchunks)
+ *
+ * On PG17 the parameters carry operator-class metadata (not a worker count),
+ * so biscuit_planned_nworkers is left at 0 on that version.
+ * On PG16 and earlier there are no parameters at all; same treatment.
+ * On PG18+ nworkers is available and is stashed for initparallelscan.
+ *
+ * In all cases where nworkers is unavailable, biscuit_initparallelscan sets
+ * num_participants = 1 (leader only), and the scan degrades gracefully to
+ * the single-process path.
  */
+#if PG_VERSION_NUM >= 180000
 Size
 biscuit_estimateparallelscan(Relation indexRelation, int nworkers, int nchunks)
 {
     (void) indexRelation;
     (void) nchunks;
-    biscuit_planned_nworkers = nworkers;   /* save for initparallelscan */
+    biscuit_planned_nworkers = nworkers;
     return sizeof(BiscuitParallelScanDesc);
 }
+#elif PG_VERSION_NUM >= 170000
+Size
+biscuit_estimateparallelscan(int nkeys, int norderbys)
+{
+    (void) nkeys;
+    (void) norderbys;
+    biscuit_planned_nworkers = 0;
+    return sizeof(BiscuitParallelScanDesc);
+}
+#else
+Size
+biscuit_estimateparallelscan(void)
+{
+    biscuit_planned_nworkers = 0;
+    return sizeof(BiscuitParallelScanDesc);
+}
+#endif
 
 /*
  * biscuit_initparallelscan
@@ -635,7 +669,7 @@ biscuit_parallelrescan(IndexScanDesc scan)
 
     pdesc = (BiscuitParallelScanDesc *)
                 OffsetToPointer(scan->parallel_scan,
-                                scan->parallel_scan->ps_offset_am);
+                                BISCUIT_PARALLEL_AM_OFFSET(scan->parallel_scan));
 
     /* Clear all slots and reset the initialized flag to 0. */
     pdesc->total_tids = 0;
