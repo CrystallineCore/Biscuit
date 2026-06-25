@@ -153,24 +153,39 @@ biscuit_datum_to_text(Datum value, Oid typoid, FmgrInfo *outfunc, int *out_len)
     text *txt;
     char *str;
     int   len;
-
     switch (typoid)
     {
         case TEXTOID:
         case VARCHAROID:
-        case BPCHAROID:
         {
             txt    = DatumGetTextPP(value);
             str    = VARDATA_ANY(txt);
             len    = VARSIZE_ANY_EXHDR(txt);
             result = pnstrdup(str, len);
             *out_len = len;
-
             if ((void *) txt != (void *) DatumGetPointer(value))
                 pfree(txt);
             break;
         }
-
+        case BPCHAROID:
+        {
+            /*
+             * bpchar values are blank-padded to their declared length.
+             * Postgres's own comparison and LIKE operators for bpchar
+             * strip trailing blanks before comparing (per SQL semantics),
+             * so we must index the trimmed value too, or the index
+             * contents won't agree with what the operators actually
+             * compare against.
+             */
+            txt    = DatumGetTextPP(value);
+            str    = VARDATA_ANY(txt);
+            len    = bpchartruelen(str, VARSIZE_ANY_EXHDR(txt));
+            result = pnstrdup(str, len);
+            *out_len = len;
+            if ((void *) txt != (void *) DatumGetPointer(value))
+                pfree(txt);
+            break;
+        }
         default:
             ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

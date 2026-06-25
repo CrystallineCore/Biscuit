@@ -43,6 +43,13 @@
 #include "biscuit_utf8.h"
 #include "biscuit_preload.h"
 
+#include "executor/executor.h"   /* for FormIndexDatum, CreateExecutorState,
+                                   * GetPerTupleExprContext, ResetExprContext —
+                                   * needed to evaluate expression index columns
+                                   * (e.g. (col::text), lower(col2)) correctly in
+                                   * biscuit_load_skeleton(), same fix as
+                                   * biscuit_build() in biscuit_index.c. */
+
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
 #include "storage/ipc.h"
@@ -274,6 +281,46 @@ biscuit_load_skeleton(Relation index)
     TableScanDesc     scan;
     MemoryContext     oldcontext;
     int               natts, col, ch;
+    EState           *estate;
+    ExprContext      *econtext;
+    Datum             index_values[INDEX_MAX_KEYS];
+    bool              index_isnull[INDEX_MAX_KEYS];
+    Oid               single_coltypid = InvalidOid;
+    FmgrInfo          single_output_func;
+
+    /*
+     * FIX #11 — identical root cause to FIX #10 in biscuit_index.c's
+     * biscuit_build(), but in a completely separate code path: this
+     * function does its own heap scan rather than reusing biscuit_build(),
+     * so it had never received that fix and crashed on expression index
+     * columns (e.g. (col::text), lower(col2)) the first time a query ran
+     * after CREATE INDEX -- i.e. the first time this skeleton loader fires.
+     *
+     * The single-column branch was actually missing the type lookup
+     * entirely (it called DatumGetTextPP(val) directly, assuming text),
+     * and fetched the value via
+     *   slot_getattr(slot_tbl, indexInfo->ii_IndexAttrNumbers[0], &isnull)
+     * which is InvalidAttrNumber (0) for an expression column -- not a
+     * valid attribute number, and slot_getattr() cannot evaluate an
+     * expression regardless. The multi-column branch additionally derived
+     * each column's type via index->rd_index->indkey.values[col] looked up
+     * against the *heap's* tuple descriptor, which is the same garbage-OID
+     * bug already fixed in ambuild.
+     *
+     * Because this function builds the skeleton's data_cache /
+     * column_data_cache, the garbage values it wrote here were stored
+     * successfully (no immediate error) and only crashed later, when a
+     * scan (biscuit_fallback_scan / pattern matching) dereferenced that
+     * garbage -- explaining "index creation succeeds, query segfaults".
+     *
+     * Fix: same pattern as biscuit_build() -- derive each column's type
+     * from the index's own tuple descriptor (always correct for both plain
+     * columns and expressions), and fetch values via FormIndexDatum()
+     * instead of slot_getattr(), since only FormIndexDatum() can evaluate
+     * an arbitrary expression against the heap tuple.
+     */
+    estate   = CreateExecutorState();
+    econtext = GetPerTupleExprContext(estate);
 
     /*
      * All skeleton data must live in CacheMemoryContext.  rd_indexcxt is
@@ -297,6 +344,13 @@ biscuit_load_skeleton(Relation index)
     /* ---- Allocate data caches; leave ALL bitmap fields NULL ---- */
     if (natts == 1)
     {
+        Oid  typoutput;
+        bool typIsVarlena;
+
+        single_coltypid = TupleDescAttr(RelationGetDescr(index), 0)->atttypid;
+        getTypeOutputInfo(single_coltypid, &typoutput, &typIsVarlena);
+        fmgr_info(typoutput, &single_output_func);
+
         idx->data_cache       = (char **) palloc0(idx->capacity * sizeof(char *));
         idx->data_cache_lower = (char **) palloc0(idx->capacity * sizeof(char *));
 
@@ -335,8 +389,12 @@ biscuit_load_skeleton(Relation index)
 
         for (col = 0; col < natts; col++)
         {
-            AttrNumber        col_attnum = index->rd_index->indkey.values[col];
-            Form_pg_attribute col_attr   = TupleDescAttr(heap->rd_att, col_attnum - 1);
+            /*
+             * Use the index's own tuple descriptor, not the heap's --
+             * see FIX #11 above. This is correct for both plain Var
+             * columns and arbitrary expressions.
+             */
+            Form_pg_attribute col_attr = TupleDescAttr(RelationGetDescr(index), col);
             Oid               typoutput;
             bool              typIsVarlena;
             ColumnIndex      *cidx = &idx->column_indices[col];
@@ -382,7 +440,14 @@ biscuit_load_skeleton(Relation index)
     
     while (table_scan_getnextslot(scan, ForwardScanDirection, slot_tbl))
     {
-        slot_getallattrs(slot_tbl);
+        /*
+         * FIX #11: evaluate every index key (plain Var or expression)
+         * via FormIndexDatum() instead of slot_getattr(), which can only
+         * fetch a real heap attribute and has no way to run an expression.
+         */
+        ResetExprContext(econtext);
+        econtext->ecxt_scantuple = slot_tbl;
+        FormIndexDatum(indexInfo, slot_tbl, estate, index_values, index_isnull);
 
         if (idx->num_records >= idx->capacity)
         {
@@ -415,22 +480,16 @@ biscuit_load_skeleton(Relation index)
 
         if (natts == 1)
         {
-            Datum val;
-            bool  isnull;
-
-            val = slot_getattr(slot_tbl,
-                               indexInfo->ii_IndexAttrNumbers[0],
-                               &isnull);
-            if (!isnull)
+            if (!index_isnull[0])
             {
-                text *txt     = DatumGetTextPP(val);
-                char *str     = VARDATA_ANY(txt);
-                int   byte_len = VARSIZE_ANY_EXHDR(txt);
-                int   char_count = biscuit_utf8_char_count(str, byte_len);
+                int   out_len;
+                char *str = biscuit_datum_to_text(index_values[0], single_coltypid,
+                                                   &single_output_func, &out_len);
+                int   char_count = biscuit_utf8_char_count(str, out_len);
 
-                idx->data_cache[idx->num_records]       = pnstrdup(str, byte_len);
+                idx->data_cache[idx->num_records]       = str;
                 idx->data_cache_lower[idx->num_records] =
-                    biscuit_str_tolower(str, byte_len);
+                    biscuit_str_tolower(str, out_len);
 
                 if (char_count > idx->max_len)
                     idx->max_len = char_count;
@@ -445,16 +504,11 @@ biscuit_load_skeleton(Relation index)
         {
             for (col = 0; col < natts; col++)
             {
-                Datum val;
-                bool  isnull;
                 int   out_len;
 
-                val = slot_getattr(slot_tbl,
-                                   index->rd_index->indkey.values[col],
-                                   &isnull);
-                if (!isnull)
+                if (!index_isnull[col])
                     idx->column_data_cache[col][idx->num_records] =
-                        biscuit_datum_to_text(val,
+                        biscuit_datum_to_text(index_values[col],
                                               idx->column_types[col],
                                               &idx->output_funcs[col],
                                               &out_len);
@@ -483,6 +537,7 @@ biscuit_load_skeleton(Relation index)
     table_endscan(scan);
     ExecDropSingleTupleTableSlot(slot_tbl);
     table_close(heap, AccessShareLock);
+    FreeExecutorState(estate);
 
     /* Mark as skeleton only — bitmaps not yet built */
     idx->preload_state = BISCUIT_PRELOAD_SKELETON;

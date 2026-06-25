@@ -540,6 +540,43 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
     TableScanDesc     scan;
     MemoryContext     oldcontext;
     int               ch, natts, col, rec_idx;
+    EState           *estate;
+    ExprContext      *econtext;
+    Datum             index_values[INDEX_MAX_KEYS];
+    bool              index_isnull[INDEX_MAX_KEYS];
+
+    /*
+     * FIX #10 — expression index columns (e.g. USING biscuit((col::text))
+     * or USING biscuit(lower(col2))) failed with "cache lookup failed for
+     * type 0" / "... type 4294967295".
+     *
+     * Root cause: the type and value derivation below previously assumed
+     * every index column is a plain attribute reference. It read
+     * index->rd_index->indkey.values[col] and looked that attnum up
+     * directly in the *heap's* tuple descriptor (heap->rd_att) to get the
+     * type, then used slot_getattr() with that same attnum to fetch the
+     * value. For a plain column this attnum is the real 1-based heap
+     * attribute number, so it happened to work. For an expression column,
+     * PostgreSQL stores indkey.values[col] as 0 (InvalidAttrNumber) --
+     * there is no underlying heap attribute for an expression -- so
+     * TupleDescAttr(heap->rd_att, 0 - 1) read attribute -1 (garbage,
+     * explaining the bogus type OIDs 0 / 4294967295), and the matching
+     * slot_getattr(slot, 0, ...) call was equally invalid (valid attnums
+     * are 1-based). Expressions were never evaluated anywhere in this
+     * file.
+     *
+     * Fix: get the type from the index's own tuple descriptor
+     * (RelationGetDescr(index)) instead of the heap's -- this is correct
+     * for both plain columns and expressions, since PostgreSQL always
+     * populates the index tuple descriptor with the actual result type of
+     * each key. Get the value via FormIndexDatum(), which evaluates
+     * whatever the key actually is (plain Var or arbitrary expression)
+     * against the current heap tuple slot, exactly like every built-in AM
+     * (btree, gin, gist, ...) does. This requires a per-tuple ExprContext,
+     * set up once via CreateExecutorState() below and reset per row.
+     */
+    estate   = CreateExecutorState();
+    econtext = GetPerTupleExprContext(estate);
 
     /*
      * All BiscuitIndex data must live in CacheMemoryContext, not in
@@ -567,10 +604,11 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
             /* ---- Single-column initialisation ---- */
             Oid      typoutput;
             bool     typIsVarlena;
-            AttrNumber attnum = index->rd_index->indkey.values[0];
-            Form_pg_attribute attr = TupleDescAttr(heap->rd_att, attnum - 1);
+            Oid      coltypid = TupleDescAttr(RelationGetDescr(index), 0)->atttypid;
+            FmgrInfo single_output_func;
 
-            getTypeOutputInfo(attr->atttypid, &typoutput, &typIsVarlena);
+            getTypeOutputInfo(coltypid, &typoutput, &typIsVarlena);
+            fmgr_info(typoutput, &single_output_func);
 
             idx->data_cache = (char **) palloc0(idx->capacity * sizeof(char *));
             idx->data_cache_lower = (char **) palloc0(idx->capacity * sizeof(char *));
@@ -604,20 +642,17 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
             #endif
             while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
             {
-                Datum  val;
-                bool   isnull;
-                text  *txt;
                 char  *str;
-                int    byte_len;
+                int    out_len;
 
-                slot_getallattrs(slot);
-                val = slot_getattr(slot, indexInfo->ii_IndexAttrNumbers[0], &isnull);
+                ResetExprContext(econtext);
+                econtext->ecxt_scantuple = slot;
+                FormIndexDatum(indexInfo, slot, estate, index_values, index_isnull);
 
-                if (!isnull)
+                if (!index_isnull[0])
                 {
-                    txt      = DatumGetTextPP(val);
-                    str      = VARDATA_ANY(txt);
-                    byte_len = VARSIZE_ANY_EXHDR(txt);
+                    str = biscuit_datum_to_text(index_values[0], coltypid,
+                                                 &single_output_func, &out_len);
 
                     if (idx->num_records >= idx->capacity)
                     {
@@ -631,9 +666,9 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
                     }
 
                     ItemPointerCopy(&slot->tts_tid, &idx->tids[idx->num_records]);
-                    idx->data_cache[idx->num_records] = pnstrdup(str, byte_len);
+                    idx->data_cache[idx->num_records] = str;
 
-                    biscuit_index_single_record(idx, str, byte_len, idx->num_records);
+                    biscuit_index_single_record(idx, str, out_len, idx->num_records);
 
                     idx->num_records++;
                 }
@@ -705,8 +740,16 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
 
             for (col = 0; col < natts; col++)
             {
-                AttrNumber        col_attnum = index->rd_index->indkey.values[col];
-                Form_pg_attribute col_attr   = TupleDescAttr(heap->rd_att, col_attnum - 1);
+                /*
+                 * FIX #10 (multi-column case): previously looked up the type
+                 * via index->rd_index->indkey.values[col] against the heap's
+                 * tuple descriptor, which is InvalidAttrNumber (0) for an
+                 * expression column and therefore reads garbage. Use the
+                 * index's own tuple descriptor instead -- PostgreSQL always
+                 * populates it with the correct result type for every key,
+                 * whether that key is a plain Var or an arbitrary expression.
+                 */
+                Form_pg_attribute col_attr = TupleDescAttr(RelationGetDescr(index), col);
                 Oid               typoutput;
                 bool              typIsVarlena;
                 ColumnIndex       *cidx = &idx->column_indices[col];
@@ -743,13 +786,26 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
             #endif
             while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
             {
-                
                 bool all_non_null = true;
-                slot_getallattrs(slot);
+
+                /*
+                 * FIX #10 (multi-column case): previously called
+                 * slot_getattr(slot, index->rd_index->indkey.values[col], ...)
+                 * to fetch each column's value, which is only valid for plain
+                 * attribute references -- indkey.values[col] is 0 for an
+                 * expression column, and slot_getattr() has no way to
+                 * evaluate an expression in the first place. FormIndexDatum()
+                 * evaluates every index key (Var or arbitrary expression)
+                 * against the current heap tuple slot and fills
+                 * index_values[]/index_isnull[], exactly like every built-in
+                 * AM does for expression-index support.
+                 */
+                ResetExprContext(econtext);
+                econtext->ecxt_scantuple = slot;
+                FormIndexDatum(indexInfo, slot, estate, index_values, index_isnull);
+
                 for (col = 0; col < natts; col++) {
-                    bool isnull;
-                    slot_getattr(slot, index->rd_index->indkey.values[col], &isnull);
-                    if (isnull) { all_non_null = false; break; }
+                    if (index_isnull[col]) { all_non_null = false; break; }
                 }
                 if (!all_non_null) continue;
 
@@ -770,20 +826,17 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
 
                 for (col = 0; col < natts; col++)
                 {
-                    Datum      val;
-                    bool       isnull;
                     int        out_len;
                     char      *str;
 
-                    val = slot_getattr(slot, index->rd_index->indkey.values[col], &isnull);
-                    if (isnull)
+                    if (index_isnull[col])
                     {
                         idx->column_data_cache[col][idx->num_records]       = NULL;
                         idx->column_data_cache_lower[col][idx->num_records] = NULL;
                         continue;
                     }
 
-                    str = biscuit_datum_to_text(val, idx->column_types[col], &idx->output_funcs[col], &out_len);
+                    str = biscuit_datum_to_text(index_values[col], idx->column_types[col], &idx->output_funcs[col], &out_len);
                     idx->column_data_cache[col][idx->num_records]       = str;
                     idx->column_data_cache_lower[col][idx->num_records] = biscuit_str_tolower(str, out_len);
 
@@ -908,6 +961,7 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
         index->rd_amcache = idx;
 
         MemoryContextSwitchTo(oldcontext);
+        FreeExecutorState(estate);
 
         result = (IndexBuildResult *) palloc(sizeof(IndexBuildResult));
         result->heap_tuples  = idx->num_records;

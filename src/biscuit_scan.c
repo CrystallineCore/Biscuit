@@ -444,9 +444,32 @@ biscuit_rescan_multicolumn_fallback(IndexScanDesc scan,
         if (so->index->tombstone_count > 0 && so->index->tombstones)
             biscuit_roaring_andnot_inplace(candidates, so->index->tombstones);
 
-        biscuit_collect_sorted_tids_single(so->index, candidates,
-                                             &so->results, &so->num_results,
-                                             needs_sorting);
+        /*
+         * Parallel-aware TID collection — mirrors the dispatch used in
+         * biscuit_rescan_multicolumn() and the single-column fallback path.
+         *
+         * Previously this called biscuit_collect_sorted_tids_single()
+         * unconditionally, so every Gather participant returned the full TID
+         * set and the Gather node assembled N× the expected rows.
+         *
+         * biscuit_collect_sorted_tids_parallel() handles both cases: when
+         * pdesc is NULL it delegates to the single-threaded path unchanged;
+         * when pdesc is non-NULL each participant claims a disjoint slice of
+         * the pre-partitioned TID array, so Gather assembles exactly one copy.
+         */
+        {
+            BiscuitParallelScanDesc *pdesc = NULL;
+
+            if (scan->parallel_scan != NULL)
+                pdesc = (BiscuitParallelScanDesc *)
+                            OffsetToPointer(scan->parallel_scan,
+                                            BISCUIT_PARALLEL_AM_OFFSET(scan->parallel_scan));
+
+            biscuit_collect_sorted_tids_parallel(
+                so->index, candidates, pdesc,
+                &so->results, &so->num_results,
+                needs_sorting);
+        }
 
         biscuit_roaring_free(candidates);
     }

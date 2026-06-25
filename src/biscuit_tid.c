@@ -647,6 +647,7 @@ biscuit_initparallelscan(void *target)
      * was called in the same process immediately before this.
      * +1 for the leader.
      */
+    elog(DEBUG1, "Default pdesc->num_participants value: %d", pdesc->num_participants);
     pdesc->num_participants = biscuit_planned_nworkers + 1;
     // biscuit_planned_nworkers = 0;   /* reset defensively */
     elog(DEBUG1, "Initiated parallel scan. Parallel workers: %d",pdesc->num_participants);

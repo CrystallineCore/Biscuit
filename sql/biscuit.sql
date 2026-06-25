@@ -127,7 +127,41 @@ DEFAULT FOR TYPE text USING biscuit AS
 
 COMMENT ON OPERATOR CLASS biscuit_text_ops USING biscuit IS
 'Operator class for text types - supports LIKE, NOT LIKE, ILIKE, NOT ILIKE.
-VARCHAR and CHAR types will implicitly cast to text to use this class.';
+VARCHAR types will implicitly cast to text to use this class.';
+
+-- FIX #9: An earlier revision attempted a native biscuit_bpchar_ops
+-- operator class for CHAR(n)/bpchar columns, declared as:
+--   OPERATOR 1 ~~ (bpchar, bpchar), ...
+-- This failed with "operator does not exist: character ~~ character"
+-- because PostgreSQL has no ~~/!~~/~~*/!~~* operators defined directly
+-- over (bpchar, bpchar) at all -- unlike B-tree's bpchar_pattern_ops,
+-- which works by comparing raw bytes and therefore doesn't need a
+-- LIKE-specific bpchar operator, Biscuit's pattern matching has no such
+-- byte-level equivalence to lean on without dedicated C support.
+--
+-- The only LIKE/ILIKE operators that exist are over (text, text). When you
+-- write `char_col LIKE 'pattern'`, PostgreSQL resolves this by casting the
+-- *column* to text -- e.g. `(char_col)::text ~~ 'pattern'::text` -- not by
+-- finding some bpchar-flavored operator. A plain index on the bare bpchar
+-- column cannot serve that cast expression, regardless of access method.
+--
+-- There are two real ways to get indexed LIKE/ILIKE on a CHAR(n) column:
+--
+-- 1. (Available now, no code changes) Build a Biscuit EXPRESSION index on
+--    the text cast, which biscuit_text_ops can serve directly:
+--      CREATE INDEX idx_name ON my_table USING biscuit ((char_col::text));
+--    Queries using `char_col::text LIKE 'pattern'` or `char_col LIKE
+--    'pattern'` (where the planner inserts the same cast) can then use it.
+--
+-- 2. (Requires new C code, not provided by this script) Implement genuine
+--    bpchar-native LIKE/ILIKE operators and matching functions in C, then
+--    build a real biscuit_bpchar_ops around them. This is the only way to
+--    index the *padded* bpchar representation directly rather than via
+--    an expression on the cast value.
+--
+-- This script ships with option 1 as a documented workaround; CHAR(n)
+-- columns work today via an expression index rather than a dedicated
+-- opclass on bpchar.
 
 -- ==================== HELPER VIEWS ====================
 
@@ -197,27 +231,37 @@ Use pg_get_indexdef() to see the complete CREATE INDEX statement with all casts.
 -- FIX #3: The original view queried opfname = 'biscuit_ops'.
 -- PostgreSQL names an implicitly-created opfamily after the operator class
 -- that created it, so the correct name is 'biscuit_text_ops'.
+--
+-- FIX #7: Filtering on a single hardcoded opfname is fragile if more
+-- opclasses/opfamilies are added for this access method later. Filter by
+-- access method (am.amname = 'biscuit') instead, and surface which
+-- opfamily/type each row belongs to, so this view stays correct without
+-- edits if/when additional type support is added.
 CREATE VIEW biscuit_operators AS
 SELECT
-    amopstrategy AS strategy,
-    oprname AS operator,
-    format_type(oprleft, NULL) AS left_type,
-    format_type(oprright, NULL) AS right_type,
-    CASE amopstrategy
+    opf.opfname AS opfamily,
+    amop.amopstrategy AS strategy,
+    op.oprname AS operator,
+    format_type(op.oprleft, NULL) AS left_type,
+    format_type(op.oprright, NULL) AS right_type,
+    CASE amop.amopstrategy
         WHEN 1 THEN 'LIKE'
         WHEN 2 THEN 'NOT LIKE'
         WHEN 3 THEN 'ILIKE'
         WHEN 4 THEN 'NOT ILIKE'
         ELSE 'UNKNOWN'
     END AS description
-FROM pg_amop
-JOIN pg_operator ON pg_amop.amopopr = pg_operator.oid
-JOIN pg_opfamily ON pg_amop.amopfamily = pg_opfamily.oid
-WHERE pg_opfamily.opfname = 'biscuit_text_ops'   -- was 'biscuit_ops' (wrong)
-ORDER BY amopstrategy;
+FROM pg_amop amop
+JOIN pg_operator op ON amop.amopopr = op.oid
+JOIN pg_opfamily opf ON amop.amopfamily = opf.oid
+JOIN pg_am am ON opf.opfmethod = am.oid
+WHERE am.amname = 'biscuit'
+ORDER BY opf.opfname, amop.amopstrategy;
 
 COMMENT ON VIEW biscuit_operators IS
-'Shows which operators are registered for Biscuit indexes';
+'Shows which operators are registered for Biscuit indexes.
+Currently text (via biscuit_text_ops); CHAR(n)/bpchar columns are
+supported via an expression index on (col::text), not a native opclass.';
 
 -- FIX #4: The original SUM() returned NULL when no Biscuit indexes exist,
 -- causing pg_size_pretty() to show NULL instead of a meaningful value.
@@ -355,7 +399,7 @@ CREATE TABLE IF NOT EXISTS biscuit_version_table (
 );
 
 INSERT INTO biscuit_version_table (version, description) VALUES
-    ('1.0', 'Initial release: LIKE/ILIKE support, multi-column indexes, full CRUD, type conversion, build diagnostics');
+    ('1.0', 'Initial release: LIKE/ILIKE support for text/varchar (CHAR(n) via expression index), multi-column indexes, full CRUD, type conversion, build diagnostics');
 
 COMMENT ON TABLE biscuit_version_table IS
 'Version history for the Biscuit extension';

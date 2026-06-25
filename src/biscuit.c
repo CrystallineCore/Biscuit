@@ -214,7 +214,6 @@ biscuit_handler(PG_FUNCTION_ARGS)
     amroutine->amstorage             = false;
     amroutine->amclusterable         = false;
     amroutine->ampredlocks           = false;
-    amroutine->amcanparallel         = true;
     amroutine->amcaninclude          = false;
     amroutine->amusemaintenanceworkmem = false;
     amroutine->amsummarizing         = false;
@@ -240,9 +239,17 @@ biscuit_handler(PG_FUNCTION_ARGS)
     amroutine->amendscan             = biscuit_endscan;
     amroutine->ammarkpos             = NULL;
     amroutine->amrestrpos            = NULL;
-    amroutine->amestimateparallelscan = biscuit_estimateparallelscan;
-    amroutine->aminitparallelscan    = biscuit_initparallelscan;
-    amroutine->amparallelrescan      = biscuit_parallelrescan;
+    #if PG_VERSION_NUM >= 180000
+    amroutine->amcanparallel            = true;
+    amroutine->amestimateparallelscan   = biscuit_estimateparallelscan;
+    amroutine->aminitparallelscan       = biscuit_initparallelscan;
+    amroutine->amparallelrescan         = biscuit_parallelrescan;
+    #else
+    amroutine->amcanparallel            = false;
+    amroutine->amestimateparallelscan   = NULL;
+    amroutine->aminitparallelscan       = NULL;
+    amroutine->amparallelrescan         = NULL;
+    #endif
 
     PG_RETURN_POINTER(amroutine);
 }
