@@ -19,51 +19,43 @@ Although the extension is intended to operate safely and reliably, defects or un
 At this stage, the extension is best suited for evaluation, experimentation, and non-critical workloads. Production deployment should be undertaken only after careful testing and assessment of its suitability for the intended environment.
 
 ---
-## Version 2.3.0 — Bagel
+
+## What's new in Version 2.4.0?
 
 ### New Features
 
-* **Parallel index scan support:** Biscuit now integrates with parallel query execution in PostgreSQL, allowing Gather plans to distribute work across workers without duplicate results.
+* **Expression index support:** Biscuit now correctly evaluates arbitrary index key expressions during index builds, enabling indexes such as:
+  ```sql
+  CREATE INDEX idx ON table USING biscuit (lower(column_1), (column_2::text));
+  ```
 
-* **Pre-lowercased cache for multi-column indexes:** Added `column_data_cache_lower` to accelerate ILIKE queries by eliminating repeated string normalization during scans.
 
-* **LIKE / ILIKE matching:** Pattern matching now correctly handles `%`, `_`, escape sequences, and complex wildcard combinations.
-
-* **Version updated to `2.3.0 - Bagel`.**
+* **Multi-version build support (PG 16, 17, 18, 19beta1):** Biscuit can now be compiled and installed against PostgreSQL 16 and 17, in addition to the already supported PG 18 and PG 19 Beta. All version-specific API differences are handled at compile time via `#if PG_VERSION_NUM` guards.
 
 ### Bug Fixes
 
+* **Multi-column parallel scan returned duplicate rows:** In the multi-column fallback scan path, every Gather participant was calling `biscuit_collect_sorted_tids_single()` unconditionally, causing each worker to return the full TID set and the Gather node to assemble N× the expected rows. The call site now mirrors the single-column path by resolving the shared-memory parallel scan descriptor and dispatching through `biscuit_collect_sorted_tids_parallel()`, so each participant claims a disjoint slice of the pre-partitioned TID array.
 
-* Fixed a crash that could occur when INSERT operations followed SELECT queries on partially loaded indexes.
-
-* Fixed an issue where newly inserted rows could become invisible to subsequent queries due to stale session cache entries.
-
-* Fixed multi-column indexes failing to update length-based bitmap structures during inserts.
-
-* Fixed several memory initialization issues during cache growth that could cause incorrect results or instability.
-
-* Fixed insert operations losing in-memory changes after relcache invalidation.
-
-* Prevented the planner from selecting Biscuit for unqualified scans where no index predicates are present.
-
-* Fixed single-column scans using incorrect query paths for LIKE and ILIKE operations.
-
-
-* Fixed an issue where indexes could remain in a cold state even after background preloading had completed.
-
-* Improved cache update behavior to avoid unnecessary remove-and-reinsert cycles during inserts.
-
-### Performance Improvements
-
-* Eliminated per-row allocations during ILIKE fallback scans by using pre-lowercased caches.
-
-* Simplified TID collection by consolidating scan paths into a single parallel-aware implementation.
+* **`biscuit_operators` view no longer breaks when additional operator classes are added:** The view previously filtered on a hardcoded `opfname = 'biscuit_text_ops'`. It now joins through `pg_am` and filters on `am.amname = 'biscuit'`, staying correct without edits if new opclasses or opfamilies are later added. The view also surfaces the opfamily name per row.
 
 ### Internal Changes
 
-* Reworked the parallel scan infrastructure around a shared-memory descriptor model and added support for PostgreSQL's parallel index scan callbacks.
+* **Parallel scan callbacks are conditionally compiled for PG 18+:** `amcanparallel`, `amestimateparallelscan`, `aminitparallelscan`, and `amparallelrescan` are only registered when `PG_VERSION_NUM >= 180000`. On PG 16 and 17 the parallel fields are set to `false` / `NULL`.
 
-* Removed unused LIMIT-tracking logic that was ineffective with the PostgreSQL access method API.
+* **Cross-version compatibility macros added to `biscuit_common.h`:**
+  * `BISCUIT_PARALLEL_AM_OFFSET(ps)` abstracts the rename of `ps_offset` → `ps_offset_am` in PG 18.
+  * `BISCUIT_COUNT_INDEX_SEARCH(scan)` abstracts the index search counter, which moved from `xs_numIndexSearches` (PG 17) to `scan->instrument->nsearches` (PG 18+) and did not exist in PG 16.
+  * `biscuit_estimateparallelscan` is declared with the correct signature for each major version (`void` on PG 16, `int nkeys, int norderbys` on PG 17, `Relation indexRelation, int nworkers, int nchunks` on PG 18+).
+
+* **Version string updated to `2.4.0 - Donut`.**
+
+### Notes
+
+* **CHAR(n) / `bpchar` native operator class is not yet available.** PostgreSQL defines LIKE/ILIKE operators only over `(text, text)`, so a dedicated `biscuit_bpchar_ops` operating directly on padded `bpchar` values would require new C-level operator implementations. As a supported workaround, CHAR(n) columns can be indexed today via an expression index on the text cast:
+  ```sql
+  CREATE INDEX idx ON table USING biscuit ((char_col::text));
+  ```
+  This is documented in `biscuit.sql` and reflected in the updated `biscuit_operators` view comment.
 
 ---
 
@@ -554,7 +546,7 @@ WHERE event_type LIKE 'click%'
 
 ### **Build Options**
 
-Enable CRoaring for better performance:
+Enable CRoaring for better performance.
 
 
 ### **Index Options**
@@ -599,8 +591,8 @@ Biscuit stores bitmaps in memory:
 - Use `REINDEX` to rebuild if index grows too large
 
 ### **Write Performance**
-
-- **INSERT**: Similar to B-tree (must update bitmaps)
+**Note:** Biscuit is not optimized for workloads with heavy write operations. In such cases, we suggest using pg_trgm or B-tree based on your requirements.
+- **INSERT**: Must update multiple bitmaps
 - **UPDATE**: Two operations (remove old, insert new)
 - **DELETE**: Marks as tombstone, batch cleanup at threshold
 

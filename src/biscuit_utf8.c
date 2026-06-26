@@ -155,6 +155,7 @@ biscuit_datum_to_text(Datum value, Oid typoid, FmgrInfo *outfunc, int *out_len)
     int   len;
     switch (typoid)
     {
+        case BPCHAROID:
         case TEXTOID:
         case VARCHAROID:
         {
@@ -167,16 +168,9 @@ biscuit_datum_to_text(Datum value, Oid typoid, FmgrInfo *outfunc, int *out_len)
                 pfree(txt);
             break;
         }
-        case BPCHAROID:
+        /*
+        case BPCHAROID: //This segment is not valid because sequential scans treat the padded spaces as literal characters
         {
-            /*
-             * bpchar values are blank-padded to their declared length.
-             * Postgres's own comparison and LIKE operators for bpchar
-             * strip trailing blanks before comparing (per SQL semantics),
-             * so we must index the trimmed value too, or the index
-             * contents won't agree with what the operators actually
-             * compare against.
-             */
             txt    = DatumGetTextPP(value);
             str    = VARDATA_ANY(txt);
             len    = bpchartruelen(str, VARSIZE_ANY_EXHDR(txt));
@@ -186,12 +180,13 @@ biscuit_datum_to_text(Datum value, Oid typoid, FmgrInfo *outfunc, int *out_len)
                 pfree(txt);
             break;
         }
+        */
         default:
             ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                      errmsg("biscuit index does not support type %s",
                             format_type_be(typoid)),
-                     errhint("Only TEXT, VARCHAR, and CHAR types are supported.")));
+                     errhint("Only TEXT and VARCHAR types are supported.")));
     }
     return result;
 }

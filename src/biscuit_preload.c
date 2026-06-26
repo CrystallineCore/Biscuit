@@ -43,30 +43,6 @@
 #include "biscuit_utf8.h"
 #include "biscuit_preload.h"
 
-#include "executor/executor.h"   /* for FormIndexDatum, CreateExecutorState,
-                                   * GetPerTupleExprContext, ResetExprContext —
-                                   * needed to evaluate expression index columns
-                                   * (e.g. (col::text), lower(col2)) correctly in
-                                   * biscuit_load_skeleton(), same fix as
-                                   * biscuit_build() in biscuit_index.c. */
-
-#include "miscadmin.h"
-#include "postmaster/bgworker.h"
-#include "storage/ipc.h"
-#include "storage/latch.h"
-#include "storage/lwlock.h"
-#include "storage/proc.h"
-#include "storage/shmem.h"
-#include "tcop/tcopprot.h"
-#include "utils/memutils.h"
-#include "utils/snapmgr.h"
-#include "access/xact.h"
-
-/* PG 14 moved SignalHandlerForConfigReload here */
-#if PG_VERSION_NUM >= 140000
-#include "postmaster/interrupt.h"
-#endif
-
 
 #ifndef WAIT_EVENT_BGWORKER_MAIN
 #define WAIT_EVENT_BGWORKER_MAIN 0

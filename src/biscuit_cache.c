@@ -10,8 +10,6 @@
 
 #include "biscuit_common.h"
 #include "biscuit_cache.h"
-#include "utils/inval.h"
-#include "storage/ipc.h"
 
 /* ==================== CACHE STATE ==================== */
 

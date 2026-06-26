@@ -28,7 +28,6 @@
 #define BISCUIT_PRELOAD_H
 
 #include "biscuit_common.h"
-#include "storage/latch.h"
 
 /* ================================================================
  * Preload status values stored in BiscuitIndex.preload_state.

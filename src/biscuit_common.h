@@ -43,6 +43,16 @@
 #include "port/atomics.h"
 #include "nodes/execnodes.h"
 #include "executor/executor.h"
+#include "postmaster/bgworker.h"
+#include "storage/latch.h"
+#include "storage/lwlock.h"
+#include "storage/proc.h"
+#include "storage/shmem.h"
+#include "tcop/tcopprot.h"
+#include "utils/snapmgr.h"
+#include "access/xact.h"
+#include "postmaster/interrupt.h"
+
 /* ==================== ROARING BITMAP TYPES ==================== */
 
 #ifdef HAVE_ROARING
@@ -79,7 +89,7 @@ typedef struct {
 #define CHAR_RANGE                      256
 #define TOMBSTONE_CLEANUP_THRESHOLD     1000
 #define RADIX_SORT_THRESHOLD            5000
-#define BISCUIT_LIBRARY_VERSION         "2.3.1 - Jackie"
+#define BISCUIT_LIBRARY_VERSION         "2.4.0 - Donut"
 
 /* ==================== MEMORY MANAGEMENT MACROS ==================== */
 
