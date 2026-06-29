@@ -21,19 +21,6 @@ PGFILEDESC = "Wildcard pattern matching through bitmap indexing"
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 
-install16:
-	$(MAKE) clean && $(MAKE) all PG_CONFIG=/usr/lib/postgresql/16/bin/pg_config && $(MAKE) install PG_CONFIG=/usr/lib/postgresql/16/bin/pg_config
-
-install17:
-	$(MAKE) clean && $(MAKE) all PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config && $(MAKE) install PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
-
-install18:
-	$(MAKE) clean && $(MAKE) all PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config && $(MAKE) install PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
-
-installall:
-	$(MAKE) install16
-	$(MAKE) install17
-	$(MAKE) install18
 
 # Detect OS
 UNAME_S := $(shell uname -s)
