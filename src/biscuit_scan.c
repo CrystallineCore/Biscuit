@@ -94,22 +94,26 @@ biscuit_beginscan(Relation index, int nkeys, int norderbys)
     scan = RelationGetIndexScan(index, nkeys, norderbys);
     so   = (BiscuitScanOpaque *) palloc(sizeof(BiscuitScanOpaque));
 
-    so->index = (BiscuitIndex *) index->rd_amcache;
+    /*
+     * Resolve solely through the global, relid-keyed biscuit_cache.
+     * index->rd_amcache is intentionally never read or written here:
+     * PostgreSQL pfree()s rd_amcache on relcache invalidation, and since
+     * biscuit_cache holds the same object, that pfree would free memory
+     * the global cache still references — a use-after-free on the next
+     * lookup. biscuit_cache (with its relcache callback in
+     * biscuit_cache.c) is the single source of truth for this object's
+     * lifetime.
+     */
+    so->index = biscuit_cache_lookup(indexoid);
 
-    if (!so->index)
-        so->index = biscuit_cache_lookup(indexoid);
-    
     elog(DEBUG1, "Entered beginscan()");
-    
+
     if (so->index)
     {
         /*
          * We have a cached index — but it may still be a skeleton.
          * Upgrade it synchronously if the worker has signalled DONE
          * and we haven't built the bitmaps yet in this session.
-         *
-         * This covers both the rd_amcache hit path and the
-         * process-cache hit path.
          */
         if (so->index->preload_state < BISCUIT_PRELOAD_DONE)
         {
@@ -122,13 +126,11 @@ biscuit_beginscan(Relation index, int nkeys, int norderbys)
             }
             /* else: still warming, rescan() will use fallback */
         }
-        index->rd_amcache = so->index;
     }
     else
     {
         so->index = biscuit_load_skeleton(index);
         so->index->preload_state = BISCUIT_PRELOAD_SKELETON;
-        index->rd_amcache = so->index;
         biscuit_register_callback();
         biscuit_cache_insert(indexoid, so->index);
         biscuit_preload_request(indexoid);
@@ -563,8 +565,9 @@ biscuit_rescan(IndexScanDesc scan,
                 MemoryContextSwitchTo(_oldctx);
             }
 
-            /* Refresh rd_amcache so subsequent beginscan hits this copy */
-            scan->indexRelation->rd_amcache = so->index;
+            /* Refresh the global cache so subsequent beginscans hit this
+             * upgraded copy. rd_amcache is deliberately left untouched —
+             * see the note in biscuit_beginscan(). */
             biscuit_cache_insert(RelationGetRelid(scan->indexRelation), so->index);
 
             bitmaps_ready = true;
