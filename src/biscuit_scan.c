@@ -228,7 +228,6 @@ biscuit_rescan_multicolumn(IndexScanDesc scan,
              */
             ColumnIndex   *pred_col    = &so->index->column_indices[pred->column_index];
             RoaringBitmap *all;
-            int j;
             if (pred_col->length_ge_bitmaps && pred_col->length_ge_bitmaps[0])
             {
                 all = biscuit_roaring_copy(pred_col->length_ge_bitmaps[0]);
@@ -239,6 +238,7 @@ biscuit_rescan_multicolumn(IndexScanDesc scan,
 #ifdef HAVE_ROARING
                 roaring_bitmap_add_range(all, 0, so->index->num_records);
 #else
+                int j;
                 for (j = 0; j < so->index->num_records; j++)
                     biscuit_roaring_add(all, j);
 #endif

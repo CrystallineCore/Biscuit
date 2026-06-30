@@ -181,6 +181,7 @@ Datum
 biscuit_roaring_version(PG_FUNCTION_ARGS)
 {
     char ver[64];
+    (void) fcinfo;
     snprintf(ver, sizeof(ver), "%d.%d.%d",
              ROARING_VERSION_MAJOR, ROARING_VERSION_MINOR, ROARING_VERSION_REVISION);
     PG_RETURN_TEXT_P(cstring_to_text(ver));
