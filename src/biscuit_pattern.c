@@ -1737,7 +1737,7 @@ biscuit_query_pattern(BiscuitIndex *idx, const char *pattern)
                 #ifdef HAVE_ROARING
                 ts = roaring_bitmap_contains(idx->tombstones, (uint32_t) i);
                 #else
-                { uint32_t bl = i >> 6, bt = i & 63; ts = (bl < idx->tombstones->num_blocks && (idx->tombstones->blocks[bl] & (1ULL << bt))); }
+                { uint32_t bl = i >> 6, bt = i & 63; ts = ((int) bl < idx->tombstones->num_blocks && (idx->tombstones->blocks[bl] & (1ULL << bt))); }
                 #endif
                 if (!ts && idx->data_cache[i]) biscuit_roaring_add(result, i);
             }
@@ -1769,7 +1769,7 @@ biscuit_query_pattern(BiscuitIndex *idx, const char *pattern)
                 #ifdef HAVE_ROARING
                 ts = roaring_bitmap_contains(idx->tombstones, (uint32_t) i);
                 #else
-                { uint32_t bl = i >> 6, bt = i & 63; ts = (bl < idx->tombstones->num_blocks && (idx->tombstones->blocks[bl] & (1ULL << bt))); }
+                { uint32_t bl = i >> 6, bt = i & 63; ts = ((int) bl < idx->tombstones->num_blocks && (idx->tombstones->blocks[bl] & (1ULL << bt))); }
                 #endif
                 if (!ts) biscuit_roaring_add(result, i);
             }
@@ -1938,7 +1938,7 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern)
 #ifdef HAVE_ROARING
                 ts = roaring_bitmap_contains(idx->tombstones, (uint32_t) i);
 #else
-                { uint32_t bl = i >> 6, bt = i & 63; ts = (bl < idx->tombstones->num_blocks && (idx->tombstones->blocks[bl] & (1ULL << bt))); }
+                { uint32_t bl = i >> 6, bt = i & 63; ts = ((int) bl < idx->tombstones->num_blocks && (idx->tombstones->blocks[bl] & (1ULL << bt))); }
 #endif
                 if (!ts && idx->data_cache_lower && idx->data_cache_lower[i]) biscuit_roaring_add(result, i);
             }
@@ -1970,7 +1970,7 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern)
 #ifdef HAVE_ROARING
                 ts = roaring_bitmap_contains(idx->tombstones, (uint32_t) i);
 #else
-                { uint32_t bl = i >> 6, bt = i & 63; ts = (bl < idx->tombstones->num_blocks && (idx->tombstones->blocks[bl] & (1ULL << bt))); }
+                { uint32_t bl = i >> 6, bt = i & 63; ts = ((int) bl < idx->tombstones->num_blocks && (idx->tombstones->blocks[bl] & (1ULL << bt))); }
 #endif
                 if (!ts) biscuit_roaring_add(result, i);
             }
@@ -2472,6 +2472,8 @@ biscuit_build_query_plan(BiscuitIndex *idx, ScanKey keys, int nkeys)
 {
     QueryPlan *plan;
     int        i;
+
+    (void) idx;  /* reserved for future cardinality-aware planning */
 
     plan            = (QueryPlan *) palloc(sizeof(QueryPlan));
     plan->predicates = (QueryPredicate *) palloc(nkeys * sizeof(QueryPredicate));

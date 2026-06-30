@@ -176,6 +176,9 @@ biscuit_rescan_multicolumn(IndexScanDesc scan,
     bool               needs_sorting;
     int                i;
 
+    (void) orderbys;
+    (void) norderbys;
+
     needs_sorting = so->needs_sorted_access;
 
     /* Start with all records as candidates */
@@ -227,7 +230,6 @@ biscuit_rescan_multicolumn(IndexScanDesc scan,
              */
             ColumnIndex   *pred_col    = &so->index->column_indices[pred->column_index];
             RoaringBitmap *all;
-            int j;
             if (pred_col->length_ge_bitmaps && pred_col->length_ge_bitmaps[0])
             {
                 all = biscuit_roaring_copy(pred_col->length_ge_bitmaps[0]);
@@ -238,6 +240,7 @@ biscuit_rescan_multicolumn(IndexScanDesc scan,
 #ifdef HAVE_ROARING
                 roaring_bitmap_add_range(all, 0, so->index->num_records);
 #else
+                int j;
                 for (j = 0; j < so->index->num_records; j++)
                     biscuit_roaring_add(all, j);
 #endif
@@ -297,6 +300,9 @@ biscuit_rescan_multicolumn_fallback(IndexScanDesc scan,
     int                n             = so->index->num_records;
     uint32            *tid_map       = NULL;
     int                map_size      = 0;
+
+    (void) orderbys;
+    (void) norderbys;
 
     /*
      * Build a TID → record-index hash map once (O(n)) so the per-TID
@@ -954,6 +960,8 @@ bool
 biscuit_gettuple(IndexScanDesc scan, ScanDirection dir)
 {
     BiscuitScanOpaque *so = (BiscuitScanOpaque *) scan->opaque;
+
+    (void) dir;  /* Biscuit always returns results in build order */
 
     if (so->current >= so->num_results)
         return false;
