@@ -20,6 +20,9 @@ At this stage, the extension is best suited for evaluation, experimentation, and
 
 ---
 
+**Note:** Release 2.4.1 contains no functional changes to Biscuit. It is equivalent to Biscuit 2.4.0 and only updates the Makefile to address build compatibility issues.
+
+---
 ## What's new in Version 2.4.0?
 
 ### New Features

@@ -1,5 +1,13 @@
 # Biscuit Index Extension - Changelog
 
+## Version 2.4.1
+### Build
+- Fix hardcoded `PG_CONFIG` paths that prevented builds on non-Debian distributions.
+
+### Biscuit
+- No functional changes.
+
+---
 ## Version 2.4.0 — Donut
 
 ### New Features
