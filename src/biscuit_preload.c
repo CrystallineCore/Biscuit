@@ -1099,7 +1099,7 @@ biscuit_fallback_scan(BiscuitIndex *idx,
             continue;
 #else
         { uint32_t bl = i >> 6, bt = i & 63;
-          if (bl < idx->tombstones->num_blocks &&
+          if ((int) bl < idx->tombstones->num_blocks &&
               (idx->tombstones->blocks[bl] & (1ULL << bt)))
               continue; }
 #endif

@@ -61,6 +61,7 @@ PG_FUNCTION_INFO_V1(biscuit_has_roaring);
 Datum
 biscuit_has_roaring(PG_FUNCTION_ARGS)
 {
+    (void) fcinfo;
 #ifdef HAVE_ROARING
     PG_RETURN_BOOL(true);
 #else
@@ -72,6 +73,7 @@ PG_FUNCTION_INFO_V1(biscuit_version);
 Datum
 biscuit_version(PG_FUNCTION_ARGS)
 {
+    (void) fcinfo;
     PG_RETURN_TEXT_P(cstring_to_text(BISCUIT_LIBRARY_VERSION));
 }
 
@@ -151,6 +153,8 @@ Datum
 biscuit_build_info_json(PG_FUNCTION_ARGS)
 {
     StringInfoData buf;
+
+    (void) fcinfo;
     initStringInfo(&buf);
 
     appendStringInfo(&buf, "{");
@@ -177,6 +181,7 @@ Datum
 biscuit_roaring_version(PG_FUNCTION_ARGS)
 {
     char ver[64];
+    (void) fcinfo;
     snprintf(ver, sizeof(ver), "%d.%d.%d",
              ROARING_VERSION_MAJOR, ROARING_VERSION_MINOR, ROARING_VERSION_REVISION);
     PG_RETURN_TEXT_P(cstring_to_text(ver));
@@ -199,6 +204,8 @@ Datum
 biscuit_handler(PG_FUNCTION_ARGS)
 {
     IndexAmRoutine *amroutine = makeNode(IndexAmRoutine);
+
+    (void) fcinfo;
 
     amroutine->amstrategies          = 4;
     amroutine->amsupport             = 2;
@@ -262,6 +269,7 @@ PG_FUNCTION_INFO_V1(biscuit_like_support);
 Datum
 biscuit_like_support(PG_FUNCTION_ARGS)
 {
+    (void) fcinfo;
     PG_RETURN_BOOL(true);
 }
 
@@ -298,7 +306,7 @@ biscuit_index_stats(PG_FUNCTION_ARGS)
         is_tombstoned = roaring_bitmap_contains(idx->tombstones, (uint32_t) i);
 #else
         { uint32_t bl = i >> 6, bt = i & 63;
-          is_tombstoned = (bl < idx->tombstones->num_blocks && (idx->tombstones->blocks[bl] & (1ULL << bt))); }
+          is_tombstoned = ((int) bl < idx->tombstones->num_blocks && (idx->tombstones->blocks[bl] & (1ULL << bt))); }
 #endif
         if (!is_tombstoned) active_records++;
     }

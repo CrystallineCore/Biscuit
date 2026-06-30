@@ -1478,7 +1478,7 @@ biscuit_bulkdelete(IndexVacuumInfo *info,
 #ifdef HAVE_ROARING
         already_tombstoned = roaring_bitmap_contains(idx->tombstones, (uint32_t) i);
 #else
-        { uint32_t bl = i >> 6, bt = i & 63; already_tombstoned = (bl < idx->tombstones->num_blocks && (idx->tombstones->blocks[bl] & (1ULL << bt))); }
+        { uint32_t bl = i >> 6, bt = i & 63; already_tombstoned = ((int) bl < idx->tombstones->num_blocks && (idx->tombstones->blocks[bl] & (1ULL << bt))); }
 #endif
         if (already_tombstoned) continue;
 
