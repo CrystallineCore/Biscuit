@@ -128,6 +128,7 @@ biscuit_cleanup_index(BiscuitIndex *idx)
 static void
 biscuit_relcache_callback(Datum arg, Oid relid)
 {
+    (void) arg;
     biscuit_cache_remove(relid);
     elog(DEBUG1, "Biscuit: Invalidated cache for relation %u", relid);
 }
@@ -135,6 +136,8 @@ biscuit_relcache_callback(Datum arg, Oid relid)
 static void
 biscuit_module_unload_callback(int code, unsigned long datum)
 {
+    (void) code;
+    (void) datum;
     elog(DEBUG1, "Biscuit: Module unload - clearing all cache entries");
     biscuit_cache_head          = NULL;
     biscuit_callback_registered = false;

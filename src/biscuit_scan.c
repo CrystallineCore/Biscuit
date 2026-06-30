@@ -174,6 +174,9 @@ biscuit_rescan_multicolumn(IndexScanDesc scan,
     bool               needs_sorting;
     int                i;
 
+    (void) orderbys;
+    (void) norderbys;
+
     needs_sorting = so->needs_sorted_access;
 
     /* Start with all records as candidates */
@@ -295,6 +298,9 @@ biscuit_rescan_multicolumn_fallback(IndexScanDesc scan,
     int                n             = so->index->num_records;
     uint32            *tid_map       = NULL;
     int                map_size      = 0;
+
+    (void) orderbys;
+    (void) norderbys;
 
     /*
      * Build a TID → record-index hash map once (O(n)) so the per-TID
@@ -951,6 +957,8 @@ bool
 biscuit_gettuple(IndexScanDesc scan, ScanDirection dir)
 {
     BiscuitScanOpaque *so = (BiscuitScanOpaque *) scan->opaque;
+
+    (void) dir;  /* Biscuit always returns results in build order */
 
     if (so->current >= so->num_results)
         return false;

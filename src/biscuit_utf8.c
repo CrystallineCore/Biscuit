@@ -153,6 +153,9 @@ biscuit_datum_to_text(Datum value, Oid typoid, FmgrInfo *outfunc, int *out_len)
     text *txt;
     char *str;
     int   len;
+
+    (void) outfunc;  /* reserved for future non-text-family type support */
+
     switch (typoid)
     {
         case BPCHAROID:
