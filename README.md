@@ -23,43 +23,21 @@ At this stage, the extension is best suited for evaluation, experimentation, and
 **Note:** Release 2.4.1 contains no functional changes to Biscuit. It is equivalent to Biscuit 2.4.0 and only updates the Makefile to address build compatibility issues.
 
 ---
-## What's new in Version 2.4.0?
-
-### New Features
-
-* **Expression index support:** Biscuit now correctly evaluates arbitrary index key expressions during index builds, enabling indexes such as:
-  ```sql
-  CREATE INDEX idx ON table USING biscuit (lower(column_1), (column_2::text));
-  ```
-
-
-* **Multi-version build support (PG 16, 17, 18, 19beta1):** Biscuit can now be compiled and installed against PostgreSQL 16 and 17, in addition to the already supported PG 18 and PG 19 Beta. All version-specific API differences are handled at compile time via `#if PG_VERSION_NUM` guards.
+## What's new in Version 2.4.2?
 
 ### Bug Fixes
 
-* **Multi-column parallel scan returned duplicate rows:** In the multi-column fallback scan path, every Gather participant was calling `biscuit_collect_sorted_tids_single()` unconditionally, causing each worker to return the full TID set and the Gather node to assemble N× the expected rows. The call site now mirrors the single-column path by resolving the shared-memory parallel scan descriptor and dispatching through `biscuit_collect_sorted_tids_parallel()`, so each participant claims a disjoint slice of the pre-partitioned TID array.
+* **Fixed a use-after-free in the index cache.** `BiscuitIndex` objects were inadvertently owned by both `biscuit_cache` and PostgreSQL's `rd_amcache`, allowing relcache invalidation to leave stale pointers in the session cache. `biscuit_cache` is now the sole owner of `BiscuitIndex` objects.
 
-* **`biscuit_operators` view no longer breaks when additional operator classes are added:** The view previously filtered on a hardcoded `opfname = 'biscuit_text_ops'`. It now joins through `pg_am` and filters on `am.amname = 'biscuit'`, staying correct without edits if new opclasses or opfamilies are later added. The view also surfaces the opfamily name per row.
+### Build
 
-### Internal Changes
+* **Fixed compiler warnings for unused parameters.** Contributed by Devrim Gündüz.
+* **Fixed signed/unsigned comparison warnings.**
+* **Fixed an unused-variable warning** in `biscuit_rescan_multicolumn`.
 
-* **Parallel scan callbacks are conditionally compiled for PG 18+:** `amcanparallel`, `amestimateparallelscan`, `aminitparallelscan`, and `amparallelrescan` are only registered when `PG_VERSION_NUM >= 180000`. On PG 16 and 17 the parallel fields are set to `false` / `NULL`.
+### Biscuit
 
-* **Cross-version compatibility macros added to `biscuit_common.h`:**
-  * `BISCUIT_PARALLEL_AM_OFFSET(ps)` abstracts the rename of `ps_offset` → `ps_offset_am` in PG 18.
-  * `BISCUIT_COUNT_INDEX_SEARCH(scan)` abstracts the index search counter, which moved from `xs_numIndexSearches` (PG 17) to `scan->instrument->nsearches` (PG 18+) and did not exist in PG 16.
-  * `biscuit_estimateparallelscan` is declared with the correct signature for each major version (`void` on PG 16, `int nkeys, int norderbys` on PG 17, `Relation indexRelation, int nworkers, int nchunks` on PG 18+).
-
-* **Version string updated to `2.4.0 - Donut`.**
-
-### Notes
-
-* **CHAR(n) / `bpchar` native operator class is not yet available.** PostgreSQL defines LIKE/ILIKE operators only over `(text, text)`, so a dedicated `biscuit_bpchar_ops` operating directly on padded `bpchar` values would require new C-level operator implementations. As a supported workaround, CHAR(n) columns can be indexed today via an expression index on the text cast:
-  ```sql
-  CREATE INDEX idx ON table USING biscuit ((char_col::text));
-  ```
-  This is documented in `biscuit.sql` and reflected in the updated `biscuit_operators` view comment.
-
+* Version bumped to **2.4.2**.
 ---
 
 ##  **Installation**
