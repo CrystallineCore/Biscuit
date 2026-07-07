@@ -957,8 +957,17 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
 
         biscuit_write_metadata_to_disk(index, idx);
         biscuit_register_callback();
+        /*
+         * NOTE: idx lives permanently in CacheMemoryContext and is owned
+         * exclusively by biscuit_cache (keyed by relid).  Do NOT also
+         * assign it to index->rd_amcache: PostgreSQL pfree()s rd_amcache
+         * on relcache invalidation, which under load (VACUUM/ANALYZE/many
+         * transactions) happens far more often than our own cache gets
+         * evicted, and pfree()ing this shared object out from under the
+         * global cache produces a dangling pointer / use-after-free the
+         * next time biscuit_cache_lookup() hands it back out.
+         */
         biscuit_cache_insert(RelationGetRelid(index), idx);
-        index->rd_amcache = idx;
 
         MemoryContextSwitchTo(oldcontext);
         FreeExecutorState(estate);
@@ -1005,7 +1014,9 @@ biscuit_load_index(Relation index)
 
     table_close(heap, AccessShareLock);
 
-    return (BiscuitIndex *) index->rd_amcache;
+    /* idx was placed in biscuit_cache by biscuit_build(); rd_amcache is
+     * never used as the source of truth (see note in biscuit_build). */
+    return biscuit_cache_lookup(RelationGetRelid(index));
 }
 
 bool
@@ -1030,22 +1041,17 @@ biscuit_insert(Relation index,
     (void) indexUnchanged;
     (void) indexInfo;
 
-    idx = (BiscuitIndex *) index->rd_amcache;
+    /*
+     * Always resolve through the global, relid-keyed biscuit_cache rather
+     * than index->rd_amcache.  rd_amcache is pfree()d by PostgreSQL on
+     * relcache invalidation (e.g. the catalog access triggered by INSERT's
+     * own executor setup) — if we shared the same pointer with rd_amcache,
+     * that pfree would free the object the global cache still references,
+     * leading to a use-after-free on a later lookup.
+     */
+    idx = biscuit_cache_lookup(RelationGetRelid(index));
     if (!idx)
-    {
-        /*
-         * rd_amcache was cleared by a relcache invalidation (PostgreSQL does
-         * this on any catalog access, including those triggered by INSERT's
-         * executor setup).  Check the global biscuit_cache first — it holds
-         * the live, already-mutated index built during a preceding scan or
-         * insert — before falling back to a full heap re-scan which would
-         * lose all in-flight inserts.
-         */
-        idx = biscuit_cache_lookup(RelationGetRelid(index));
-        if (!idx)
-            idx = biscuit_load_index(index);
-        index->rd_amcache = idx;
-    }
+        idx = biscuit_load_index(index);
 
     /*
      * FIX 1 — SELECT → INSERT crash (segfault at 0xfffffffffffffff8).
@@ -1421,9 +1427,9 @@ biscuit_insert(Relation index,
      * After modifying idx the preload_state is guaranteed DONE (we called
      * biscuit_complete_preload_local at the top if it wasn't already).
      * Write the warm index back into the global cache so the next beginscan
-     * — whether in this session or after an rd_amcache eviction — picks up
-     * the newly inserted record via the bitmap path instead of loading a
-     * stale skeleton that predates the insert.
+     * — in this session or any other — picks up the newly inserted record
+     * via the bitmap path instead of loading a stale skeleton that predates
+     * the insert.
      *
      * Without this, a SELECT immediately after a committed INSERT finds the
      * pre-insert cache entry and returns 0 rows.
@@ -1453,8 +1459,8 @@ biscuit_bulkdelete(IndexVacuumInfo *info,
     uint64_t       delete_count;
     uint32_t      *delete_indices;
 
-    idx = (BiscuitIndex *) index->rd_amcache;
-    if (!idx) { idx = biscuit_load_index(index); index->rd_amcache = idx; }
+    idx = biscuit_cache_lookup(RelationGetRelid(index));
+    if (!idx) { idx = biscuit_load_index(index); }
 
     if (!stats)
         stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));

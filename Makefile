@@ -1,7 +1,7 @@
 # Makefile for biscuit PostgreSQL extension
 
 EXTENSION = biscuit
-EXTVERSION = 2.4.0
+EXTVERSION = 2.4.1
 
 MODULE_big = biscuit
 
@@ -13,7 +13,7 @@ DATA = \
 	sql/biscuit--$(EXTVERSION).sql \
 	sql/biscuit--2.2.3--2.3.0.sql \
 	sql/biscuit--2.3.0.sql \
-	sql/biscuit--2.3.0--$(EXTVERSION).sql
+	sql/biscuit--2.3.0--2.4.0.sql
 
 PGFILEDESC = "Wildcard pattern matching through bitmap indexing"
 

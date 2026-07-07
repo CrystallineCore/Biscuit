@@ -1,5 +1,22 @@
-# Biscuit Index Extension - Changelog
+# Biscuit Index Extension – Changelog
 
+## Version 2.4.2
+
+### Bug Fixes
+
+* **Fixed a use-after-free in the index cache.** `BiscuitIndex` objects were inadvertently owned by both `biscuit_cache` and PostgreSQL's `rd_amcache`, allowing relcache invalidation to leave stale pointers in the session cache. `biscuit_cache` is now the sole owner of `BiscuitIndex` objects.
+
+### Build
+
+* **Fixed compiler warnings for unused parameters.** Contributed by Devrim Gündüz.
+* **Fixed signed/unsigned comparison warnings.**
+* **Fixed an unused-variable warning** in `biscuit_rescan_multicolumn`.
+
+### Biscuit
+
+* Version bumped to **2.4.2**.
+
+---
 ## Version 2.4.1
 ### Build
 - Fix hardcoded `PG_CONFIG` paths that prevented builds on non-Debian distributions.
