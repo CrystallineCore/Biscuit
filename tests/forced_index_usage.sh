@@ -690,7 +690,7 @@ EOF
 
 create_biscuit_index() {
     log_info "Creating Biscuit index..."
-    sudo -u postgres psql -d "$DB_NAME" <<EOF
+    sudo -u postgres psql -p 5418 -d "$DB_NAME" <<EOF
 DROP INDEX IF EXISTS int_bisc;
 CREATE INDEX int_bisc ON interactions USING biscuit(
     interaction_type, 
@@ -704,7 +704,7 @@ EOF
 
 create_trigram_index() {
     log_info "Creating Trigram (GIN) index..."
-    sudo -u postgres psql -d "$DB_NAME" <<EOF
+    sudo -u postgres psql -p 5418 -d "$DB_NAME" <<EOF
 DROP INDEX IF EXISTS int_trgm;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX int_trgm ON interactions USING gin (
@@ -719,7 +719,7 @@ EOF
 
 create_btree_index() {
     log_info "Creating B-tree index with text_pattern_ops..."
-    sudo -u postgres psql -d "$DB_NAME" <<EOF
+    sudo -u postgres psql -p 5418 -d "$DB_NAME" <<EOF
 DROP INDEX IF EXISTS int_tree;
 CREATE INDEX int_tree ON interactions(
     interaction_type text_pattern_ops,
@@ -733,7 +733,7 @@ EOF
 
 drop_all_indexes() {
     log_info "Dropping all test indexes..."
-    sudo -u postgres psql -d "$DB_NAME" <<EOF
+    sudo -u postgres psql -p 5418 -d "$DB_NAME" <<EOF
 DROP INDEX IF EXISTS int_bisc;
 DROP INDEX IF EXISTS int_trgm;
 DROP INDEX IF EXISTS int_tree;
@@ -750,7 +750,7 @@ get_index_size() {
         sql="SELECT pg_size_pretty(pg_relation_size('$index_name'));"
     fi
 
-    sudo -u postgres psql -d "$DB_NAME" -t -A -c "$sql"
+    sudo -u postgres psql -p 5418 -d "$DB_NAME" -t -A -c "$sql"
 }
 
 ################################################################################
@@ -759,7 +759,7 @@ get_index_size() {
 
 warmup_cache_full() {
     log_info "Performing full cache warmup (loading index into memory)..."
-    sudo -u postgres psql -d "$DB_NAME" <<EOF > /dev/null 2>&1
+    sudo -u postgres psql -p 5418 -d "$DB_NAME" <<EOF > /dev/null 2>&1
 -- Disable sequential scans to force index usage during warmup
 SET enable_seqscan = off;
 SET enable_bitmapscan = off;
@@ -815,7 +815,7 @@ run_benchmark_iteration() {
     log_info "Running $index_type iteration $iteration ($cache_state cache)..."
     
     # Run queries and capture output
-    sudo -u postgres psql -d "$DB_NAME" -f "$RESULTS_DIR/queries.sql" \
+    sudo -u postgres psql -p 5418 -d "$DB_NAME" -f "$RESULTS_DIR/queries.sql" \
         > "$output_file" 2>&1
 }
 
@@ -1373,14 +1373,14 @@ main() {
     cat > "$RESULTS_DIR/system_info.txt" <<EOF
 Benchmark Run: $(date)
 Hostname: $(hostname)
-PostgreSQL Version: $(sudo -u postgres psql -t -c "SELECT version();")
+PostgreSQL Version: $(sudo -u postgres psql -p 5418 -t -c "SELECT version();")
 CPU Info: $(lscpu | grep "Model name" | cut -d: -f2 | xargs)
 Memory: $(free -h | grep Mem | awk '{print $2}')
 Disk: $(df -h / | tail -1 | awk '{print $2}')
 EOF
     
     # Also save PostgreSQL configuration
-    sudo -u postgres psql -c "SHOW ALL;" > "$RESULTS_DIR/postgres_config.txt" 2>&1
+    sudo -u postgres psql -p 5418 -c "SHOW ALL;" > "$RESULTS_DIR/postgres_config.txt" 2>&1
     
     INDEX_TYPES=("biscuit" "trigram" "btree")
     SHUFFLED=($(shuf -e "${INDEX_TYPES[@]}"))

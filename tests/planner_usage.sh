@@ -21,6 +21,8 @@ set -e  # Exit on error
 # Configuration
 DB_NAME="postgres"
 DB_USER="postgres"
+PORT=5418
+export PGPORT="$PORT"
 RESULTS_DIR="./benchmark_results_$(date +%Y%m%d_%H%M%S)"
 NUM_ITERATIONS=10 # Increased for statistical significance
 WARMUP_ITERATIONS=3
@@ -141,8 +143,8 @@ check_sudo_noninteractive() {
 
     # Best-effort live check: only meaningful if postgres happens to be
     # running already. Not fatal if it isn't (the benchmark starts it itself).
-    if sudo -n -u postgres pg_isready -q >/dev/null 2>&1; then
-        if ! sudo -n -u postgres psql -t -c "SELECT 1" >/dev/null 2>&1; then
+    if sudo -n -u postgres pg_isready -p "$PORT" -q >/dev/null 2>&1; then
+        if ! sudo -n -u postgres psql -p "$PORT" -t -c "SELECT 1" >/dev/null 2>&1; then
             log_warn "sudo -u postgres psql ran but the SELECT 1 test query failed -- check PostgreSQL connectivity/auth separately."
         fi
     fi
@@ -180,16 +182,21 @@ clear_caches() {
     sleep 2
 }
 
-# Start PostgreSQL
+# Start PostgreSQL. Optional $1 overrides which port to poll readiness on
+# (used once at startup, before ensure_postgres_port has switched the
+# cluster over to $PORT -- at that point it's still on whatever port it
+# was already configured for).
 start_postgres() {
+    local poll_port="${1-$PORT}"
     log_info "Starting PostgreSQL..."
     sudo systemctl start postgresql
     sleep 2  # Brief pause for systemctl to initiate startup
     log_info "Waiting for PostgreSQL to accept connections..."
     for i in {1..30}; do
-        if sudo -u postgres pg_isready -q; then
-            log_info "PostgreSQL is ready"
-            return 0
+        if [ -n "$poll_port" ]; then
+            env -u PGPORT sudo -u postgres pg_isready -p "$poll_port" -q && { log_info "PostgreSQL is ready"; return 0; }
+        else
+            env -u PGPORT sudo -u postgres pg_isready -q && { log_info "PostgreSQL is ready"; return 0; }
         fi
         sleep 1
     done
@@ -298,23 +305,53 @@ restore_environment() {
     ENV_PREPARED=0
 }
 
+# Ensure the running cluster is actually listening on $PORT. psql/pg_isready
+# only control which port the *client* connects to -- if the server itself
+# is still configured for its old port (e.g. the distro default 5432), no
+# amount of client-side -p flags will find it. This connects on whatever
+# port the server is currently using, forces it to $PORT via ALTER SYSTEM,
+# and restarts so the change takes effect.
+ensure_postgres_port() {
+    log_info "Checking PostgreSQL is listening on port $PORT..."
+
+    local current_port
+    current_port="$(env -u PGPORT sudo -u postgres psql -t -A -c "SHOW port;" 2>/dev/null | tr -d '[:space:]')"
+
+    if [ -z "$current_port" ]; then
+        log_error "Could not connect to PostgreSQL to check its port."
+        log_error "This usually means no cluster is running yet -- create/start one first"
+        log_error "(e.g. 'pg_lsclusters' / 'pg_ctlcluster <ver> main start' on Debian/Ubuntu)."
+        exit 1
+    fi
+
+    if [ "$current_port" != "$PORT" ]; then
+        log_warn "PostgreSQL is currently on port $current_port, switching to $PORT..."
+        env -u PGPORT sudo -u postgres psql -p "$current_port" -c "ALTER SYSTEM SET port = '${PORT}';" >/dev/null
+        stop_postgres
+        start_postgres
+        log_info "PostgreSQL is now listening on port $PORT"
+    else
+        log_info "PostgreSQL already listening on port $PORT"
+    fi
+}
+
 # Apply temporary postgresql.conf overrides so a checkpoint can't fire
 # mid-iteration and unfairly penalize whichever index happens to be running
 # at the time. Requires ALTER SYSTEM privileges; settings take effect after
 # the next restart, which restart_postgres_clean() already performs.
 apply_postgres_overrides() {
     log_info "Raising checkpoint_timeout/max_wal_size for run duration (avoids mid-iteration checkpoints)"
-    sudo -u postgres psql -c "ALTER SYSTEM SET checkpoint_timeout = '${BENCHMARK_CHECKPOINT_TIMEOUT}';" >/dev/null
-    sudo -u postgres psql -c "ALTER SYSTEM SET max_wal_size = '${BENCHMARK_MAX_WAL_SIZE}';" >/dev/null
-    sudo -u postgres psql -c "ALTER SYSTEM SET log_checkpoints = on;" >/dev/null
+    sudo -u postgres psql -p "$PORT" -c "ALTER SYSTEM SET checkpoint_timeout = '${BENCHMARK_CHECKPOINT_TIMEOUT}';" >/dev/null
+    sudo -u postgres psql -p "$PORT" -c "ALTER SYSTEM SET max_wal_size = '${BENCHMARK_MAX_WAL_SIZE}';" >/dev/null
+    sudo -u postgres psql -p "$PORT" -c "ALTER SYSTEM SET log_checkpoints = on;" >/dev/null
 }
 
 # Revert the ALTER SYSTEM overrides above. Like restore_environment, this is
 # best-effort and called from the exit trap.
 revert_postgres_overrides() {
-    sudo -u postgres psql -c "ALTER SYSTEM RESET checkpoint_timeout;" >/dev/null 2>&1 || true
-    sudo -u postgres psql -c "ALTER SYSTEM RESET max_wal_size;" >/dev/null 2>&1 || true
-    sudo -u postgres psql -c "ALTER SYSTEM RESET log_checkpoints;" >/dev/null 2>&1 || true
+    sudo -u postgres psql -p "$PORT" -c "ALTER SYSTEM RESET checkpoint_timeout;" >/dev/null 2>&1 || true
+    sudo -u postgres psql -p "$PORT" -c "ALTER SYSTEM RESET max_wal_size;" >/dev/null 2>&1 || true
+    sudo -u postgres psql -p "$PORT" -c "ALTER SYSTEM RESET log_checkpoints;" >/dev/null 2>&1 || true
 }
 
 # Pin the postgres postmaster (and its children) to PIN_CORES via taskset,
@@ -330,7 +367,7 @@ pin_postgres_cores() {
         return 0
     fi
     local pmpid
-    pmpid="$(sudo -u postgres pg_isready -q && pgrep -u postgres -f 'postgres.*-D' | head -1 || true)"
+    pmpid="$(sudo -u postgres pg_isready -p "$PORT" -q && pgrep -u postgres -f 'postgres.*-D' | head -1 || true)"
     if [ -z "$pmpid" ]; then
         log_warn "Could not find postgres postmaster PID; skipping core pinning"
         return 0
@@ -947,7 +984,7 @@ EOF
 
 create_biscuit_index() {
     log_info "Creating Biscuit index..."
-    sudo -u postgres psql -d "$DB_NAME" <<EOF
+    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" <<EOF
 DROP INDEX IF EXISTS int_bisc;
 CREATE INDEX int_bisc ON interactions USING biscuit(
     interaction_type, 
@@ -961,7 +998,7 @@ EOF
 
 create_trigram_index() {
     log_info "Creating Trigram (GIN) index..."
-    sudo -u postgres psql -d "$DB_NAME" <<EOF
+    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" <<EOF
 DROP INDEX IF EXISTS int_trgm;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX int_trgm ON interactions USING gin (
@@ -976,7 +1013,7 @@ EOF
 
 create_btree_index() {
     log_info "Creating B-tree index with text_pattern_ops..."
-    sudo -u postgres psql -d "$DB_NAME" <<EOF
+    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" <<EOF
 DROP INDEX IF EXISTS int_tree;
 CREATE INDEX int_tree ON interactions(
     interaction_type text_pattern_ops,
@@ -990,7 +1027,7 @@ EOF
 
 drop_all_indexes() {
     log_info "Dropping all test indexes..."
-    sudo -u postgres psql -d "$DB_NAME" <<EOF
+    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" <<EOF
 DROP INDEX IF EXISTS int_bisc;
 DROP INDEX IF EXISTS int_trgm;
 DROP INDEX IF EXISTS int_tree;
@@ -1007,7 +1044,7 @@ get_index_size() {
         sql="SELECT pg_size_pretty(pg_relation_size('$index_name'));"
     fi
 
-    sudo -u postgres psql -d "$DB_NAME" -t -A -c "$sql"
+    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" -t -A -c "$sql"
 }
 
 ################################################################################
@@ -1021,21 +1058,21 @@ warmup_cache_full() {
     log_info "Performing full cache warmup using pg_prewarm for $index_name..."
     
     # Install pg_prewarm if not already available
-    sudo -u postgres psql -d "$DB_NAME" <<EOF > /dev/null 2>&1
+    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" <<EOF > /dev/null 2>&1
 CREATE EXTENSION IF NOT EXISTS pg_prewarm;
 CREATE EXTENSION IF NOT EXISTS pg_buffercache;
 EOF
     
     # Use pg_prewarm to explicitly load entire index into cache
     log_info "Loading index into shared buffers..."
-    local prewarm_result=$(sudo -u postgres psql -d "$DB_NAME" -t -A -c \
+    local prewarm_result=$(sudo -u postgres psql -p "$PORT" -d "$DB_NAME" -t -A -c \
         "SELECT pg_prewarm('$index_name', 'buffer');")
     log_info "pg_prewarm loaded $prewarm_result blocks into cache"
     
     # Verify cache coverage
     # Verify cache coverage
     log_info "Verifying cache coverage..."
-    sudo -u postgres psql -d "$DB_NAME" -t -A -F'|' <<EOF > "$RESULTS_DIR/cache_verification_${index_type}.txt"
+    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" -t -A -F'|' <<EOF > "$RESULTS_DIR/cache_verification_${index_type}.txt"
 SELECT
     c.relname AS index_name,
     c.relpages AS total_pages,
@@ -1082,7 +1119,7 @@ EOF
     fi
     # Also verify the base table is cached for complete fairness
     log_info "Pre-warming base table..."
-    sudo -u postgres psql -d "$DB_NAME" -t -A -c \
+    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" -t -A -c \
         "SELECT pg_prewarm('interactions', 'buffer');" > /dev/null 2>&1
     
     log_info "Cache warmup complete - index and table fully loaded"
@@ -1101,7 +1138,7 @@ run_benchmark_iteration() {
     log_info "Running $index_type iteration $iteration ($cache_state cache)..."
     
     # Run queries and capture output
-    sudo -u postgres psql -d "$DB_NAME" -f "$RESULTS_DIR/queries.sql" \
+    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" -f "$RESULTS_DIR/queries.sql" \
         > "$output_file" 2>&1
 }
 
@@ -1693,7 +1730,7 @@ main() {
     cat > "$RESULTS_DIR/system_info.txt" <<EOF
 Benchmark Run: $(date)
 Hostname: $(hostname)
-PostgreSQL Version: $(sudo -u postgres psql -t -c "SELECT version();")
+PostgreSQL Version: $(sudo -u postgres psql -p "$PORT" -t -c "SELECT version();")
 CPU Info: $(lscpu | grep "Model name" | cut -d: -f2 | xargs)
 Memory: $(free -h | grep Mem | awk '{print $2}')
 Disk: $(df -h / | tail -1 | awk '{print $2}')
@@ -1705,12 +1742,13 @@ Virtualization: $(systemd-detect-virt 2>/dev/null || echo "unknown")
 EOF
     
     # Also save PostgreSQL configuration
-    sudo -u postgres psql -c "SHOW ALL;" > "$RESULTS_DIR/postgres_config.txt" 2>&1
+    sudo -u postgres psql -p "$PORT" -c "SHOW ALL;" > "$RESULTS_DIR/postgres_config.txt" 2>&1
 
     # Start PostgreSQL once so we can apply ALTER SYSTEM overrides; the
     # subsequent restart_postgres_clean() calls in run_index_benchmark will
     # pick these up since they were persisted via ALTER SYSTEM.
-    start_postgres
+    start_postgres ""
+    ensure_postgres_port
     apply_postgres_overrides
     
     INDEX_TYPES=("biscuit" "trigram" "btree")

@@ -2329,8 +2329,8 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
                             uint32_t    rec = iter->current_value;
                             const char *hay;
                             /*
-                             * Use the pre-lowercased cache populated at build /
-                             * skeleton-load / insert time.  This avoids a
+                             * Use the pre-lowercased cache populated at build
+                             * / insert time.  This avoids a
                              * palloc + tolower + pfree per candidate — the hot
                              * path inside an already bitmap-pruned set.
                              * column_data_cache_lower mirrors column_data_cache

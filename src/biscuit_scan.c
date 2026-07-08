@@ -32,37 +32,21 @@
  * the same code path.
  *
  *
- * Lazy-load strategy
- * ------------------
- * Previously beginscan called biscuit_load_index() synchronously, which
- * rebuilds every bitmap for the entire index before the first query can
- * return.  For a large index this can take hundreds of milliseconds and
- * consume gigabytes of RAM all at once.
+ * Cache-based load strategy
+ * -------------------------
+ * beginscan() resolves the index purely through the session-scoped
+ * biscuit_cache (biscuit_cache.c):
  *
- * The new path:
+ *  1. Cache hit  – the fully-built BiscuitIndex (TIDs, data caches, and
+ *                  every bitmap) is reused immediately.
  *
- *  1. beginscan   – loads only a lightweight skeleton (TIDs + raw string
- *                   data_cache, no bitmaps) via biscuit_load_skeleton(),
- *                   then immediately calls biscuit_preload_request() to
- *                   enqueue the index OID for the background worker.
- *                   Total cost: one heap scan, O(n) string copies.
+ *  2. Cache miss – biscuit_load_index() performs a full heap scan and
+ *                  builds the complete index (all bitmaps included) in
+ *                  one synchronous pass, inserts it into biscuit_cache,
+ *                  and returns it for immediate use.
  *
- *  2. rescan      – checks idx->preload_state:
- *       • BISCUIT_PRELOAD_DONE   → fast bitmap path (unchanged behaviour)
- *       • anything else          → biscuit_fallback_scan(), a plain
- *                                  strstr / strcasestr walk of data_cache.
- *                                  Correct but slower; used only during
- *                                  the warm-up window.
- *
- *  3. background worker – calls biscuit_complete_preload(), which
- *                          rebuilds all bitmaps from the already-cached
- *                          data and sets preload_state = DONE.  On the
- *                          next beginscan the session picks up the warm
- *                          index from the process cache and takes the
- *                          fast path from that point forward.
- *
- * The fallback scan result set is exact (no false positives) so
- * xs_recheck stays false.
+ * Every scan therefore always has bitmaps available; there is no
+ * warm-up window and no separate fallback scan path.
  */
 
 #include "biscuit_common.h"
@@ -71,17 +55,14 @@
 #include "biscuit_pattern.h"
 #include "biscuit_tid.h"
 #include "biscuit_index.h"
-#include "biscuit_preload.h"   /* biscuit_load_skeleton, biscuit_preload_request,
-                                   biscuit_preload_state, biscuit_fallback_scan */
 #include "biscuit_scan.h"
 
 /* ================================================================
  * SECTION 1 – beginscan
  *
- * Key change: on a cache miss we now call biscuit_load_skeleton()
- * instead of biscuit_load_index().  The skeleton is cheap (no bitmaps)
- * and is available immediately.  We then request background bitmap
- * construction via biscuit_preload_request().
+ * On a cache miss, biscuit_load_index() builds the complete index
+ * (heap scan, data caches, all bitmaps) synchronously and inserts it
+ * into biscuit_cache.
  * ================================================================ */
 
 IndexScanDesc
@@ -108,35 +89,18 @@ biscuit_beginscan(Relation index, int nkeys, int norderbys)
 
     elog(DEBUG1, "Entered beginscan()");
 
-    if (so->index)
+    if (!so->index)
     {
         /*
-         * We have a cached index — but it may still be a skeleton.
-         * Upgrade it synchronously if the worker has signalled DONE
-         * and we haven't built the bitmaps yet in this session.
+         * Cache miss: build the complete index (heap scan, data caches,
+         * all bitmaps) synchronously.  biscuit_load_index() inserts the
+         * result into biscuit_cache itself, so we just look it up again
+         * via its return value.
          */
-        if (so->index->preload_state < BISCUIT_PRELOAD_DONE)
-        {
-            uint32 shmem_state = biscuit_preload_state(indexoid);
-            if (shmem_state >= BISCUIT_PRELOAD_DONE)
-            {
-                MemoryContext _oldctx = MemoryContextSwitchTo(CacheMemoryContext);
-                biscuit_complete_preload_local(so->index, indexoid);
-                MemoryContextSwitchTo(_oldctx);
-            }
-            /* else: still warming, rescan() will use fallback */
-        }
-    }
-    else
-    {
-        so->index = biscuit_load_skeleton(index);
-        so->index->preload_state = BISCUIT_PRELOAD_SKELETON;
-        biscuit_register_callback();
-        biscuit_cache_insert(indexoid, so->index);
-        biscuit_preload_request(indexoid);
+        so->index = biscuit_load_index(index);
 
         elog(DEBUG1,
-             "Biscuit: skeleton loaded for %u (%d records), bitmaps pending",
+             "Biscuit: loaded index %u (%d records)",
              indexoid, so->index->num_records);
     }
 
@@ -153,8 +117,6 @@ biscuit_beginscan(Relation index, int nkeys, int norderbys)
 
 /* ================================================================
  * SECTION 2 – Multi-column rescan helper  (bitmap path)
- *
- * Only reached when preload_state == BISCUIT_PRELOAD_DONE.
  * ================================================================ */
 
 /*
@@ -283,216 +245,10 @@ cleanup:
 }
 
 /* ================================================================
- * SECTION 2b – Multi-column fallback rescan  (no bitmaps)
- *
- * Used while preload_state < BISCUIT_PRELOAD_DONE.  Runs one
- * biscuit_fallback_scan() per scan key and AND-reduces the TID sets.
- * ================================================================ */
-
-static void
-biscuit_rescan_multicolumn_fallback(IndexScanDesc scan,
-                                    ScanKey keys, int nkeys,
-                                    ScanKey orderbys, int norderbys)
-{
-    BiscuitScanOpaque *so = (BiscuitScanOpaque *) scan->opaque;
-    bool               needs_sorting = so->needs_sorted_access;
-    int                i;
-    int                n             = so->index->num_records;
-    uint32            *tid_map       = NULL;
-    int                map_size      = 0;
-
-    (void) orderbys;
-    (void) norderbys;
-
-    /*
-     * Build a TID → record-index hash map once (O(n)) so the per-TID
-     * reverse-lookup below is O(1) instead of O(num_records).
-     */
-    if (n > 0)
-    {
-        int k;
-        map_size = 1;
-        while (map_size < 2 * n)
-            map_size <<= 1;
-        tid_map = (uint32 *) palloc0(map_size * sizeof(uint32));
-
-        for (k = 0; k < n; k++)
-        {
-            BlockNumber  blk    = ItemPointerGetBlockNumber(&so->index->tids[k]);
-            OffsetNumber off    = ItemPointerGetOffsetNumber(&so->index->tids[k]);
-            uint32       h      = ((uint32)blk * 2654435761u) ^ (uint32)off;
-            int          bucket = (int)(h & (uint32)(map_size - 1));
-            while (tid_map[bucket] != 0)
-                bucket = (bucket + 1) & (map_size - 1);
-            tid_map[bucket] = (uint32)(k + 1);
-        }
-    }
-
-    /*
-     * We need the intersection of per-key TID sets.  Use a RoaringBitmap
-     * over record indices to compute the AND, then collect TIDs once.
-     */
-    {
-        RoaringBitmap *candidates = biscuit_roaring_create();
-
-#ifdef HAVE_ROARING
-        roaring_bitmap_add_range(candidates, 0, (uint64_t) n);
-#else
-        for (i = 0; i < n; i++)
-            biscuit_roaring_add(candidates, i);
-#endif
-
-        for (i = 0; i < nkeys; i++)
-        {
-            ScanKey          key = &keys[i];
-            text            *pattern_text;
-            char            *pattern;
-            bool             is_ilike;
-            bool             is_not;
-            int              col_idx;
-            ItemPointerData *key_tids   = NULL;
-            int              key_count  = 0;
-            RoaringBitmap   *key_bitmap;
-            int              j;
-
-            if (key->sk_flags & SK_ISNULL)
-                continue;
-
-            col_idx = (so->index->num_columns > 1)
-                      ? (int)(key->sk_attno - 1)
-                      : 0;
-
-            if (col_idx < 0 || col_idx >= so->index->num_columns)
-                continue;
-
-            /*
-             * Derive is_ilike and is_not from THIS key's strategy before
-             * passing is_ilike to biscuit_fallback_scan.  Previously these
-             * assignments appeared after the call, leaving is_ilike
-             * uninitialised — an undefined-behaviour read that happened to
-             * produce the first key's value on every iteration, making all
-             * subsequent keys inherit the first key's case-sensitivity.
-             */
-            is_ilike = (key->sk_strategy == BISCUIT_ILIKE_STRATEGY ||
-                        key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
-            is_not   = (key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY ||
-                        key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
-
-            pattern_text = DatumGetTextPP(key->sk_argument);
-            pattern      = text_to_cstring(pattern_text);
-
-            biscuit_fallback_scan(so->index, pattern, is_ilike, col_idx,
-                                  &key_tids, &key_count);
-            pfree(pattern);
-
-            /* O(1) TID → record-index lookup via hash map */
-            key_bitmap = biscuit_roaring_create();
-            for (j = 0; j < key_count; j++)
-            {
-                BlockNumber  blk    = ItemPointerGetBlockNumber(&key_tids[j]);
-                OffsetNumber off    = ItemPointerGetOffsetNumber(&key_tids[j]);
-                uint32       h      = ((uint32)blk * 2654435761u) ^ (uint32)off;
-                int          bucket;
-
-                if (!tid_map || map_size == 0)
-                    break;
-
-                bucket = (int)(h & (uint32)(map_size - 1));
-                while (tid_map[bucket] != 0)
-                {
-                    uint32 recidx = tid_map[bucket] - 1;
-                    ItemPointerData *t = &so->index->tids[recidx];
-                    if (ItemPointerGetBlockNumber(t) == blk &&
-                        ItemPointerGetOffsetNumber(t) == off)
-                    {
-                        biscuit_roaring_add(key_bitmap, recidx);
-                        break;
-                    }
-                    bucket = (bucket + 1) & (map_size - 1);
-                }
-            }
-            if (key_tids)
-                pfree(key_tids);
-
-            if (is_not)
-            {
-                RoaringBitmap *all = biscuit_roaring_create();
-                int k;
-                /* Only invert over non-null indexed records for this column */
-                if (col_idx >= 0 && col_idx < so->index->num_columns &&
-                    so->index->column_data_cache && so->index->column_data_cache[col_idx])
-                {
-                    for (k = 0; k < n; k++)
-                    {
-                        if (so->index->column_data_cache[col_idx][k])
-                            biscuit_roaring_add(all, k);
-                    }
-                }
-                else
-                {
-                    for (k = 0; k < n; k++)
-                        biscuit_roaring_add(all, k);
-                }
-                /* Exclude tombstones before inverting. */
-                if (so->index->tombstone_count > 0 && so->index->tombstones)
-                    biscuit_roaring_andnot_inplace(all, so->index->tombstones);
-                biscuit_roaring_andnot_inplace(all, key_bitmap);
-                biscuit_roaring_free(key_bitmap);
-                key_bitmap = all;
-            }
-
-            biscuit_roaring_and_inplace(candidates, key_bitmap);
-            biscuit_roaring_free(key_bitmap);
-
-            if (biscuit_roaring_count(candidates) == 0)
-                break;
-        }
-
-        /* Filter tombstones */
-        if (so->index->tombstone_count > 0 && so->index->tombstones)
-            biscuit_roaring_andnot_inplace(candidates, so->index->tombstones);
-
-        /*
-         * Parallel-aware TID collection — mirrors the dispatch used in
-         * biscuit_rescan_multicolumn() and the single-column fallback path.
-         *
-         * Previously this called biscuit_collect_sorted_tids_single()
-         * unconditionally, so every Gather participant returned the full TID
-         * set and the Gather node assembled N× the expected rows.
-         *
-         * biscuit_collect_sorted_tids_parallel() handles both cases: when
-         * pdesc is NULL it delegates to the single-threaded path unchanged;
-         * when pdesc is non-NULL each participant claims a disjoint slice of
-         * the pre-partitioned TID array, so Gather assembles exactly one copy.
-         */
-        {
-            BiscuitParallelScanDesc *pdesc = NULL;
-
-            if (scan->parallel_scan != NULL)
-                pdesc = (BiscuitParallelScanDesc *)
-                            OffsetToPointer(scan->parallel_scan,
-                                            BISCUIT_PARALLEL_AM_OFFSET(scan->parallel_scan));
-
-            biscuit_collect_sorted_tids_parallel(
-                so->index, candidates, pdesc,
-                &so->results, &so->num_results,
-                needs_sorting);
-        }
-
-        biscuit_roaring_free(candidates);
-    }
-
-    if (tid_map)
-        pfree(tid_map);
-}
-
-/* ================================================================
  * SECTION 3 – rescan
  *
- * Key change: if preload_state < BISCUIT_PRELOAD_DONE (bitmaps not yet
- * built) we use biscuit_fallback_scan() instead of the bitmap query
- * functions.  Once the background worker finishes, subsequent scans
- * automatically use the fast bitmap path.
+ * so->index always has every bitmap built (see beginscan), so rescan
+ * always takes the bitmap query path below.
  * ================================================================ */
 
 void
@@ -503,7 +259,6 @@ biscuit_rescan(IndexScanDesc scan,
     BiscuitScanOpaque *so = (BiscuitScanOpaque *) scan->opaque;
     bool               is_aggregate;
     bool               needs_sorting;
-    bool               bitmaps_ready;
 
     if (so->results)
     {
@@ -535,74 +290,12 @@ biscuit_rescan(IndexScanDesc scan,
     so->needs_sorted_access = needs_sorting;
     so->limit_remaining     = -1;
 
-    /*
-     * Check whether the background worker has finished building the bitmaps.
-     *
-     * We first consult the in-process preload_state field which is the
-     * cheapest check (no IPC).  If that still shows an incomplete state we
-     * also probe the shared-memory ring buffer in case the worker finished
-     * after this session's last cache lookup.
-     */
-    bitmaps_ready = (so->index->preload_state >= BISCUIT_PRELOAD_DONE);
-
-    if (!bitmaps_ready)
+    if (so->index->num_columns > 1)
     {
-        uint32 shmem_state = biscuit_preload_state(RelationGetRelid(scan->indexRelation));
-
-        if (shmem_state >= BISCUIT_PRELOAD_DONE)
-        {
-            /*
-             * The worker has finished building bitmaps.  Rather than calling
-             * biscuit_load_index() (which would do a full heap scan again),
-             * we build the bitmaps directly from the skeleton that this
-             * session already holds in so->index->data_cache.
-             *
-             * biscuit_complete_preload_local() is O(total-string-bytes) with
-             * zero extra I/O.  It sets idx->preload_state = DONE and updates
-             * the shmem slot so other sessions benefit too.
-             *
-             * This path executes at most once per session (the first query
-             * after the background worker signals DONE).
-             */
-            {
-                MemoryContext _oldctx = MemoryContextSwitchTo(CacheMemoryContext);
-                biscuit_complete_preload_local(so->index,
-                                               RelationGetRelid(scan->indexRelation));
-                MemoryContextSwitchTo(_oldctx);
-            }
-
-            /* Refresh the global cache so subsequent beginscans hit this
-             * upgraded copy. rd_amcache is deliberately left untouched —
-             * see the note in biscuit_beginscan(). */
-            biscuit_cache_insert(RelationGetRelid(scan->indexRelation), so->index);
-
-            bitmaps_ready = true;
-
-            elog(DEBUG1,
-                 "Biscuit: local bitmap build done for %u after preload signal",
-                 RelationGetRelid(scan->indexRelation));
-        }
-        else if (shmem_state == BISCUIT_PRELOAD_FAILED)
-        {
-            elog(DEBUG1,
-                 "Biscuit: preload worker failed for index %u; "
-                 "using sequential fallback scan (may be slow)",
-                 RelationGetRelid(scan->indexRelation));
-        }
+        biscuit_rescan_multicolumn(scan, keys, nkeys, orderbys, norderbys);
     }
-
-    /* ---------------------------------------------------------------
-     * FAST PATH – bitmaps are available
-     * --------------------------------------------------------------- */
-    elog(DEBUG1, "Entering Checkpoint - 1: 559");
-    if (bitmaps_ready)
+    else
     {
-        if (so->index->num_columns > 1)
-        {
-            biscuit_rescan_multicolumn(scan, keys, nkeys, orderbys, norderbys);
-        }
-        else
-        {
             /* ---- Single-column: AND all key results ---- */
             RoaringBitmap *result = NULL;
             int            i;
@@ -752,203 +445,6 @@ biscuit_rescan(IndexScanDesc scan,
             }
 
             biscuit_roaring_free(result);
-        }
-
-        return; /* fast path done */
-    }
-
-    /* ---------------------------------------------------------------
-     * FALLBACK PATH – bitmaps not yet ready, use sequential scan
-     *
-     * biscuit_fallback_scan() walks data_cache (single-column) or
-     * column_data_cache (multi-column) directly.  It is correct but
-     * O(n) per scan key with no bitmap acceleration.  This path is
-     * only active during the brief warm-up window after the first
-     * query after a restart.
-     * --------------------------------------------------------------- */
-        /*
-         * FALLBACK PATH – bitmaps not yet ready, use sequential scan
-         *
-         * biscuit_fallback_scan() walks data_cache (single-column) or
-         * column_data_cache (multi-column) directly.  It is correct but
-         * O(n) per scan key with no bitmap acceleration.  This path is
-         * only active during the brief warm-up window after the first
-         * query after a restart.
-         *
-         * Converting the TID list returned by biscuit_fallback_scan() into
-         * a record-index bitmap was previously O(key_count * num_records)
-         * per key — quadratic for large indexes.  We build a tid→record-index
-         * hash map once before the key loop (O(n)) and use it for O(1)
-         * lookups per matched TID.
-         */
-        elog(DEBUG1,
-             "Biscuit: index %u not yet warm (state=%u); using fallback scan",
-             RelationGetRelid(scan->indexRelation),
-             so->index->preload_state);
-
-        if (so->index->num_columns > 1)
-        {
-            /*
-             * Multi-column fallback: handled by the dedicated helper which
-             * computes the AND across all keys using the fallback scanner.
-             */
-            biscuit_rescan_multicolumn_fallback(scan, keys, nkeys,
-                                                orderbys, norderbys);
-        }
-        else
-        {
-            /*
-             * Single-column fallback: run one biscuit_fallback_scan() per
-             * key and intersect the results.
-             *
-             * Build a TID → record-index hash map (open addressing, power-of-2
-             * table) to avoid the O(num_records) linear search per matched TID.
-             */
-            int            n          = so->index->num_records;
-            uint32        *tid_map    = NULL; /* tid_map[bucket] = recidx+1, 0=empty */
-            int            map_size   = 0;
-
-            /* Smallest power-of-two >= 2*n (load factor ~0.5) */
-            if (n > 0)
-            {
-                map_size = 1;
-                while (map_size < 2 * n)
-                    map_size <<= 1;
-                tid_map = (uint32 *) palloc0(map_size * sizeof(uint32));
-
-                {
-                    int k;
-                    for (k = 0; k < n; k++)
-                    {
-                        BlockNumber blk  = ItemPointerGetBlockNumber(&so->index->tids[k]);
-                        OffsetNumber off  = ItemPointerGetOffsetNumber(&so->index->tids[k]);
-                        uint32       h    = ((uint32)blk * 2654435761u) ^ (uint32)off;
-                        int          bucket = (int)(h & (uint32)(map_size - 1));
-                        while (tid_map[bucket] != 0)
-                            bucket = (bucket + 1) & (map_size - 1);
-                        tid_map[bucket] = (uint32)(k + 1); /* store recidx+1 */
-                    }
-                }
-            }
-
-            {
-                RoaringBitmap *candidates = biscuit_roaring_create();
-                int            i;
-
-#ifdef HAVE_ROARING
-                roaring_bitmap_add_range(candidates, 0, (uint64_t) n);
-#else
-                for (i = 0; i < n; i++)
-                    biscuit_roaring_add(candidates, i);
-#endif
-
-                for (i = 0; i < nkeys; i++)
-                {
-                    ScanKey          key = &keys[i];
-                    text            *pattern_text;
-                    char            *pattern;
-                    bool             is_ilike;
-                    bool             is_not;
-                    ItemPointerData *key_tids  = NULL;
-                    int              key_count = 0;
-                    RoaringBitmap   *key_bitmap;
-                    int              j;
-
-                    if (key->sk_flags & SK_ISNULL)
-                        continue;
-
-                    is_ilike = (key->sk_strategy == BISCUIT_ILIKE_STRATEGY ||
-                                key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
-                    is_not   = (key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY ||
-                                key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
-
-                    pattern_text = DatumGetTextPP(key->sk_argument);
-                    pattern      = text_to_cstring(pattern_text);
-
-                    /* col_idx = 0 for single-column */
-                    biscuit_fallback_scan(so->index, pattern, is_ilike, 0,
-                                          &key_tids, &key_count);
-                    pfree(pattern);
-
-                    /* Convert TID list to a record-index bitmap via hash map */
-                    key_bitmap = biscuit_roaring_create();
-                    for (j = 0; j < key_count; j++)
-                    {
-                        BlockNumber blk  = ItemPointerGetBlockNumber(&key_tids[j]);
-                        OffsetNumber off  = ItemPointerGetOffsetNumber(&key_tids[j]);
-                        uint32       h    = ((uint32)blk * 2654435761u) ^ (uint32)off;
-                        int          bucket;
-
-                        if (!tid_map || map_size == 0)
-                            break;  /* no records */
-
-                        bucket = (int)(h & (uint32)(map_size - 1));
-                        while (tid_map[bucket] != 0)
-                        {
-                            uint32 recidx = tid_map[bucket] - 1;
-                            ItemPointerData *t = &so->index->tids[recidx];
-                            if (ItemPointerGetBlockNumber(t) == blk &&
-                                ItemPointerGetOffsetNumber(t) == off)
-                            {
-                                biscuit_roaring_add(key_bitmap, recidx);
-                                break;
-                            }
-                            bucket = (bucket + 1) & (map_size - 1);
-                        }
-                    }
-                    if (key_tids)
-                        pfree(key_tids);
-
-                    if (is_not)
-                    {
-                        RoaringBitmap *all = biscuit_roaring_create();
-                        int k;
-                        /* Only invert over non-null indexed records */
-                        for (k = 0; k < n; k++)
-                        {
-                            if (so->index->data_cache[k])
-                                biscuit_roaring_add(all, k);
-                        }
-                        if (so->index->tombstone_count > 0 && so->index->tombstones)
-                            biscuit_roaring_andnot_inplace(all, so->index->tombstones);
-                        biscuit_roaring_andnot_inplace(all, key_bitmap);
-                        biscuit_roaring_free(key_bitmap);
-                        key_bitmap = all;
-                    }
-
-                    biscuit_roaring_and_inplace(candidates, key_bitmap);
-                    biscuit_roaring_free(key_bitmap);
-
-                    if (biscuit_roaring_count(candidates) == 0)
-                        break;
-                }
-
-                /* Filter tombstones (covers non-NOT-LIKE keys) */
-                if (so->index->tombstone_count > 0 && so->index->tombstones)
-                    biscuit_roaring_andnot_inplace(candidates, so->index->tombstones);
-
-                /*biscuit_collect_sorted_tids_single(so->index, candidates,
-                                                     &so->results, &so->num_results,
-                                                     needs_sorting);*/
-               
-                {
-                    BiscuitParallelScanDesc *pdesc = NULL;
-                    elog(DEBUG1, "Entering Checkpoint - 2: 702");
-                    if (scan->parallel_scan != NULL)
-                        pdesc = (BiscuitParallelScanDesc *)
-                                    OffsetToPointer(scan->parallel_scan,
-                                                    BISCUIT_PARALLEL_AM_OFFSET(scan->parallel_scan));
-                  
-                     biscuit_collect_sorted_tids_parallel(
-                        so->index, candidates, pdesc,
-                        &so->results, &so->num_results,
-                        needs_sorting);
-                }
-                biscuit_roaring_free(candidates);
-            }
-
-            if (tid_map)
-                pfree(tid_map);
         }
     }
 

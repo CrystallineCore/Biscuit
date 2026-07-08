@@ -25,7 +25,6 @@
 #include "biscuit_bitmap.h"
 #include "biscuit_index.h"
 #include "biscuit_scan.h"
-#include "biscuit_preload.h"
 #include "biscuit_tid.h"
 
 /* ================================================================
@@ -40,9 +39,11 @@
 
 /* ================================================================
  * _PG_init – called once when the library is loaded.
- * Registers shared-memory hooks and the background preload worker.
- * Without this, biscuit_preload_shmem is always NULL and the
- * background worker is never started.
+ *
+ * Biscuit has no shared-memory state or background workers: every
+ * BiscuitIndex is built (or rebuilt) synchronously and kept in the
+ * session-scoped cache (biscuit_cache.c), so there is nothing to
+ * register here.
  * ================================================================ */
 
 void _PG_init(void);
@@ -50,7 +51,7 @@ void _PG_init(void);
 void
 _PG_init(void)
 {
-    biscuit_preload_init();
+    /* Nothing to do. */
 }
 
 /* ================================================================

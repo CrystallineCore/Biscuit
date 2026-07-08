@@ -253,7 +253,6 @@ biscuit_remove_from_all_indices(BiscuitIndex *idx, uint32_t rec_idx)
  */
 
 #include "biscuit_pattern.h"   /* for set_pos/neg_bitmap helpers etc */
-#include "biscuit_preload.h"   /* for BISCUIT_PRELOAD_DONE = 3 */
 
 /*
  * Helper: add a single text record to the single-column (legacy) index.
@@ -941,20 +940,6 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
             }
         }
 
-        /*
-         * Mark the index fully warm.  biscuit_build() constructs all
-         * bitmaps synchronously, so by the time we reach here the index
-         * is identical to what biscuit_complete_preload() would produce.
-         * Without this, preload_state stays 0 (BISCUIT_PRELOAD_NONE)
-         * because palloc0 zero-fills the struct, and rescan's check
-         *
-         *   bitmaps_ready = (so->index->preload_state >= BISCUIT_PRELOAD_DONE)
-         *
-         * is always false — every query falls through to the O(n) fallback
-         * strstr scan even though the bitmaps are fully populated.
-         */
-        idx->preload_state = BISCUIT_PRELOAD_DONE;
-
         biscuit_write_metadata_to_disk(index, idx);
         biscuit_register_callback();
         /*
@@ -1054,29 +1039,12 @@ biscuit_insert(Relation index,
         idx = biscuit_load_index(index);
 
     /*
-     * FIX 1 — SELECT → INSERT crash (segfault at 0xfffffffffffffff8).
-     *
-     * When a SELECT runs before any INSERT, beginscan calls
-     * biscuit_load_skeleton() which leaves all four length-bitmap arrays
-     * (length_bitmaps_legacy, length_ge_bitmaps_legacy, length_bitmaps_lower,
-     * length_ge_bitmaps_lower) as NULL and max_length_legacy / max_length_lower
-     * as 0.  The grow-path below then calls repalloc(NULL, ...) which reads
-     * the palloc chunk header at ptr-8 == 0xfffffffffffffff8 and crashes.
-     *
-     * Fix: if the index arrived as a skeleton (preload_state < DONE), complete
-     * the bitmap build inline now, before touching any length-bitmap pointer.
-     * biscuit_complete_preload_local() is idempotent and cheap when
-     * num_records is small; for large indexes this path is only hit once per
-     * session because the result is stored back into the cache below.
-     *
-     * This also fixes the mirrored hazard in the multi-column path where
-     * cidx->length_bitmaps / length_ge_bitmaps are NULL in a skeleton.
+     * biscuit_load_index() (called above on a cache miss) always builds a
+     * complete BiscuitIndex — heap scan, data caches, and every bitmap —
+     * before returning it, so the length-bitmap arrays below are always
+     * allocated and non-NULL by the time we get here.
      */
-     
     oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
-    if (idx->preload_state < BISCUIT_PRELOAD_DONE)
-        biscuit_complete_preload_local(idx, RelationGetRelid(index));
-
 
     /* Check for duplicate TID (UPDATE path) */
     for (int i = 0; i < idx->num_records; i++)
@@ -1219,9 +1187,9 @@ biscuit_insert(Relation index,
                     int new_ml = (cl + 1) * 2;
 
                     /*
-                     * FIX 1 (belt-and-suspenders): after biscuit_complete_preload_local
-                     * above these are guaranteed non-NULL, but guard anyway so that
-                     * any future caller path that skips the preload check cannot crash.
+                     * Belt-and-suspenders: these arrays are always allocated
+                     * by biscuit_load_index()/biscuit_build() before we get
+                     * here, but guard the repalloc/palloc0 choice anyway.
                      */
                     if (idx->length_bitmaps_legacy)
                         idx->length_bitmaps_legacy    = (RoaringBitmap **) repalloc(idx->length_bitmaps_legacy,    new_ml * sizeof(RoaringBitmap *));
@@ -1304,10 +1272,10 @@ biscuit_insert(Relation index,
                 idx->column_data_cache[col][slot] = str;
 
                 /*
-                 * Pre-compute the lowercased copy so that biscuit_fallback_scan
-                 * can use column_data_cache_lower directly for ILIKE queries,
-                 * matching the invariant established at build / skeleton load time.
-                 * Mirror NULL to NULL for the null-column case handled below.
+                 * Pre-compute the lowercased copy so ILIKE queries can use
+                 * column_data_cache_lower directly, matching the invariant
+                 * established at build/load time.  Mirror NULL to NULL for
+                 * the null-column case handled below.
                  */
                 if (idx->column_data_cache_lower)
                     idx->column_data_cache_lower[col][slot] = biscuit_str_tolower(str, out_len);
@@ -1323,15 +1291,13 @@ biscuit_insert(Relation index,
                  * cidx->length_ge_bitmaps (or the _lower variants), which were
                  * only ever populated in the bulk-build pass (biscuit_build).
                  *
-                 * Because biscuit_insert never resets idx->preload_state after
-                 * mutating idx, preload_state stays BISCUIT_PRELOAD_DONE across
-                 * the insert.  biscuit_rescan() trusts that flag and goes
-                 * straight to the bitmap fast path (biscuit_rescan_multicolumn),
-                 * which consults these length bitmaps for length-based
-                 * predicates. Newly inserted rows were invisible there even
-                 * though column_data_cache, char_cache, and the position
-                 * bitmaps were all correctly updated above — hence "insert is
-                 * on disk and in data_cache, but warm queries don't see it".
+                 * biscuit_rescan() always uses the bitmap fast path
+                 * (biscuit_rescan_multicolumn), which consults these length
+                 * bitmaps for length-based predicates. Newly inserted rows
+                 * were invisible there even though column_data_cache,
+                 * char_cache, and the position bitmaps were all correctly
+                 * updated above — hence "insert is on disk and in
+                 * data_cache, but queries don't see it".
                  *
                  * Mirror the legacy single-column growth/insert logic here,
                  * operating on this column's ColumnIndex (cidx) instead of
@@ -1424,12 +1390,10 @@ biscuit_insert(Relation index,
     /*
      * FIX 2 — INSERT → SELECT returns 0.
      *
-     * After modifying idx the preload_state is guaranteed DONE (we called
-     * biscuit_complete_preload_local at the top if it wasn't already).
-     * Write the warm index back into the global cache so the next beginscan
-     * — in this session or any other — picks up the newly inserted record
-     * via the bitmap path instead of loading a stale skeleton that predates
-     * the insert.
+     * Write the updated index back into the global cache so the next
+     * beginscan — in this session or any other — picks up the newly
+     * inserted record via the bitmap path instead of a stale cached copy
+     * that predates the insert.
      *
      * Without this, a SELECT immediately after a committed INSERT finds the
      * pre-insert cache entry and returns 0 rows.
