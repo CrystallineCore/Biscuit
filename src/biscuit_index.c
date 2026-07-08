@@ -785,8 +785,6 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
             #endif
             while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
             {
-                bool all_non_null = true;
-
                 /*
                  * FIX #10 (multi-column case): previously called
                  * slot_getattr(slot, index->rd_index->indkey.values[col], ...)
@@ -803,10 +801,19 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
                 econtext->ecxt_scantuple = slot;
                 FormIndexDatum(indexInfo, slot, estate, index_values, index_isnull);
 
-                for (col = 0; col < natts; col++) {
-                    if (index_isnull[col]) { all_non_null = false; break; }
-                }
-                if (!all_non_null) continue;
+                /*
+                 * FIX #11: previously skipped the ENTIRE row (continue) if
+                 * any single indexed column was NULL, via an all_non_null
+                 * flag computed here from index_isnull[]. That dropped rows
+                 * from idx->tids entirely -- including their other,
+                 * non-NULL columns -- making them invisible to every
+                 * subsequent query regardless of which column it filtered
+                 * on. The per-column NULL handling below (storing NULL into
+                 * column_data_cache[col] and skipping only that column's
+                 * indexing) already exists and is sufficient; there is no
+                 * need for an all-or-nothing skip. This mirrors what
+                 * biscuit_insert() already does correctly per-row.
+                 */
 
                 if (idx->num_records >= idx->capacity)
                 {

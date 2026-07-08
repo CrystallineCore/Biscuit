@@ -402,7 +402,7 @@ biscuit_get_length_ge(BiscuitIndex *idx, int min_len)
 {
     if (min_len <= 0 && idx->length_ge_bitmaps_legacy && idx->length_ge_bitmaps_legacy[0])
         return biscuit_roaring_copy(idx->length_ge_bitmaps_legacy[0]);
-    if (min_len <= idx->max_length_legacy && idx->length_ge_bitmaps_legacy &&
+    if (min_len < idx->max_length_legacy && idx->length_ge_bitmaps_legacy &&
         idx->length_ge_bitmaps_legacy[min_len])
         return biscuit_roaring_copy(idx->length_ge_bitmaps_legacy[min_len]);
     return biscuit_roaring_create();
@@ -413,7 +413,7 @@ biscuit_get_length_ge_lower(BiscuitIndex *idx, int min_len)
 {
     if (min_len <= 0 && idx->length_ge_bitmaps_lower && idx->length_ge_bitmaps_lower[0])
         return biscuit_roaring_copy(idx->length_ge_bitmaps_lower[0]);
-    if (min_len <= idx->max_length_lower && idx->length_ge_bitmaps_lower &&
+    if (min_len < idx->max_length_lower && idx->length_ge_bitmaps_lower &&
         idx->length_ge_bitmaps_lower[min_len])
         return biscuit_roaring_copy(idx->length_ge_bitmaps_lower[min_len]);
     return biscuit_roaring_create();
@@ -424,7 +424,8 @@ biscuit_get_col_length_ge(ColumnIndex *col, int min_len)
 {
     if (min_len <= 0 && col->length_ge_bitmaps && col->length_ge_bitmaps[0])
         return biscuit_roaring_copy(col->length_ge_bitmaps[0]);
-    if (min_len <= col->max_length && col->length_ge_bitmaps && col->length_ge_bitmaps[min_len])
+    if (min_len < col->max_length && col->length_ge_bitmaps &&
+        col->length_ge_bitmaps[min_len])
         return biscuit_roaring_copy(col->length_ge_bitmaps[min_len]);
     return biscuit_roaring_create();
 }
@@ -434,7 +435,7 @@ biscuit_get_col_length_ge_lower(ColumnIndex *col, int min_len)
 {
     if (min_len <= 0 && col->length_ge_bitmaps_lower && col->length_ge_bitmaps_lower[0])
         return biscuit_roaring_copy(col->length_ge_bitmaps_lower[0]);
-    if (min_len <= col->max_length_lower && col->length_ge_bitmaps_lower &&
+    if (min_len < col->max_length_lower && col->length_ge_bitmaps_lower &&
         col->length_ge_bitmaps_lower[min_len])
         return biscuit_roaring_copy(col->length_ge_bitmaps_lower[min_len]);
     return biscuit_roaring_create();
