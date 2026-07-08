@@ -2116,9 +2116,17 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
     }
 
     if (only_wildcards) {
-        if (percent_count > 0 && wildcard_count <= col->max_length && col->length_ge_bitmaps[wildcard_count])
+        /*
+         * col->max_length is the allocated size of length_bitmaps /
+         * length_ge_bitmaps (valid indices 0..max_length-1), so this must
+         * be a strict "<". "<=" let wildcard_count == max_length slip
+         * through, reading one RoaringBitmap* past the end of the
+         * palloc'd array on an ordinary LIKE/ILIKE query whose all-wildcard
+         * pattern length equals the column's max indexed length.
+         */
+        if (percent_count > 0 && wildcard_count < col->max_length && col->length_ge_bitmaps[wildcard_count])
             return biscuit_roaring_copy(col->length_ge_bitmaps[wildcard_count]);
-        if (!percent_count && wildcard_count <= col->max_length && col->length_bitmaps[wildcard_count])
+        if (!percent_count && wildcard_count < col->max_length && col->length_bitmaps[wildcard_count])
             return biscuit_roaring_copy(col->length_bitmaps[wildcard_count]);
         return biscuit_roaring_create();
     }
@@ -2136,7 +2144,8 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
         if (parsed->part_count == 1) {
             if (!parsed->starts_percent && !parsed->ends_percent) {
                 result = biscuit_match_col_part_at_pos(col, parsed->parts[0], parsed->part_byte_lens[0], 0);
-                if (result && min_len <= col->max_length && col->length_bitmaps[min_len]) biscuit_roaring_and_inplace(result, col->length_bitmaps[min_len]);
+                /* col->max_length is the array size (valid indices 0..max_length-1); "<=" read one past the end */
+                if (result && min_len < col->max_length && col->length_bitmaps[min_len]) biscuit_roaring_and_inplace(result, col->length_bitmaps[min_len]);
                 else if (result) { biscuit_roaring_free(result); result = biscuit_roaring_create(); }
                 else result = biscuit_roaring_create();
             } else if (!parsed->starts_percent) {
@@ -2274,7 +2283,8 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
     for (i = 0; i < plen; i++) { if (pl[i] == '%') pc++; else if (pl[i] == '_') wc++; else { ow = false; break; } }
     if (ow) {
         if (pc > 0) result = biscuit_get_col_length_ge_lower(col, wc);
-        else if (wc <= col->max_length_lower && col->length_bitmaps_lower && col->length_bitmaps_lower[wc]) result = biscuit_roaring_copy(col->length_bitmaps_lower[wc]);
+        /* col->max_length_lower is the array size (valid indices 0..max_length_lower-1); "<=" read one past the end */
+        else if (wc < col->max_length_lower && col->length_bitmaps_lower && col->length_bitmaps_lower[wc]) result = biscuit_roaring_copy(col->length_bitmaps_lower[wc]);
         else result = biscuit_roaring_create();
         pfree(pl); return result;
     }
@@ -2289,7 +2299,8 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
         if (parsed->part_count == 1) {
             if (!parsed->starts_percent && !parsed->ends_percent) {
                 result = biscuit_match_col_part_at_pos_ilike(col, parsed->parts[0], parsed->part_byte_lens[0], 0);
-                if (result && min_len <= col->max_length_lower && col->length_bitmaps_lower && col->length_bitmaps_lower[min_len]) biscuit_roaring_and_inplace(result, col->length_bitmaps_lower[min_len]);
+                /* col->max_length_lower is the array size (valid indices 0..max_length_lower-1); "<=" read one past the end */
+                if (result && min_len < col->max_length_lower && col->length_bitmaps_lower && col->length_bitmaps_lower[min_len]) biscuit_roaring_and_inplace(result, col->length_bitmaps_lower[min_len]);
                 else if (result) { biscuit_roaring_free(result); result = biscuit_roaring_create(); }
                 else result = biscuit_roaring_create();
             } else if (!parsed->starts_percent) {

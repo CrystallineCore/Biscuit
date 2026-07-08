@@ -23,6 +23,16 @@ DB_NAME="postgres"
 DB_USER="postgres"
 PORT=5418
 export PGPORT="$PORT"
+
+# Which Debian/Ubuntu postgresql-common cluster to target. This machine has
+# multiple clusters registered (16/main, 17/main, 18/main), so every
+# systemctl/pg_isready/psql call must be pinned to one explicitly -- the
+# unversioned wrappers refuse with "No existing cluster is suitable as a
+# default target" as soon as more than one cluster exists.
+PG_VERSION="18"
+PG_CLUSTER="main"
+PG_UNIT="postgresql@${PG_VERSION}-${PG_CLUSTER}"
+export PGCLUSTER="${PG_VERSION}/${PG_CLUSTER}"
 RESULTS_DIR="./benchmark_results_$(date +%Y%m%d_%H%M%S)"
 NUM_ITERATIONS=10 # Increased for statistical significance
 WARMUP_ITERATIONS=3
@@ -74,6 +84,20 @@ log_section() {
     echo -e "${BLUE}========================================${NC}"
 }
 
+# Wrappers that always pin PGCLUSTER when shelling out to the postgres user.
+# `sudo -u postgres` resets the environment by default, so the top-level
+# `export PGCLUSTER=...` alone would not reach these commands -- it has to be
+# passed through explicitly on each sudo invocation. Routing every call
+# through these two functions means the cluster-pinning only has to be
+# correct in one place, instead of on every one of the ~20 call sites below.
+pg_psql() {
+    sudo -u postgres env PGCLUSTER="${PG_VERSION}/${PG_CLUSTER}" psql "$@"
+}
+
+pg_isready_cmd() {
+    sudo -u postgres env PGCLUSTER="${PG_VERSION}/${PG_CLUSTER}" pg_isready "$@"
+}
+
 # Check if running as postgres user or with sudo access
 check_privileges() {
     if [ "$EUID" -ne 0 ] && [ "$(whoami)" != "postgres" ]; then
@@ -113,9 +137,9 @@ check_sudo_noninteractive() {
 
     local check_failed=0
 
-    if _sudo_blocked systemctl is-active postgresql; then
-        log_error "Passwordless sudo failed for: sudo systemctl ... postgresql"
-        log_error "Add a NOPASSWD entry in /etc/sudoers (visudo) covering 'systemctl stop/start/status postgresql' for this user."
+    if _sudo_blocked systemctl is-active "$PG_UNIT"; then
+        log_error "Passwordless sudo failed for: sudo systemctl ... $PG_UNIT"
+        log_error "Add a NOPASSWD entry in /etc/sudoers (visudo) covering 'systemctl stop/start/status $PG_UNIT' for this user."
         check_failed=1
     fi
 
@@ -143,9 +167,9 @@ check_sudo_noninteractive() {
 
     # Best-effort live check: only meaningful if postgres happens to be
     # running already. Not fatal if it isn't (the benchmark starts it itself).
-    if sudo -n -u postgres pg_isready -p "$PORT" -q >/dev/null 2>&1; then
-        if ! sudo -n -u postgres psql -p "$PORT" -t -c "SELECT 1" >/dev/null 2>&1; then
-            log_warn "sudo -u postgres psql ran but the SELECT 1 test query failed -- check PostgreSQL connectivity/auth separately."
+    if pg_isready_cmd -p "$PORT" -q >/dev/null 2>&1; then
+        if ! pg_psql -p "$PORT" -t -c "SELECT 1" >/dev/null 2>&1; then
+            log_warn "pg_psql ran but the SELECT 1 test query failed -- check PostgreSQL connectivity/auth separately."
         fi
     fi
     log_info "Passwordless sudo OK"
@@ -169,8 +193,8 @@ warn_if_virtualized() {
 
 # Stop PostgreSQL safely
 stop_postgres() {
-    log_info "Stopping PostgreSQL..."
-    sudo systemctl stop postgresql
+    log_info "Stopping PostgreSQL ($PG_UNIT)..."
+    sudo systemctl stop "$PG_UNIT"
     sleep 3
 }
 
@@ -188,20 +212,21 @@ clear_caches() {
 # was already configured for).
 start_postgres() {
     local poll_port="${1-$PORT}"
-    log_info "Starting PostgreSQL..."
-    sudo systemctl start postgresql
+    log_info "Starting PostgreSQL ($PG_UNIT)..."
+    sudo systemctl start "$PG_UNIT"
     sleep 2  # Brief pause for systemctl to initiate startup
     log_info "Waiting for PostgreSQL to accept connections..."
-    for i in {1..30}; do
+    local attempt
+    for attempt in {1..30}; do
         if [ -n "$poll_port" ]; then
-            env -u PGPORT sudo -u postgres pg_isready -p "$poll_port" -q && { log_info "PostgreSQL is ready"; return 0; }
+            pg_isready_cmd -p "$poll_port" -q && { log_info "PostgreSQL is ready"; return 0; }
         else
-            env -u PGPORT sudo -u postgres pg_isready -q && { log_info "PostgreSQL is ready"; return 0; }
+            pg_isready_cmd -q && { log_info "PostgreSQL is ready"; return 0; }
         fi
         sleep 1
     done
     log_error "PostgreSQL failed to become ready"
-    sudo systemctl status postgresql --no-pager
+    sudo systemctl status "$PG_UNIT" --no-pager
     exit 1
 }
 
@@ -315,7 +340,7 @@ ensure_postgres_port() {
     log_info "Checking PostgreSQL is listening on port $PORT..."
 
     local current_port
-    current_port="$(env -u PGPORT sudo -u postgres psql -t -A -c "SHOW port;" 2>/dev/null | tr -d '[:space:]')"
+    current_port="$(pg_psql -t -A -c "SHOW port;" 2>/dev/null | tr -d '[:space:]')"
 
     if [ -z "$current_port" ]; then
         log_error "Could not connect to PostgreSQL to check its port."
@@ -326,7 +351,7 @@ ensure_postgres_port() {
 
     if [ "$current_port" != "$PORT" ]; then
         log_warn "PostgreSQL is currently on port $current_port, switching to $PORT..."
-        env -u PGPORT sudo -u postgres psql -p "$current_port" -c "ALTER SYSTEM SET port = '${PORT}';" >/dev/null
+        pg_psql -p "$current_port" -c "ALTER SYSTEM SET port = '${PORT}';" >/dev/null
         stop_postgres
         start_postgres
         log_info "PostgreSQL is now listening on port $PORT"
@@ -341,17 +366,17 @@ ensure_postgres_port() {
 # the next restart, which restart_postgres_clean() already performs.
 apply_postgres_overrides() {
     log_info "Raising checkpoint_timeout/max_wal_size for run duration (avoids mid-iteration checkpoints)"
-    sudo -u postgres psql -p "$PORT" -c "ALTER SYSTEM SET checkpoint_timeout = '${BENCHMARK_CHECKPOINT_TIMEOUT}';" >/dev/null
-    sudo -u postgres psql -p "$PORT" -c "ALTER SYSTEM SET max_wal_size = '${BENCHMARK_MAX_WAL_SIZE}';" >/dev/null
-    sudo -u postgres psql -p "$PORT" -c "ALTER SYSTEM SET log_checkpoints = on;" >/dev/null
+    pg_psql -p "$PORT" -c "ALTER SYSTEM SET checkpoint_timeout = '${BENCHMARK_CHECKPOINT_TIMEOUT}';" >/dev/null
+    pg_psql -p "$PORT" -c "ALTER SYSTEM SET max_wal_size = '${BENCHMARK_MAX_WAL_SIZE}';" >/dev/null
+    pg_psql -p "$PORT" -c "ALTER SYSTEM SET log_checkpoints = on;" >/dev/null
 }
 
 # Revert the ALTER SYSTEM overrides above. Like restore_environment, this is
 # best-effort and called from the exit trap.
 revert_postgres_overrides() {
-    sudo -u postgres psql -p "$PORT" -c "ALTER SYSTEM RESET checkpoint_timeout;" >/dev/null 2>&1 || true
-    sudo -u postgres psql -p "$PORT" -c "ALTER SYSTEM RESET max_wal_size;" >/dev/null 2>&1 || true
-    sudo -u postgres psql -p "$PORT" -c "ALTER SYSTEM RESET log_checkpoints;" >/dev/null 2>&1 || true
+    pg_psql -p "$PORT" -c "ALTER SYSTEM RESET checkpoint_timeout;" >/dev/null 2>&1 || true
+    pg_psql -p "$PORT" -c "ALTER SYSTEM RESET max_wal_size;" >/dev/null 2>&1 || true
+    pg_psql -p "$PORT" -c "ALTER SYSTEM RESET log_checkpoints;" >/dev/null 2>&1 || true
 }
 
 # Pin the postgres postmaster (and its children) to PIN_CORES via taskset,
@@ -367,7 +392,7 @@ pin_postgres_cores() {
         return 0
     fi
     local pmpid
-    pmpid="$(sudo -u postgres pg_isready -p "$PORT" -q && pgrep -u postgres -f 'postgres.*-D' | head -1 || true)"
+    pmpid="$(pg_isready_cmd -p "$PORT" -q && pgrep -u postgres -f 'postgres.*-D' | head -1 || true)"
     if [ -z "$pmpid" ]; then
         log_warn "Could not find postgres postmaster PID; skipping core pinning"
         return 0
@@ -984,7 +1009,7 @@ EOF
 
 create_biscuit_index() {
     log_info "Creating Biscuit index..."
-    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" <<EOF
+    pg_psql -p "$PORT" -d "$DB_NAME" <<EOF
 DROP INDEX IF EXISTS int_bisc;
 CREATE INDEX int_bisc ON interactions USING biscuit(
     interaction_type, 
@@ -998,7 +1023,7 @@ EOF
 
 create_trigram_index() {
     log_info "Creating Trigram (GIN) index..."
-    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" <<EOF
+    pg_psql -p "$PORT" -d "$DB_NAME" <<EOF
 DROP INDEX IF EXISTS int_trgm;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX int_trgm ON interactions USING gin (
@@ -1013,7 +1038,7 @@ EOF
 
 create_btree_index() {
     log_info "Creating B-tree index with text_pattern_ops..."
-    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" <<EOF
+    pg_psql -p "$PORT" -d "$DB_NAME" <<EOF
 DROP INDEX IF EXISTS int_tree;
 CREATE INDEX int_tree ON interactions(
     interaction_type text_pattern_ops,
@@ -1027,7 +1052,7 @@ EOF
 
 drop_all_indexes() {
     log_info "Dropping all test indexes..."
-    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" <<EOF
+    pg_psql -p "$PORT" -d "$DB_NAME" <<EOF
 DROP INDEX IF EXISTS int_bisc;
 DROP INDEX IF EXISTS int_trgm;
 DROP INDEX IF EXISTS int_tree;
@@ -1044,7 +1069,7 @@ get_index_size() {
         sql="SELECT pg_size_pretty(pg_relation_size('$index_name'));"
     fi
 
-    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" -t -A -c "$sql"
+    pg_psql -p "$PORT" -d "$DB_NAME" -t -A -c "$sql"
 }
 
 ################################################################################
@@ -1058,21 +1083,21 @@ warmup_cache_full() {
     log_info "Performing full cache warmup using pg_prewarm for $index_name..."
     
     # Install pg_prewarm if not already available
-    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" <<EOF > /dev/null 2>&1
+    pg_psql -p "$PORT" -d "$DB_NAME" <<EOF > /dev/null 2>&1
 CREATE EXTENSION IF NOT EXISTS pg_prewarm;
 CREATE EXTENSION IF NOT EXISTS pg_buffercache;
 EOF
     
     # Use pg_prewarm to explicitly load entire index into cache
     log_info "Loading index into shared buffers..."
-    local prewarm_result=$(sudo -u postgres psql -p "$PORT" -d "$DB_NAME" -t -A -c \
+    local prewarm_result=$(pg_psql -p "$PORT" -d "$DB_NAME" -t -A -c \
         "SELECT pg_prewarm('$index_name', 'buffer');")
     log_info "pg_prewarm loaded $prewarm_result blocks into cache"
     
     # Verify cache coverage
     # Verify cache coverage
     log_info "Verifying cache coverage..."
-    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" -t -A -F'|' <<EOF > "$RESULTS_DIR/cache_verification_${index_type}.txt"
+    pg_psql -p "$PORT" -d "$DB_NAME" -t -A -F'|' <<EOF > "$RESULTS_DIR/cache_verification_${index_type}.txt"
 SELECT
     c.relname AS index_name,
     c.relpages AS total_pages,
@@ -1119,7 +1144,7 @@ EOF
     fi
     # Also verify the base table is cached for complete fairness
     log_info "Pre-warming base table..."
-    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" -t -A -c \
+    pg_psql -p "$PORT" -d "$DB_NAME" -t -A -c \
         "SELECT pg_prewarm('interactions', 'buffer');" > /dev/null 2>&1
     
     log_info "Cache warmup complete - index and table fully loaded"
@@ -1138,7 +1163,7 @@ run_benchmark_iteration() {
     log_info "Running $index_type iteration $iteration ($cache_state cache)..."
     
     # Run queries and capture output
-    sudo -u postgres psql -p "$PORT" -d "$DB_NAME" -f "$RESULTS_DIR/queries.sql" \
+    pg_psql -p "$PORT" -d "$DB_NAME" -f "$RESULTS_DIR/queries.sql" \
         > "$output_file" 2>&1
 }
 
@@ -1730,7 +1755,7 @@ main() {
     cat > "$RESULTS_DIR/system_info.txt" <<EOF
 Benchmark Run: $(date)
 Hostname: $(hostname)
-PostgreSQL Version: $(sudo -u postgres psql -p "$PORT" -t -c "SELECT version();")
+PostgreSQL Version: $(pg_psql -p "$PORT" -t -c "SELECT version();")
 CPU Info: $(lscpu | grep "Model name" | cut -d: -f2 | xargs)
 Memory: $(free -h | grep Mem | awk '{print $2}')
 Disk: $(df -h / | tail -1 | awk '{print $2}')
@@ -1742,7 +1767,7 @@ Virtualization: $(systemd-detect-virt 2>/dev/null || echo "unknown")
 EOF
     
     # Also save PostgreSQL configuration
-    sudo -u postgres psql -p "$PORT" -c "SHOW ALL;" > "$RESULTS_DIR/postgres_config.txt" 2>&1
+    pg_psql -p "$PORT" -c "SHOW ALL;" > "$RESULTS_DIR/postgres_config.txt" 2>&1
 
     # Start PostgreSQL once so we can apply ALTER SYSTEM overrides; the
     # subsequent restart_postgres_clean() calls in run_index_benchmark will
