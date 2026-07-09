@@ -25,11 +25,25 @@
  * loop on load). On fallback-bitset builds we dump the block array
  * directly, same bulk-copy shape, just uncompressed. Either way,
  * loading a bitmap is a fread() into a buffer plus one bulk parse
- * call, not millions of individual add() calls -- that per-value
- * loop was the actual cause of the ~8s snapshot-load time this
- * revision fixes. BISCUIT_PERSIST_VERSION was bumped so any
- * old-format snapshot on disk is ignored (safe rebuild-once fallback)
- * rather than misparsed.
+ * call, not millions of individual add() calls, which is what keeps
+ * snapshot load fast even for large indexes.
+ *
+ * Integrity: every snapshot ends with a trailing CRC32C checksum
+ * covering all preceding bytes (header + body). The checksum is
+ * accumulated incrementally inside wput()/rget() -- the same single
+ * pass that already writes/reads every field -- so verifying a
+ * multi-hundred-MB snapshot costs no extra I/O and no separate
+ * whole-file hashing pass; it just falls out of the write/read we were
+ * doing anyway. CRC32C (not a cryptographic hash) is used deliberately:
+ * it is SIMD-accelerated by Postgres's own port/pg_crc32c.h (the same
+ * routine WAL and pg_control use) and is more than sufficient to catch
+ * the failure modes we actually care about here -- a crash mid-write
+ * or on-disk bit rot -- as opposed to a malicious adversary. On load,
+ * a checksum mismatch is treated exactly like a truncated/corrupt
+ * snapshot: discard and fall back to a full from-heap rebuild.
+ * BISCUIT_PERSIST_VERSION should be bumped whenever the on-disk format
+ * changes, so an incompatible snapshot is cleanly rejected (and
+ * rebuilt from the heap) rather than misread.
  *
  * Consistency model (per user requirements: read-mostly, best-effort):
  *   - Snapshot is written at the end of biscuit_build() (CREATE INDEX /
@@ -38,12 +52,13 @@
  *     becomes non-trivial -- see biscuit_index.c call sites.
  *   - On load, we sanity-check the header (magic/version), that
  *     num_records is non-negative and columns match the index's
- *     current attribute count, AND that the generation recorded in
- *     the snapshot header matches the live generation in the index's
- *     metapage (BiscuitMetaPageData.gen). A mismatch means an insert
- *     or vacuum has landed since the snapshot was taken, so the
- *     snapshot is discarded with a WARNING and the caller falls back
- *     to a normal rebuild -- we never load data known to be stale.
+ *     current attribute count, that the trailing CRC32C checksum
+ *     matches the bytes actually read, AND that the generation
+ *     recorded in the snapshot header matches the live generation in
+ *     the index's metapage (BiscuitMetaPageData.gen). A mismatch on
+ *     any of these means the snapshot is stale or unusable, so it is
+ *     discarded (WARNING) and the caller falls back to a normal
+ *     rebuild -- we never load data known to be stale or corrupt.
  */
 
 #include "biscuit_common.h"
@@ -52,13 +67,15 @@
 #include "biscuit_persist.h"
 #include "biscuit_index.h"   /* for biscuit_read_metadata_from_disk() */
 
+#include "port/pg_crc32c.h"
+
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <errno.h>
 
 #define BISCUIT_PERSIST_MAGIC    (BISCUIT_MAGIC ^ 0x01)
-#define BISCUIT_PERSIST_VERSION  2  /* v2: native roaring portable (de)serialize */
+#define BISCUIT_PERSIST_VERSION  1  /* bump if the on-disk format changes */
 #define BISCUIT_PERSIST_DIR      "pg_biscuit"
 #define BISCUIT_PERSIST_HEADER_RESERVED  4  /* uint32 slots reserved for future metadata */
 
@@ -102,18 +119,32 @@ biscuit_persist_ensure_dir(void)
  * Low-level buffered write/read helpers.
  * All writes go through these so a short write/read is always caught
  * rather than silently producing a truncated/garbage snapshot.
+ *
+ * Both streams also carry a running CRC32C (crc) that is updated on
+ * every successful write/read inside wput()/rget(). This is the
+ * mechanism that makes the trailing checksum "free": since every
+ * field write/read already funnels through these two functions, the
+ * checksum is accumulated as a side effect of I/O we are doing
+ * anyway, rather than requiring a dedicated full-file hashing pass
+ * before write or after load. Callers that need the final value call
+ * FIN_CRC32C() on a copy of the accumulator (see biscuit_persist_save
+ * / biscuit_persist_load) -- the trailer write/read itself must not
+ * be included, so it happens via the same wput_u32()/rget_u32() calls
+ * but its contribution to the accumulator is simply never inspected.
  * ================================================================ */
 
 typedef struct
 {
-    FILE *fp;
-    bool  error;
+    FILE      *fp;
+    bool       error;
+    pg_crc32c  crc;
 } WStream;
 
 typedef struct
 {
-    FILE *fp;
-    bool  error;
+    FILE      *fp;
+    bool       error;
+    pg_crc32c  crc;
 } RStream;
 
 static void
@@ -122,7 +153,11 @@ wput(WStream *w, const void *data, size_t len)
     if (w->error || len == 0)
         return;
     if (fwrite(data, 1, len, w->fp) != len)
+    {
         w->error = true;
+        return;
+    }
+    COMP_CRC32C(w->crc, data, len);
 }
 
 static void
@@ -158,6 +193,7 @@ rget(RStream *r, void *data, size_t len)
         r->error = true;
         return false;
     }
+    COMP_CRC32C(r->crc, data, len);
     return true;
 }
 
@@ -403,6 +439,7 @@ biscuit_persist_save(Oid indexoid, BiscuitIndex *idx)
 
     w.fp    = fopen(tmppath, "wb");
     w.error = false;
+    INIT_CRC32C(w.crc);
     if (!w.fp)
     {
         elog(WARNING, "biscuit: could not create snapshot file \"%s\": %m", tmppath);
@@ -515,6 +552,22 @@ biscuit_persist_save(Oid indexoid, BiscuitIndex *idx)
         }
     }
 
+    /*
+     * ---- trailing checksum ----
+     * Finalize the CRC accumulated over every byte written so far (the
+     * full header + body) and append it as the last 4 bytes of the
+     * file. Finalizing into a local copy rather than w.crc itself means
+     * the wput_u32() call below -- which, like every other write, feeds
+     * back into w.crc -- can't corrupt the value we're about to persist;
+     * we simply never look at w.crc again after this point.
+     */
+    {
+        pg_crc32c final_crc = w.crc;
+
+        FIN_CRC32C(final_crc);
+        wput_u32(&w, (uint32) final_crc);
+    }
+
     if (w.error || fflush(w.fp) != 0)
     {
         elog(WARNING, "biscuit: error writing snapshot \"%s\", discarding", tmppath);
@@ -573,6 +626,7 @@ biscuit_persist_load(Relation index)
 
     r.fp = fopen(path, "rb");
     r.error = false;
+    INIT_CRC32C(r.crc);
     if (!r.fp)
         return NULL;   /* no snapshot -- normal, caller falls back */
 
@@ -779,6 +833,37 @@ biscuit_persist_load(Relation index)
 
         if (r.error)
             ereport(ERROR, (errmsg("biscuit: truncated snapshot for index %u", indexoid)));
+
+        /*
+         * ---- trailing checksum ----
+         * Snapshot everything the running CRC has accumulated so far
+         * (the full header + body we just streamed through) *before*
+         * reading the 4 trailer bytes themselves -- the trailer is not
+         * part of its own coverage. This is the only "verification"
+         * step: it falls directly out of the single read pass above,
+         * so there is no separate whole-file hashing pass here, no
+         * matter how large the snapshot is.
+         *
+         * A mismatch means the file was truncated/corrupted/tampered
+         * with since it was written; treat it exactly like any other
+         * unreadable snapshot -- discard and let the caller fall back
+         * to a full from-heap rebuild rather than trust the bytes.
+         */
+        {
+            pg_crc32c computed_crc = r.crc;
+            uint32    stored_crc;
+
+            FIN_CRC32C(computed_crc);
+            stored_crc = (uint32) rget_u32(&r);
+
+            if (r.error)
+                ereport(ERROR, (errmsg("biscuit: snapshot for index %u missing checksum trailer",
+                                        indexoid)));
+
+            if (stored_crc != (uint32) computed_crc)
+                ereport(ERROR, (errmsg("biscuit: checksum mismatch in snapshot for index %u, "
+                                        "file may be corrupt or truncated", indexoid)));
+        }
 
         /*
          * Initialize the in-memory generation counters from the

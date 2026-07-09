@@ -52,6 +52,10 @@
 #include "utils/snapmgr.h"
 #include "access/xact.h"
 #include "postmaster/interrupt.h"
+#include "catalog/objectaccess.h"
+#include "catalog/pg_am.h"
+#include "catalog/pg_class.h"
+#include "utils/syscache.h"
 
 /* ==================== ROARING BITMAP TYPES ==================== */
 
@@ -89,7 +93,7 @@ typedef struct {
 #define CHAR_RANGE                      256
 #define TOMBSTONE_CLEANUP_THRESHOLD     1000
 #define RADIX_SORT_THRESHOLD            5000
-#define BISCUIT_LIBRARY_VERSION         "2.5.0 - Lemon"
+#define BISCUIT_LIBRARY_VERSION         "2.5.0 - Disk"
 
 /*
  * BISCUIT_SNAPSHOT_GEN_THRESHOLD
