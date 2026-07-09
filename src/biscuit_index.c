@@ -994,6 +994,17 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
         }
 
         biscuit_write_metadata_to_disk(index, idx);
+
+        /*
+         * Full disk snapshot (bitmaps + string caches), separate from the
+         * num_records-only metapage above. This is what lets a cold
+         * backend (or a cache eviction) skip the from-heap rebuild below
+         * in biscuit_load_index() -- see biscuit_persist.c. Best-effort:
+         * a failed/skipped write here just means the next cold load pays
+         * the normal rebuild cost, it never fails the build itself.
+         */
+        biscuit_persist_save(index, idx);
+
         biscuit_register_callback();
         /*
          * NOTE: idx lives permanently in CacheMemoryContext and is owned
@@ -1041,6 +1052,24 @@ biscuit_load_index(Relation index)
     IndexInfo        *indexInfo;
     IndexBuildResult *dummy;
     Relation          heap;
+    BiscuitIndex     *idx;
+
+    /*
+     * Cold-start fast path: try the on-disk snapshot first. This is a
+     * palloc + memcpy-shaped deserialize of already-built bitmaps, not a
+     * heap scan + full UTF-8/bitmap rebuild, so it's the thing that
+     * actually fixes "every cold backend pays a full rebuild". It is
+     * best-effort -- any miss, corruption, or version mismatch just falls
+     * through to the exact same from-heap rebuild this function always
+     * did before.
+     */
+    idx = biscuit_persist_load(index);
+    if (idx)
+    {
+        biscuit_register_callback();
+        biscuit_cache_insert(RelationGetRelid(index), idx);
+        return idx;
+    }
 
     heap = table_open(index->rd_index->indrelid, AccessShareLock);
 

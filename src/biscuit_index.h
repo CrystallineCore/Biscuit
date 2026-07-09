@@ -8,6 +8,7 @@
 
 #include "biscuit_common.h"
 #include "biscuit_bitmap.h"
+#include "biscuit_persist.h"
 
 /* ==================== DISK I/O ==================== */
 
