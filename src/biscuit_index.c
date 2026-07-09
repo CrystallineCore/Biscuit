@@ -322,11 +322,22 @@ biscuit_index_single_record(BiscuitIndex *idx,
         char *str_lower      = biscuit_str_tolower(str, byte_len);
         int   lower_byte_len = strlen(str_lower);
         int   lower_char_count = biscuit_utf8_char_count(str_lower, lower_byte_len);
+        (void) lower_char_count;  /* no longer used to bump idx->max_length_lower here; see note below */
 
         idx->data_cache_lower[rec_idx] = str_lower;
 
-        if (lower_char_count > idx->max_length_lower)
-            idx->max_length_lower = lower_char_count;
+        /*
+         * NOTE: do NOT bump idx->max_length_lower here.  This field is not
+         * a "largest string seen so far" scratch counter — it is the live
+         * allocated capacity of idx->length_bitmaps_lower/length_ge_bitmaps_lower.
+         * biscuit_build() recomputes it correctly from scratch after this
+         * function returns (see the dedicated length-bitmap pass), and
+         * biscuit_insert()'s growth block is the sole owner of keeping it
+         * in lockstep with the actual array size. Mutating it here made
+         * biscuit_insert() read an already-bumped value as "old capacity",
+         * leaving a gap of uninitialized RoaringBitmap* entries and
+         * crashing inside libroaring on the next insert of a longer string.
+         */
 
         byte_pos = char_pos = 0;
         while (byte_pos < lower_byte_len)
@@ -406,6 +417,7 @@ biscuit_index_column_record(BiscuitIndex *idx,
     int            byte_pos   = 0;
     int            char_pos   = 0;
     int            char_count = biscuit_utf8_char_count(str, byte_len);
+    (void) char_count;  /* no longer used to bump cidx->max_length here; see note below */
 
     /* ----------------------------------------------------------------
      * Case-sensitive pass
@@ -457,9 +469,15 @@ biscuit_index_column_record(BiscuitIndex *idx,
         char_pos++;
     }
 
-    /* Track max character length for this column */
-    if (char_count > cidx->max_length)
-        cidx->max_length = char_count;
+    /*
+     * NOTE: do NOT bump cidx->max_length here.  See the identical note in
+     * biscuit_index_single_record() above: this field tracks the live
+     * allocated capacity of cidx->length_bitmaps/length_ge_bitmaps, not a
+     * scratch "longest string seen" counter. biscuit_build() recomputes it
+     * from scratch after this function returns; biscuit_insert()'s growth
+     * block is the sole owner of keeping it in lockstep with the actual
+     * array size.
+     */
 
     /* ----------------------------------------------------------------
      * Case-insensitive pass
@@ -470,9 +488,12 @@ biscuit_index_column_record(BiscuitIndex *idx,
         int   lower_char_count;
 
         lower_char_count = biscuit_utf8_char_count(str_lower, lower_byte_len);
+        (void) lower_char_count;  /* no longer used to bump cidx->max_length_lower here; see note below */
 
-        if (lower_char_count > cidx->max_length_lower)
-            cidx->max_length_lower = lower_char_count;
+        /*
+         * NOTE: do NOT bump cidx->max_length_lower here, for the same
+         * reason as cidx->max_length above.
+         */
 
         byte_pos = char_pos = 0;
         while (byte_pos < lower_byte_len)
@@ -678,7 +699,32 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
 
             /* Build length bitmaps */
             idx->max_length_legacy = idx->max_len + 1;
-            idx->max_length_lower += 1;
+
+            /*
+             * idx->max_length_lower must be computed independently here,
+             * via a dedicated scan over idx->data_cache_lower, rather than
+             * relying on any per-record side-effect performed inside
+             * biscuit_index_single_record(). That field is the live
+             * allocated capacity of idx->length_bitmaps_lower /
+             * idx->length_ge_bitmaps_lower, and biscuit_insert()'s growth
+             * block depends on it accurately reflecting the *current*
+             * array size at all times — so biscuit_index_single_record()
+             * must never touch it (see the note in that function). Build
+             * therefore has to derive the correct value itself, the same
+             * way the multi-column build path already does.
+             */
+            {
+                int max_lower = 0;
+                for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++)
+                {
+                    int lbl, lcl;
+                    if (!idx->data_cache_lower[rec_idx]) continue;
+                    lbl = strlen(idx->data_cache_lower[rec_idx]);
+                    lcl = biscuit_utf8_char_count(idx->data_cache_lower[rec_idx], lbl);
+                    if (lcl > max_lower) max_lower = lcl;
+                }
+                idx->max_length_lower = max_lower + 1;
+            }
 
             idx->length_bitmaps_legacy    = (RoaringBitmap **) palloc0(idx->max_length_legacy * sizeof(RoaringBitmap *));
             idx->length_ge_bitmaps_legacy = (RoaringBitmap **) palloc0(idx->max_length_legacy * sizeof(RoaringBitmap *));
