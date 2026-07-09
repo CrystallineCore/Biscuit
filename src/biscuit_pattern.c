@@ -584,6 +584,46 @@ biscuit_part_match_substr(const char *hay, int hay_byte_len, int hay_off,
     return true;  /* all part bytes consumed */
 }
 
+/*
+ * biscuit_wildcard_contains
+ * --------------------------
+ * Wildcard-aware replacement for strstr(): returns true if the
+ * sentinel-encoded `part` (which may contain bare '_' single-char
+ * wildcards and/or BISCUIT_LITERAL_ESC-escaped literal underscores)
+ * matches a substring of `hay` starting at some UTF-8 character
+ * boundary.
+ *
+ * A plain strstr() treats '_' as a literal byte, which is wrong for
+ * SQL LIKE/ILIKE semantics ('_' must match any single character).
+ * This function instead tries biscuit_part_match_substr() — which
+ * already implements correct '_'/escape handling — at every valid
+ * starting offset, exactly like strstr() would scan every starting
+ * offset for a literal needle.
+ */
+static bool
+biscuit_wildcard_contains(const char *hay, int hay_byte_len,
+                           const char *part, int part_byte_len)
+{
+    int hay_off = 0;
+
+    if (part_byte_len == 0)
+        return true;
+
+    while (hay_off <= hay_byte_len)
+    {
+        if (biscuit_part_match_substr(hay, hay_byte_len, hay_off,
+                                       part, part_byte_len))
+            return true;
+        if (hay_off >= hay_byte_len)
+            break;
+        /* Advance by one whole UTF-8 character, not one raw byte, so we
+         * never attempt a match starting mid-way through a multi-byte
+         * sequence. */
+        hay_off += biscuit_utf8_char_length((unsigned char) hay[hay_off]);
+    }
+    return false;
+}
+
 
 /* Splits a LIKE/ILIKE pattern on unescaped '%' wildcards.
  *
@@ -2157,16 +2197,24 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
             } else {
                 /*
                  * Substring LIKE: %needle%
-                 * Seed candidates from char_cache[first_byte] (case-sensitive),
-                 * filter by minimum length, then verify with strstr.
+                 * Seed candidates from char_cache[first_concrete_byte]
+                 * (case-sensitive) — biscuit_part_seed_byte() skips any
+                 * leading '_' wildcards / BISCUIT_LITERAL_ESC prefixes so
+                 * a pattern like '%_lex%' seeds from 'l', not '_'.
+                 * Filter by minimum length, then verify with a
+                 * wildcard-aware match.
                  */
                 result = biscuit_roaring_create();
                 if (parsed->part_byte_lens[0] > 0)
                 {
-                    unsigned char  fb    = (unsigned char) parsed->parts[0][0];
-                    RoaringBitmap *cands = col->char_cache[fb]
+                    unsigned char  fb    = biscuit_part_seed_byte(parsed->parts[0], parsed->part_byte_lens[0]);
+                    RoaringBitmap *cands = (fb != 0 && col->char_cache[fb])
                                           ? biscuit_roaring_copy(col->char_cache[fb])
-                                          : biscuit_roaring_create();
+                                          : (fb != 0
+                                             ? biscuit_roaring_create()
+                                             : (col->length_ge_bitmaps[0]
+                                                ? biscuit_roaring_copy(col->length_ge_bitmaps[0])
+                                                : biscuit_roaring_create()));
                     int            pcl   = parsed->part_lens[0];
                     RoaringBitmap *lf    = biscuit_get_col_length_ge(col, pcl);
 
@@ -2184,7 +2232,9 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
                                 idx->column_data_cache[col_idx] &&
                                 (hay = idx->column_data_cache[col_idx][rec]) != NULL)
                             {
-                                if (strstr(hay, parsed->parts[0]) != NULL)
+                                if (biscuit_wildcard_contains(hay, strlen(hay),
+                                                               parsed->parts[0],
+                                                               parsed->part_byte_lens[0]))
                                     biscuit_roaring_add(result, rec);
                             }
                             roaring_uint32_iterator_advance(iter);
@@ -2207,7 +2257,9 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
                                     idx->column_data_cache[col_idx] &&
                                     (hay = idx->column_data_cache[col_idx][rec]) != NULL)
                                 {
-                                    if (strstr(hay, parsed->parts[0]) != NULL)
+                                    if (biscuit_wildcard_contains(hay, strlen(hay),
+                                                                   parsed->parts[0],
+                                                                   parsed->part_byte_lens[0]))
                                         biscuit_roaring_add(result, rec);
                                 }
                             }
@@ -2314,20 +2366,24 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
                  * Substring ILIKE: %needle%
                  * pl (the pattern) has already been fully lowercased above.
                  * parsed->parts[0] is therefore also lowercase.
-                 * Seed candidates from char_cache_lower[first_byte_of_lowercase_needle],
-                 * filter by minimum length, then verify with strstr against the
-                 * lowercased data cache (column_data_cache holds the original strings;
-                 * we lowercase on the fly per candidate, which is cheap because
-                 * char_cache_lower has already pruned the candidate set to only rows
-                 * that contain the first character of the needle).
+                 * Seed candidates from char_cache_lower[first_concrete_byte]
+                 * — biscuit_part_seed_byte() skips leading '_' wildcards /
+                 * BISCUIT_LITERAL_ESC prefixes so a pattern like '%_lex%'
+                 * seeds from 'l', not '_'. Filter by minimum length, then
+                 * verify with a wildcard-aware match against the
+                 * lowercased data cache.
                  */
                 result = biscuit_roaring_create();
                 if (parsed->part_byte_lens[0] > 0)
                 {
-                    unsigned char  fb    = (unsigned char) parsed->parts[0][0]; /* lowercase first byte */
-                    RoaringBitmap *cands = col->char_cache_lower[fb]
+                    unsigned char  fb    = biscuit_part_seed_byte(parsed->parts[0], parsed->part_byte_lens[0]); /* lowercase first concrete byte */
+                    RoaringBitmap *cands = (fb != 0 && col->char_cache_lower[fb])
                                           ? biscuit_roaring_copy(col->char_cache_lower[fb])
-                                          : biscuit_roaring_create();
+                                          : (fb != 0
+                                             ? biscuit_roaring_create()
+                                             : (col->length_ge_bitmaps_lower && col->length_ge_bitmaps_lower[0]
+                                                ? biscuit_roaring_copy(col->length_ge_bitmaps_lower[0])
+                                                : biscuit_roaring_create()));
                     int            pcl   = parsed->part_lens[0];
                     RoaringBitmap *lf    = biscuit_get_col_length_ge_lower(col, pcl);
 
@@ -2354,7 +2410,9 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
                                 idx->column_data_cache_lower[col_idx] &&
                                 (hay = idx->column_data_cache_lower[col_idx][rec]) != NULL)
                             {
-                                if (strstr(hay, parsed->parts[0]) != NULL)
+                                if (biscuit_wildcard_contains(hay, strlen(hay),
+                                                               parsed->parts[0],
+                                                               parsed->part_byte_lens[0]))
                                     biscuit_roaring_add(result, rec);
                             }
                             roaring_uint32_iterator_advance(iter);
@@ -2377,7 +2435,9 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
                                     idx->column_data_cache_lower[col_idx] &&
                                     (hay = idx->column_data_cache_lower[col_idx][rec]) != NULL)
                                 {
-                                    if (strstr(hay, parsed->parts[0]) != NULL)
+                                    if (biscuit_wildcard_contains(hay, strlen(hay),
+                                                                   parsed->parts[0],
+                                                                   parsed->part_byte_lens[0]))
                                         biscuit_roaring_add(result, rec);
                                 }
                             }

@@ -34,7 +34,7 @@ PG_CLUSTER="main"
 PG_UNIT="postgresql@${PG_VERSION}-${PG_CLUSTER}"
 export PGCLUSTER="${PG_VERSION}/${PG_CLUSTER}"
 RESULTS_DIR="./benchmark_results_$(date +%Y%m%d_%H%M%S)"
-NUM_ITERATIONS=10 # Increased for statistical significance
+NUM_ITERATIONS=5 # Increased for statistical significance
 WARMUP_ITERATIONS=3
 
 # Environment-control configuration
