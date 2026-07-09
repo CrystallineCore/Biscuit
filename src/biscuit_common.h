@@ -89,7 +89,39 @@ typedef struct {
 #define CHAR_RANGE                      256
 #define TOMBSTONE_CLEANUP_THRESHOLD     1000
 #define RADIX_SORT_THRESHOLD            5000
-#define BISCUIT_LIBRARY_VERSION         "2.5.0 - Milk"
+#define BISCUIT_LIBRARY_VERSION         "2.5.0 - Lemon"
+
+/*
+ * BISCUIT_SNAPSHOT_GEN_THRESHOLD
+ *
+ * Maximum number of generation bumps (inserts/vacuums) we let accumulate
+ * in memory before forcing an eager on-disk snapshot re-save from
+ * biscuit_insert()/biscuit_bulkdelete(). Keeping the snapshot within this
+ * many generations of "live" bounds how much from-heap rebuild work a
+ * cold load has to redo when it finds the snapshot stale -- without
+ * this, a long-running backend that never triggers a natural resave
+ * could drift arbitrarily far ahead of the on-disk copy.
+ *
+ * The comparison that uses this constant is done with unsigned
+ * subtraction on idx->gen and idx->gen_at_last_snapshot (both uint64):
+ *
+ *     if (idx->gen - idx->gen_at_last_snapshot >= BISCUIT_SNAPSHOT_GEN_THRESHOLD)
+ *
+ * This is intentional and must NOT be "fixed" into a signed comparison.
+ * idx->gen is monotonically non-decreasing and gen_at_last_snapshot is
+ * always some generation that was live at an earlier point, so in
+ * normal operation idx->gen >= idx->gen_at_last_snapshot and the
+ * subtraction is just their true difference. In the astronomically
+ * unlikely event that idx->gen wraps around UINT64_MAX, unsigned
+ * subtraction still yields the correct modular distance between the two
+ * counters -- exactly the "how far behind is the snapshot" quantity we
+ * want -- whereas a signed comparison would misbehave right at the wrap
+ * boundary. There is no plan to special-case wraparound; at 2^64
+ * generations this is not a practical concern, and the eventual
+ * wraparound behavior of the unsigned subtraction is relied upon, not
+ * something to be "corrected" later.
+ */
+#define BISCUIT_SNAPSHOT_GEN_THRESHOLD   64
 
 /* ==================== MEMORY MANAGEMENT MACROS ==================== */
 
@@ -128,6 +160,24 @@ typedef struct BiscuitMetaPageData {
     uint32 version;
     BlockNumber root;
     uint32 num_records;
+
+    /*
+     * Monotonic generation counter.  Mirrors idx->gen at the time of the
+     * last biscuit_write_metadata_to_disk() call, so a cold-loaded
+     * snapshot can be recognized as stale relative to the live
+     * heap-backed state.  See the comment on idx->gen in the
+     * BiscuitIndex struct for the (intentionally non-transactional)
+     * semantics.
+     */
+    uint64 gen;
+
+    /*
+     * Reserved for future metadata.  Writers must zero-fill this; readers
+     * must ignore its contents (not rely on any value found here), so
+     * old readers stay forward-compatible with newer writers that start
+     * using a slot here.
+     */
+    uint32 reserved[4];
 } BiscuitMetaPageData;
 
 typedef BiscuitMetaPageData *BiscuitMetaPage;
@@ -217,21 +267,46 @@ typedef struct BiscuitIndex {
     int64 delete_count;
 
     /*
-     * Lazy-load / preload state.
+     * Monotonic generation counter.
      *
-     * Set to one of the BISCUIT_PRELOAD_* constants defined in
-     * biscuit_preload.h.  The field is written only by the background
-     * worker (via biscuit_complete_preload) or by beginscan when it
-     * creates a skeleton.  The rescan path reads it to decide whether
-     * to use the fast bitmap path or the fallback sequential scan.
+     * Incremented in biscuit_insert() and biscuit_bulkdelete() immediately
+     * after the in-memory bitmap mutation has completed successfully, and
+     * persisted to the metapage (BiscuitMetaPageData.gen) right away via
+     * biscuit_write_metadata_to_disk().  This lets a consumer of the
+     * on-disk snapshot (biscuit_persist.c) detect that a snapshot is
+     * stale relative to the live in-memory index.
      *
-     * Using a plain uint32 is safe because the worker and the query
-     * backend are separate OS processes; the worker writes the fully-
-     * warmed index into its own CacheMemoryContext copy and signals
-     * the owning session, which re-fetches from the cache.  There is
-     * no cross-process pointer sharing.
+     * INTENTIONALLY NON-TRANSACTIONAL: this counter is bumped as soon as
+     * the mutation lands in memory, without regard for whether the
+     * enclosing transaction ultimately commits or rolls back. A rolled
+     * back INSERT/VACUUM will still have bumped idx->gen. This means the
+     * counter can over-invalidate (mark a snapshot stale when nothing
+     * durable actually changed) but must never under-invalidate (fail to
+     * bump when a durable change occurred). Over-invalidation just costs
+     * an extra rebuild/re-snapshot; under-invalidation would let a stale
+     * snapshot silently mask real data, which is the bug this field
+     * exists to fix. Do NOT try to make this transactional (e.g. by
+     * deferring the bump to commit via a callback) -- that would
+     * reintroduce a window where a crash/cache-evict between the durable
+     * in-memory mutation and the deferred bump leaves gen unmodified while
+     * data changed, i.e. exactly the under-invalidation this exists to
+     * prevent.
      */
-    uint32 preload_state;
+    uint64 gen;
+
+    /*
+     * Generation value as of the last successful on-disk snapshot
+     * (biscuit_persist_save()).  Purely in-memory bookkeeping used to
+     * decide whether a snapshot needs to be re-taken -- it must NEVER be
+     * serialized to disk (biscuit_persist_save()/biscuit_persist_load()
+     * must not read or write this field; it is meaningless outside the
+     * process that set it, since a freshly loaded/built BiscuitIndex has
+     * no snapshot yet).
+     */
+    uint64 gen_at_last_snapshot;
+
+    /* Reserved for future in-memory bookkeeping fields. */
+    uint64 reserved[4];
 } BiscuitIndex;
 
 /* Scan opaque state */

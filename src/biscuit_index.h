@@ -16,7 +16,8 @@ extern void biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx);
 extern bool biscuit_read_metadata_from_disk(Relation index,
                                             int *num_records,
                                             int *num_columns,
-                                            int *max_len);
+                                            int *max_len,
+                                            uint64 *gen);
 
 /* ==================== INDEX BUILD & LOAD ==================== */
 
@@ -74,3 +75,4 @@ extern void   biscuit_adjustmembers(Oid opfamilyoid, Oid opclassoid,
                                     List *operators, List *functions);
 
 #endif /* BISCUIT_INDEX_H */
+

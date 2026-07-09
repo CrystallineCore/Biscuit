@@ -36,27 +36,31 @@
  *     first cold load) and should also be re-written after mutating
  *     paths (biscuit_insert / biscuit_bulkdelete) if write volume ever
  *     becomes non-trivial -- see biscuit_index.c call sites.
- *   - On load, we only sanity-check the header (magic/version) and
- *     that num_records is non-negative and columns match the index's
- *     current attribute count. We do NOT verify the snapshot reflects
- *     the current heap contents (e.g. rows added by a different
- *     session since the last save) -- callers accept this staleness
- *     window in exchange for skipping the rebuild.
+ *   - On load, we sanity-check the header (magic/version), that
+ *     num_records is non-negative and columns match the index's
+ *     current attribute count, AND that the generation recorded in
+ *     the snapshot header matches the live generation in the index's
+ *     metapage (BiscuitMetaPageData.gen). A mismatch means an insert
+ *     or vacuum has landed since the snapshot was taken, so the
+ *     snapshot is discarded with a WARNING and the caller falls back
+ *     to a normal rebuild -- we never load data known to be stale.
  */
 
 #include "biscuit_common.h"
 #include "biscuit_bitmap.h"
 #include "biscuit_cache.h"
 #include "biscuit_persist.h"
+#include "biscuit_index.h"   /* for biscuit_read_metadata_from_disk() */
 
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <errno.h>
 
-#define BISCUIT_PERSIST_MAGIC    0x42534E50  /* "BSNP" */
+#define BISCUIT_PERSIST_MAGIC    (BISCUIT_MAGIC ^ 0x01)
 #define BISCUIT_PERSIST_VERSION  2  /* v2: native roaring portable (de)serialize */
 #define BISCUIT_PERSIST_DIR      "pg_biscuit"
+#define BISCUIT_PERSIST_HEADER_RESERVED  4  /* uint32 slots reserved for future metadata */
 
 /* ================================================================
  * Path helpers
@@ -384,9 +388,8 @@ rget_bitmap_array(RStream *r, int *out_n, MemoryContext cxt)
  * ================================================================ */
 
 void
-biscuit_persist_save(Relation index, BiscuitIndex *idx)
+biscuit_persist_save(Oid indexoid, BiscuitIndex *idx)
 {
-    Oid      indexoid = RelationGetRelid(index);
     char     finalpath[MAXPGPATH];
     char     tmppath[MAXPGPATH];
     WStream  w;
@@ -409,6 +412,22 @@ biscuit_persist_save(Relation index, BiscuitIndex *idx)
     /* ---- header ---- */
     wput_u32(&w, BISCUIT_PERSIST_MAGIC);
     wput_u32(&w, BISCUIT_PERSIST_VERSION);
+    /*
+     * Generation this snapshot represents.  Written exactly once, here,
+     * as part of the shared header path -- both the single-column and
+     * multi-column serialization bodies below are pure continuations of
+     * this same write sequence and have no early-return that could skip
+     * past it.
+     */
+    wput_i64(&w, (int64) idx->gen);
+    /* Reserved for future header metadata; zero-filled so old readers
+     * (there are none yet, but this keeps the pattern consistent with
+     * the metapage's own reserved slots) ignore it safely. */
+    {
+        int resv;
+        for (resv = 0; resv < BISCUIT_PERSIST_HEADER_RESERVED; resv++)
+            wput_u32(&w, 0);
+    }
     wput_i32(&w, idx->num_columns);
     wput_i32(&w, idx->num_records);
     wput_i32(&w, idx->capacity);
@@ -517,8 +536,17 @@ biscuit_persist_save(Relation index, BiscuitIndex *idx)
         return;
     }
 
-    elog(DEBUG1, "biscuit: wrote disk snapshot for index %u (%d records)",
-         indexoid, idx->num_records);
+    /*
+     * Only record the snapshot as "up to date" once it has actually
+     * landed on disk under its real name -- any earlier return above
+     * (write error, fsync-visible failure via rename, etc.) leaves
+     * gen_at_last_snapshot untouched so the next save attempt is not
+     * skipped.
+     */
+    idx->gen_at_last_snapshot = idx->gen;
+
+    elog(DEBUG1, "biscuit: wrote disk snapshot for index %u (%d records, gen " UINT64_FORMAT ")",
+         indexoid, idx->num_records, idx->gen);
 }
 
 /* ================================================================
@@ -534,6 +562,10 @@ biscuit_persist_load(Relation index)
     BiscuitIndex  *idx = NULL;
     MemoryContext  oldcontext;
     uint32         magic, version;
+    uint64         snapshot_gen;
+    uint64         live_gen;
+    bool           have_live_gen;
+    int            reserved_slot;
     int            natts = index->rd_index->indnatts;
     int            ch, i;
 
@@ -550,6 +582,48 @@ biscuit_persist_load(Relation index)
     if (r.error || magic != BISCUIT_PERSIST_MAGIC || version != BISCUIT_PERSIST_VERSION)
     {
         elog(DEBUG1, "biscuit: snapshot \"%s\" missing/incompatible, ignoring", path);
+        fclose(r.fp);
+        return NULL;
+    }
+
+    snapshot_gen = (uint64) rget_i64(&r);
+    for (reserved_slot = 0; reserved_slot < BISCUIT_PERSIST_HEADER_RESERVED; reserved_slot++)
+        (void) rget_u32(&r);
+
+    if (r.error)
+    {
+        elog(DEBUG1, "biscuit: snapshot \"%s\" truncated header, ignoring", path);
+        fclose(r.fp);
+        return NULL;
+    }
+
+    /*
+     * The metapage's gen is the authoritative "current generation" --
+     * if it differs from the generation this snapshot was taken at,
+     * some insert/vacuum has landed since the snapshot was written and
+     * it must not be loaded, even though its magic/version are fine.
+     *
+     * biscuit_read_metadata_from_disk() unconditionally dereferences its
+     * num_records/num_columns/max_len out-params (only "gen" tolerates
+     * NULL), so we must pass real storage for them even though we only
+     * care about gen here.
+     */
+    {
+        int unused_records, unused_columns, unused_max_len;
+
+        have_live_gen = biscuit_read_metadata_from_disk(index,
+                                                         &unused_records,
+                                                         &unused_columns,
+                                                         &unused_max_len,
+                                                         &live_gen);
+    }
+
+    if (have_live_gen && live_gen != snapshot_gen)
+    {
+        elog(WARNING, "biscuit: snapshot \"%s\" is stale (snapshot gen "
+                       UINT64_FORMAT ", current gen " UINT64_FORMAT "), "
+                       "discarding and falling back to rebuild",
+             path, snapshot_gen, live_gen);
         fclose(r.fp);
         return NULL;
     }
@@ -706,7 +780,16 @@ biscuit_persist_load(Relation index)
         if (r.error)
             ereport(ERROR, (errmsg("biscuit: truncated snapshot for index %u", indexoid)));
 
-        idx->preload_state = 0;
+        /*
+         * Initialize the in-memory generation counters from the
+         * snapshot we just loaded.  gen mirrors what was live when the
+         * snapshot was taken (already verified above to match the
+         * metapage), and gen_at_last_snapshot is set to match it since
+         * this loaded copy *is* the last snapshot -- it must not be
+         * treated as needing an immediate re-save.
+         */
+        idx->gen                 = snapshot_gen;
+        idx->gen_at_last_snapshot = snapshot_gen;
     }
     PG_CATCH();
     {
@@ -729,8 +812,8 @@ biscuit_persist_load(Relation index)
     MemoryContextSwitchTo(oldcontext);
     fclose(r.fp);
 
-    elog(DEBUG1, "biscuit: loaded disk snapshot for index %u (%d records)",
-         indexoid, idx->num_records);
+    elog(DEBUG1, "biscuit: loaded disk snapshot for index %u (%d records, gen " UINT64_FORMAT ")",
+         indexoid, idx->num_records, idx->gen);
 
     return idx;
 }

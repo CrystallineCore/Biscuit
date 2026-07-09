@@ -45,6 +45,8 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
     meta->version = BISCUIT_VERSION;
     meta->num_records = idx->num_records;
     meta->root    = 0;
+    meta->gen     = idx->gen;
+    memset(meta->reserved, 0, sizeof(meta->reserved));
 
     GenericXLogFinish(state);
     UnlockReleaseBuffer(buf);
@@ -54,7 +56,8 @@ bool
 biscuit_read_metadata_from_disk(Relation index,
                                 int *num_records,
                                 int *num_columns,
-                                int *max_len)
+                                int *max_len,
+                                uint64 *gen)
 {
     Buffer             buf;
     Page               page;
@@ -64,6 +67,7 @@ biscuit_read_metadata_from_disk(Relation index,
     if (nblocks == 0)
     {
         *num_records = *num_columns = *max_len = 0;
+        if (gen) *gen = 0;
         return false;
     }
 
@@ -75,6 +79,7 @@ biscuit_read_metadata_from_disk(Relation index,
     {
         UnlockReleaseBuffer(buf);
         *num_records = *num_columns = *max_len = 0;
+        if (gen) *gen = 0;
         return false;
     }
 
@@ -84,12 +89,15 @@ biscuit_read_metadata_from_disk(Relation index,
     {
         UnlockReleaseBuffer(buf);
         *num_records = *num_columns = *max_len = 0;
+        if (gen) *gen = 0;
         return false;
     }
 
     *num_records = meta->num_records;
     *num_columns = 0;
     *max_len     = 0;
+    /* meta->reserved is intentionally not surfaced to callers. */
+    if (gen) *gen = meta->gen;
 
     UnlockReleaseBuffer(buf);
     return true;
@@ -619,6 +627,16 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
         idx->max_len      = 0;
         idx->tids         = (ItemPointerData *) palloc(idx->capacity * sizeof(ItemPointerData));
 
+        /*
+         * A freshly built index starts life at generation 0.  gen is
+         * bumped from here on by biscuit_insert()/biscuit_bulkdelete();
+         * gen_at_last_snapshot is set to match once the snapshot below is
+         * actually taken, so it starts "in sync" rather than falsely
+         * looking stale.
+         */
+        idx->gen                 = 0;
+        idx->gen_at_last_snapshot = 0;
+
         if (natts == 1)
         {
             /* ---- Single-column initialisation ---- */
@@ -1003,7 +1021,8 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
          * a failed/skipped write here just means the next cold load pays
          * the normal rebuild cost, it never fails the build itself.
          */
-        biscuit_persist_save(index, idx);
+        biscuit_persist_save(RelationGetRelid(index), idx);
+        idx->gen_at_last_snapshot = idx->gen;
 
         biscuit_register_callback();
         /*
@@ -1066,6 +1085,27 @@ biscuit_load_index(Relation index)
     idx = biscuit_persist_load(index);
     if (idx)
     {
+        /*
+         * biscuit_persist_load() never touches idx->gen /
+         * idx->gen_at_last_snapshot (the snapshot format deliberately
+         * doesn't carry them -- see the field comments in
+         * BiscuitIndex). The authoritative generation counter lives in
+         * the metapage, so pull it from there now; a missing/unreadable
+         * metapage just leaves us at generation 0, which is safe (it
+         * only means the next mutation's bump is the first one this
+         * process observes).
+         */
+        {
+            int      unused_records, unused_columns, unused_max_len;
+            uint64   disk_gen = 0;
+
+            biscuit_read_metadata_from_disk(index, &unused_records,
+                                            &unused_columns, &unused_max_len,
+                                            &disk_gen);
+            idx->gen                 = disk_gen;
+            idx->gen_at_last_snapshot = disk_gen;
+        }
+
         biscuit_register_callback();
         biscuit_cache_insert(RelationGetRelid(index), idx);
         return idx;
@@ -1470,6 +1510,42 @@ biscuit_insert(Relation index,
         idx->insert_count++;
 
     /*
+     * Bump the generation counter now that the in-memory bitmap mutation
+     * above has completed successfully, and persist it immediately.
+     *
+     * INTENTIONALLY NON-TRANSACTIONAL: this happens unconditionally, with
+     * no regard for whether the surrounding transaction commits or rolls
+     * back. If the transaction later aborts, idx->gen (and the on-disk
+     * copy) stays bumped anyway -- that's over-invalidation, which is
+     * harmless (worst case: an unnecessary future re-snapshot). The
+     * alternative -- deferring the bump until commit -- would risk
+     * under-invalidation (a durable mutation that isn't reflected in
+     * gen), which is the actual correctness bug this counter exists to
+     * prevent. Do not "fix" this by hooking commit/abort.
+     *
+     * This runs unconditionally for both the legacy single-column and
+     * multi-column paths above -- it is not gated on
+     * idx->num_columns == 1.
+     */
+    idx->gen++;
+    biscuit_write_metadata_to_disk(index, idx);
+
+    /*
+     * Keep the on-disk snapshot from drifting too far behind the live
+     * in-memory index. If enough generation bumps have piled up since
+     * the last successful snapshot, save eagerly right now rather than
+     * waiting for some other trigger. See the comment on
+     * BISCUIT_SNAPSHOT_GEN_THRESHOLD for why this subtraction is
+     * unsigned and intentionally left that way (including eventual
+     * wraparound). biscuit_persist_save() itself only advances
+     * idx->gen_at_last_snapshot when the write actually succeeds, so a
+     * failed save here is retried on the next insert/vacuum that trips
+     * the threshold rather than being silently forgotten.
+     */
+    if (idx->gen - idx->gen_at_last_snapshot >= BISCUIT_SNAPSHOT_GEN_THRESHOLD)
+        biscuit_persist_save(RelationGetRelid(index), idx);
+
+    /*
      * FIX 2 — INSERT → SELECT returns 0.
      *
      * Write the updated index back into the global cache so the next
@@ -1682,6 +1758,26 @@ biscuit_bulkdelete(IndexVacuumInfo *info,
         idx->tombstone_count = 0;
     }
 
+    /*
+     * Bump the generation counter now that the in-memory bitmap mutation
+     * above has completed successfully, and persist it immediately. See
+     * the matching comment in biscuit_insert() -- this is intentionally
+     * non-transactional (over-invalidation on rollback is acceptable,
+     * under-invalidation is not) and runs unconditionally for both the
+     * legacy single-column and multi-column deletion paths above, not
+     * gated on idx->num_columns == 1.
+     */
+    idx->gen++;
+    biscuit_write_metadata_to_disk(index, idx);
+
+    /*
+     * Same eager-resave backstop as biscuit_insert() -- see the comment
+     * there and on BISCUIT_SNAPSHOT_GEN_THRESHOLD. Unsigned subtraction
+     * is intentional.
+     */
+    if (idx->gen - idx->gen_at_last_snapshot >= BISCUIT_SNAPSHOT_GEN_THRESHOLD)
+        biscuit_persist_save(RelationGetRelid(index), idx);
+
     MemoryContextSwitchTo(oldcontext);
 
     stats->num_pages   = 1;
@@ -1698,7 +1794,26 @@ biscuit_bulkdelete(IndexVacuumInfo *info,
 IndexBulkDeleteResult *
 biscuit_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 {
-    (void) info;
+    Relation      index = info->index;
+    BiscuitIndex *idx;
+
+    /*
+     * Backstop: whatever the eager per-mutation threshold in
+     * biscuit_insert()/biscuit_bulkdelete() didn't already catch, make
+     * sure a full VACUUM leaves the on-disk snapshot current. Only do
+     * the work if the generation has actually moved since the last
+     * successful save -- if gen == gen_at_last_snapshot the snapshot is
+     * already up to date and there's nothing to do.
+     *
+     * This intentionally does not use info->analyze_only/bulkdelete
+     * flags to decide whether to run: a cleanup-only VACUUM (no rows
+     * deleted this cycle) can still be catching up on inserts that
+     * happened since the last save, and this check is cheap.
+     */
+    idx = biscuit_cache_lookup(RelationGetRelid(index));
+    if (idx && idx->gen != idx->gen_at_last_snapshot)
+        biscuit_persist_save(RelationGetRelid(index), idx);
+
     return stats;
 }
 

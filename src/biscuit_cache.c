@@ -10,6 +10,7 @@
 
 #include "biscuit_common.h"
 #include "biscuit_cache.h"
+#include "biscuit_persist.h"
 
 /* ==================== CACHE STATE ==================== */
 
@@ -136,8 +137,44 @@ biscuit_relcache_callback(Datum arg, Oid relid)
 static void
 biscuit_module_unload_callback(int code, unsigned long datum)
 {
+    BiscuitIndexCacheEntry *entry;
+
     (void) code;
     (void) datum;
+
+    /*
+     * Flush any index whose in-memory generation has moved past what's
+     * on disk before we drop the cache.
+     *
+     * This is the missing half of the eager-resave story: bulkdelete
+     * and vacuumcleanup always get an unconditional flush for free
+     * because a VACUUM always ends by calling biscuit_vacuumcleanup(),
+     * which force-saves whenever gen != gen_at_last_snapshot. Plain
+     * INSERTs have no equivalent guaranteed call site -- they only get
+     * persisted eagerly once BISCUIT_SNAPSHOT_GEN_THRESHOLD generations
+     * have piled up (see biscuit_insert() in biscuit_index.c). A
+     * session that inserts fewer rows than that threshold and then
+     * disconnects was leaving those rows' bitmap state unsaved forever,
+     * even though the tuples themselves are safely committed in the
+     * heap -- the next cold load would silently fall back to a full
+     * from-heap rebuild instead of finding a stale-but-recoverable
+     * snapshot, which defeats the point of snapshotting at all.
+     *
+     * biscuit_persist_save() only needs the indexoid (not a live
+     * Relation), which is exactly what we have in the cache entry, so
+     * this is safe to call this late in backend shutdown -- no catalog
+     * access required.
+     */
+    for (entry = biscuit_cache_head; entry != NULL; entry = entry->next)
+    {
+        if (entry->index != NULL && entry->index->gen != entry->index->gen_at_last_snapshot)
+        {
+            elog(DEBUG1, "Biscuit: Flushing unsaved snapshot for index %u at proc-exit",
+                 entry->indexoid);
+            biscuit_persist_save(entry->indexoid, entry->index);
+        }
+    }
+
     elog(DEBUG1, "Biscuit: Module unload - clearing all cache entries");
     biscuit_cache_head          = NULL;
     biscuit_callback_registered = false;

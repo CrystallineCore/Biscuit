@@ -31,8 +31,7 @@ extern void           biscuit_set_neg_bitmap_lower(BiscuitIndex *idx, unsigned c
 /*
  * Multi-column equivalents: operate on a ColumnIndex * directly instead of
  * routing through the top-level BiscuitIndex legacy fields.
- * Used by biscuit_index_column_record() during index build and by the
- * biscuit_complete_preload_local() warm-up path.
+ * Used by biscuit_index_column_record() during index build.
  */
 extern RoaringBitmap *biscuit_get_col_pos_bitmap(ColumnIndex *col, unsigned char ch, int pos);
 extern RoaringBitmap *biscuit_get_col_neg_bitmap(ColumnIndex *col, unsigned char ch, int neg_offset);
