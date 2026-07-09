@@ -26,6 +26,8 @@
 #include "biscuit_index.h"
 #include "biscuit_scan.h"
 #include "biscuit_tid.h"
+#include "biscuit_cache.h"
+#include "biscuit_persist.h"
 
 /* ================================================================
  * MODULE MAGIC
@@ -42,16 +44,98 @@
  *
  * Biscuit has no shared-memory state or background workers: every
  * BiscuitIndex is built (or rebuilt) synchronously and kept in the
- * session-scoped cache (biscuit_cache.c), so there is nothing to
- * register here.
+ * session-scoped cache (biscuit_cache.c). The one thing we *do* need
+ * to register here is an object_access_hook: biscuit_persist.c writes
+ * a companion snapshot file per index under $PGDATA/pg_biscuit/, and
+ * nothing in the core AM callback table (ambuild/aminsert/ambulkdelete/
+ * amvacuumcleanup) is invoked on DROP INDEX or on the "drop the old
+ * index" step of REINDEX CONCURRENTLY. Without a hook here those
+ * on-disk files are orphaned forever -- the relcache callback in
+ * biscuit_cache.c evicts the in-memory entry, but never touches the
+ * file on disk. See biscuit_object_access_hook() below.
  * ================================================================ */
+
+/*
+ * OID of the "biscuit" access method, resolved and cached on first use.
+ * Looked up lazily (rather than at _PG_init time) because pg_am may not
+ * yet contain our row the moment the library is loaded -- CREATE
+ * EXTENSION populates it via the SQL script, and _PG_init can run
+ * before or after that depending on how the library was loaded.
+ */
+static Oid biscuit_am_oid = InvalidOid;
+
+static Oid
+biscuit_get_am_oid(void)
+{
+    if (!OidIsValid(biscuit_am_oid))
+    {
+        HeapTuple amtup = SearchSysCache1(AMNAME, CStringGetDatum("biscuit"));
+
+        if (HeapTupleIsValid(amtup))
+        {
+            biscuit_am_oid = ((Form_pg_am) GETSTRUCT(amtup))->oid;
+            ReleaseSysCache(amtup);
+        }
+    }
+    return biscuit_am_oid;
+}
+
+static object_access_hook_type prev_object_access_hook = NULL;
+
+/*
+ * Fired for every dropped object in the backend (tables, indexes,
+ * functions, ...). We only care about OAT_DROP on pg_class entries
+ * that are (a) indexes and (b) belong to our AM -- everything else is
+ * ignored immediately.
+ *
+ * This covers both DROP INDEX (direct call with the dropped index's
+ * OID) and REINDEX CONCURRENTLY (which builds a new index under a new
+ * OID, swaps relfilenodes, then drops the old index under its
+ * original OID -- so the old snapshot file is cleaned up here too).
+ * Plain REINDEX keeps the same index OID and goes back through
+ * biscuit_build(), which naturally overwrites the existing snapshot
+ * file in place, so there's nothing extra to do for that case.
+ */
+static void
+biscuit_object_access_hook(ObjectAccessType access, Oid classId,
+                            Oid objectId, int subId, void *arg)
+{
+    if (prev_object_access_hook)
+        prev_object_access_hook(access, classId, objectId, subId, arg);
+
+    if (access != OAT_DROP || classId != RelationRelationId || subId != 0)
+        return;
+
+    {
+        HeapTuple tup = SearchSysCache1(RELOID, ObjectIdGetDatum(objectId));
+
+        if (!HeapTupleIsValid(tup))
+            return;
+
+        {
+            Form_pg_class relform = (Form_pg_class) GETSTRUCT(tup);
+
+            if (relform->relkind == RELKIND_INDEX &&
+                relform->relam == biscuit_get_am_oid())
+            {
+                biscuit_cache_remove(objectId);
+                biscuit_persist_drop(objectId);
+                elog(DEBUG1, "Biscuit: Removed orphaned snapshot for dropped index %u",
+                     objectId);
+            }
+        }
+
+        ReleaseSysCache(tup);
+    }
+}
 
 void _PG_init(void);
 
 void
 _PG_init(void)
 {
-    /* Nothing to do. */
+    prev_object_access_hook = object_access_hook;
+    object_access_hook      = biscuit_object_access_hook;
 }
 
 /* ================================================================
