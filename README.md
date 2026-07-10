@@ -23,21 +23,34 @@ At this stage, the extension is best suited for evaluation, experimentation, and
 **Note:** Release 2.4.1 contains no functional changes to Biscuit. It is equivalent to Biscuit 2.4.0 and only updates the Makefile to address build compatibility issues.
 
 ---
-## What's new in Version 2.4.2?
+## What's new in Version 2.5.0?
+
+### New Features
+
+* **Persistent on-disk snapshots for fast index reload.** `BiscuitIndex` state can now be saved to disk and restored at server startup without rebuilding from the heap. Snapshots persist index metadata, record bookkeeping (`tids`, tombstones, free list), cached string data, and per-character and length-based bitmap structures for both single- and multi-column indexes. Bitmaps are serialized using CRoaring's portable format when available, with a raw bitmap fallback otherwise. Snapshots are written atomically (temp file → `fsync()` → rename) to prevent partial writes, and magic/version validation rejects incompatible formats on load. This significantly reduces restart time by avoiding a full heap rebuild.
+
+* **Generation-based staleness detection for snapshots.** A monotonic generation counter (`gen`) is now incremented after successful inserts and vacuum deletions and persisted to the metapage. Each snapshot records the generation it was written at; on load, this is compared against the live metapage value, and stale snapshots are discarded with a `WARNING`, falling back to a normal heap rebuild. Snapshots are automatically rewritten after a configurable number of mutations, during `VACUUM` cleanup when needed, and at backend shutdown if unsaved changes remain. The generation is only advanced after a successful save, so failed writes are retried.
 
 ### Bug Fixes
 
-* **Fixed a use-after-free in the index cache.** `BiscuitIndex` objects were inadvertently owned by both `biscuit_cache` and PostgreSQL's `rd_amcache`, allowing relcache invalidation to leave stale pointers in the session cache. `biscuit_cache` is now the sole owner of `BiscuitIndex` objects.
+* **Fixed wildcard handling for substring `LIKE`/`ILIKE` matching.** The `%needle%` fast path used `strstr()`, which treated `_` as a literal character rather than a SQL wildcard, and always seeded candidate bitmaps from the first pattern byte — causing patterns like `%_lex%` to search on `_` instead of the first concrete character. Substring verification now uses the wildcard-aware `biscuit_wildcard_contains()`, and candidate seeding uses `biscuit_part_seed_byte()`, which skips leading wildcards (falling back to length-based candidates when no concrete seed exists). This restores correct results for `LIKE`, `ILIKE`, `NOT LIKE`, `NOT ILIKE`, and compound predicates involving `_`.
 
-### Build
+* **Fixed single-column `ILIKE` length bitmap allocation.** The single-column build path computed `max_length_lower` incorrectly, causing all single-column `ILIKE` queries to fail their length bounds checks. This was a regression from the preceding `libroaring` crash fix, which removed a per-record update the allocation had been silently relying on. `max_length_lower` is now computed directly from `data_cache_lower`, matching the multi-column implementation.
 
-* **Fixed compiler warnings for unused parameters.** Contributed by Devrim Gündüz.
-* **Fixed signed/unsigned comparison warnings.**
-* **Fixed an unused-variable warning** in `biscuit_rescan_multicolumn`.
+* **Fixed out-of-bounds access in bitmap lookups.** Tightened boundary checks to prevent invalid bitmap array accesses that could trigger crashes in CRoaring.
 
-### Biscuit
+* **Fixed NULL row handling during index build.** `biscuit_build()` previously skipped an entire row if any indexed column was `NULL`, omitting the row's TID from the index and making its non-NULL columns unsearchable. The row-level NULL check has been removed in favor of the existing per-column handling, matching `biscuit_insert()`.
 
-* Version bumped to **2.4.2**.
+* **Fixed off-by-one bounds in length "≥" bitmap lookups.** Requests where the minimum length equaled the maximum indexed length could read past the end of the bitmap arrays; bounds checks are now tightened while preserving correct behavior for valid lengths.
+
+### Internal Changes
+
+* **Replaced background preload with synchronous cache loading.** Removed the skeleton preload pipeline, background worker, associated shared-memory state, and fallback scan path. Indexes are now built synchronously on cache miss and cached fully initialized, simplifying the codebase and eliminating much of warm-up latency.
+
+* **`biscuit_persist_save()`** now accepts an `Oid` instead of a `Relation`.
+
+* Reserved padding in snapshot and metapage headers for future metadata.
+
 ---
 
 ##  **Installation**
