@@ -85,6 +85,32 @@ typedef struct {
 #define BISCUIT_ILIKE_STRATEGY          3
 #define BISCUIT_NOT_ILIKE_STRATEGY      4
 
+/* ==================== OPCLASS CASE-MODE GATING ==================== */
+/*
+ * Per-column bit flags recording which structure set(s) a given index
+ * column was actually built with, derived from the opclass/opfamily the
+ * user chose for that column (biscuit_ops, biscuit_like_ops, or
+ * biscuit_ilike_ops -- see biscuit.sql).
+ *
+ *   BISCUIT_MODE_LIKE  -- build/maintain the case-sensitive structures
+ *                         (pos_idx/neg_idx/char_cache/length_bitmaps and
+ *                         their non-"_lower" counterparts). Needed to
+ *                         serve LIKE / NOT LIKE.
+ *   BISCUIT_MODE_ILIKE -- build/maintain the case-insensitive "_lower"
+ *                         structures. Needed to serve ILIKE / NOT ILIKE.
+ *
+ * biscuit_ops builds both (BISCUIT_MODE_BOTH); biscuit_like_ops builds
+ * only BISCUIT_MODE_LIKE; biscuit_ilike_ops builds only
+ * BISCUIT_MODE_ILIKE. These flags are derived at build/load time from
+ * the index relation's opfamily (see biscuit_get_column_case_mode() in
+ * biscuit_index.c) and are never themselves persisted to disk -- the
+ * on-disk snapshot only ever contains whichever structures were built,
+ * and the mode is always recomputed fresh from the live Relation.
+ */
+#define BISCUIT_MODE_LIKE               0x1
+#define BISCUIT_MODE_ILIKE              0x2
+#define BISCUIT_MODE_BOTH               (BISCUIT_MODE_LIKE | BISCUIT_MODE_ILIKE)
+
 /* ==================== CONSTANTS ==================== */
 
 #define BISCUIT_MAGIC                   0x42495343  /* "BISC" */
@@ -93,7 +119,7 @@ typedef struct {
 #define CHAR_RANGE                      256
 #define TOMBSTONE_CLEANUP_THRESHOLD     1000
 #define RADIX_SORT_THRESHOLD            5000
-#define BISCUIT_LIBRARY_VERSION         "2.5.0 - Testing"
+#define BISCUIT_LIBRARY_VERSION         "2.6.0 - Testing"
 
 /*
  * BISCUIT_SNAPSHOT_GEN_THRESHOLD
@@ -216,6 +242,16 @@ typedef struct BiscuitIndex {
     ColumnIndex *column_indices;
 
     /*
+     * Per-column case-mode gating (BISCUIT_MODE_LIKE / BISCUIT_MODE_ILIKE
+     * / BISCUIT_MODE_BOTH), one entry per column, indexed in lockstep with
+     * column_indices[]. Derived from each column's opclass at build/load
+     * time via biscuit_get_column_case_mode() -- see biscuit_index.c.
+     * Only allocated when num_columns > 1; NULL otherwise (the
+     * single-column/legacy case uses legacy_case_mode below instead).
+     */
+    uint8 *column_case_mode;
+
+    /*
      * Pre-lowercased string cache for multi-column indexes.
      * column_data_cache_lower[col][rec] mirrors column_data_cache[col][rec]
      * but with every string run through biscuit_str_tolower() at build /
@@ -249,6 +285,13 @@ typedef struct BiscuitIndex {
     RoaringBitmap **length_bitmaps_lower;
     RoaringBitmap **length_ge_bitmaps_lower;
     int max_length_lower;
+
+    /*
+     * Case-mode gating for the single-column (legacy) fields above,
+     * mirroring column_case_mode[] for the multi-column case. Derived
+     * from the sole column's opclass via biscuit_get_column_case_mode().
+     */
+    uint8 legacy_case_mode;
 
     char **data_cache_lower;
 

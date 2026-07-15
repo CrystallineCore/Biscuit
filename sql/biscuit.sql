@@ -1,15 +1,23 @@
--- biscuit--2.4.0.sql
+-- biscuit--2.5.0.sql
 -- SQL installation script for Biscuit Index Access Method
 -- PostgreSQL 15+ compatible with full CRUD support and multi-column indexes
 --
 -- Features:
--- - LIKE and ILIKE support (case-sensitive and case-insensitive)
+-- - LIKE and ILIKE support (case-sensitive and case-insensitive), selectable
+--   per index via three opclasses: biscuit_ops (both, default),
+--   biscuit_like_ops (LIKE only), biscuit_ilike_ops (ILIKE only) -- see
+--   the OPERATOR CLASSES section below for details and cost tradeoffs
 -- - O(1) lazy deletion with tombstones
 -- - Incremental insert/update
 -- - Automatic slot reuse
 -- - Full VACUUM integration
 -- - Multi-column index support
 -- - Mixed data type support
+--
+-- NOTE: this is a fresh-install script. A biscuit--2.4.0--2.5.0.sql
+-- upgrade script (ALTER EXTENSION path) still needs to be written
+-- separately -- existing 2.4.0 installs have a biscuit_text_ops opclass
+-- on disk that this script does not know how to migrate in place.
 
 -- Complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION biscuit" to load this file. \quit
@@ -110,23 +118,83 @@ COMMENT ON FUNCTION biscuit_index_stats(oid) IS
 Usage: SELECT biscuit_index_stats(''index_name''::regclass::oid);';
 
 -- ==================== OPERATOR CLASSES ====================
-
--- Default operator class for TEXT type.
--- Supports: LIKE (~~), NOT LIKE (!~~), ILIKE (~~*), NOT ILIKE (!~~*)
+--
+-- Three opclasses are provided for TEXT so callers can choose how much
+-- build-time/memory cost to pay for the case-insensitive (ILIKE) side of
+-- the index. Building the `_lower` position/length/char-cache structures
+-- (see biscuit_index.c / biscuit_common.h) roughly doubles per-column
+-- memory usage and build time, so a LIKE-only workload should not have
+-- to pay for it.
+--
+-- Each opclass declares its own opfamily so that the *set of operators
+-- pg_amop knows about* is what actually gates planner eligibility --
+-- e.g. an index built with biscuit_like_ops will never even be
+-- considered by the planner for an ILIKE qual, regardless of what
+-- biscuit_costestimate() would have said. biscuit_build()/
+-- biscuit_load_index() separately introspect which opclass was chosen
+-- per column (via the index relation's pg_index/pg_opclass data) to
+-- decide whether to allocate/populate the case-sensitive structures,
+-- the case-insensitive `_lower` structures, or both.
+--
+--   biscuit_ops        - LIKE + ILIKE (default; builds both structure sets)
+--   biscuit_like_ops    - LIKE / NOT LIKE only (case-sensitive structures only)
+--   biscuit_ilike_ops   - ILIKE / NOT ILIKE only (case-insensitive structures only)
 --
 -- FIX #2 (was FUNCTION 1 biscuit_like_support(internal) with RETURNS bool):
 -- Now that biscuit_like_support is correctly declared RETURNS internal above,
 -- registering it as opclass support function 1 works as intended.
-CREATE OPERATOR CLASS biscuit_text_ops
-DEFAULT FOR TYPE text USING biscuit AS
+
+-- ---- biscuit_ops (default): LIKE + ILIKE, builds both structure sets ----
+CREATE OPERATOR FAMILY biscuit_ops USING biscuit;
+
+CREATE OPERATOR CLASS biscuit_ops
+DEFAULT FOR TYPE text USING biscuit FAMILY biscuit_ops AS
     OPERATOR 1 ~~ (text, text),      -- LIKE
     OPERATOR 2 !~~ (text, text),     -- NOT LIKE
     OPERATOR 3 ~~* (text, text),     -- ILIKE (case-insensitive)
     OPERATOR 4 !~~* (text, text),    -- NOT ILIKE (case-insensitive)
     FUNCTION 1 biscuit_like_support(internal);
 
-COMMENT ON OPERATOR CLASS biscuit_text_ops USING biscuit IS
-'Operator class for text types - supports LIKE, NOT LIKE, ILIKE, NOT ILIKE.
+COMMENT ON OPERATOR CLASS biscuit_ops USING biscuit IS
+'Default operator class for text types - supports LIKE, NOT LIKE, ILIKE, and
+NOT ILIKE. Builds both the case-sensitive and case-insensitive (_lower)
+index structures for every column, so it costs roughly 2x the memory/build
+time of biscuit_like_ops or biscuit_ilike_ops alone. Use biscuit_like_ops or
+biscuit_ilike_ops instead if you only need one case-sensitivity mode.
+VARCHAR types will implicitly cast to text to use this class.';
+
+-- ---- biscuit_like_ops: LIKE / NOT LIKE only ----
+CREATE OPERATOR FAMILY biscuit_like_ops USING biscuit;
+
+CREATE OPERATOR CLASS biscuit_like_ops
+FOR TYPE text USING biscuit FAMILY biscuit_like_ops AS
+    OPERATOR 1 ~~ (text, text),      -- LIKE
+    OPERATOR 2 !~~ (text, text),     -- NOT LIKE
+    FUNCTION 1 biscuit_like_support(internal);
+
+COMMENT ON OPERATOR CLASS biscuit_like_ops USING biscuit IS
+'Operator class for text types - supports LIKE and NOT LIKE only. ILIKE and
+NOT ILIKE queries cannot use an index built with this opclass; the planner
+will fall back to a sequential scan (or another eligible index) for those
+quals. Skips building the case-insensitive (_lower) index structures,
+roughly halving memory usage and build time versus biscuit_ops.
+VARCHAR types will implicitly cast to text to use this class.';
+
+-- ---- biscuit_ilike_ops: ILIKE / NOT ILIKE only ----
+CREATE OPERATOR FAMILY biscuit_ilike_ops USING biscuit;
+
+CREATE OPERATOR CLASS biscuit_ilike_ops
+FOR TYPE text USING biscuit FAMILY biscuit_ilike_ops AS
+    OPERATOR 3 ~~* (text, text),     -- ILIKE (case-insensitive)
+    OPERATOR 4 !~~* (text, text),    -- NOT ILIKE (case-insensitive)
+    FUNCTION 1 biscuit_like_support(internal);
+
+COMMENT ON OPERATOR CLASS biscuit_ilike_ops USING biscuit IS
+'Operator class for text types - supports ILIKE and NOT ILIKE only. LIKE and
+NOT LIKE queries cannot use an index built with this opclass; the planner
+will fall back to a sequential scan (or another eligible index) for those
+quals. Skips building the case-sensitive index structures, roughly halving
+memory usage and build time versus biscuit_ops.
 VARCHAR types will implicitly cast to text to use this class.';
 
 -- FIX #9: An earlier revision attempted a native biscuit_bpchar_ops
@@ -148,7 +216,8 @@ VARCHAR types will implicitly cast to text to use this class.';
 -- There are two real ways to get indexed LIKE/ILIKE on a CHAR(n) column:
 --
 -- 1. (Available now, no code changes) Build a Biscuit EXPRESSION index on
---    the text cast, which biscuit_text_ops can serve directly:
+--    the text cast, which biscuit_ops (or biscuit_like_ops / biscuit_ilike_ops,
+--    depending on which operators you need) can serve directly:
 --      CREATE INDEX idx_name ON my_table USING biscuit ((char_col::text));
 --    Queries using `char_col::text LIKE 'pattern'` or `char_col LIKE
 --    'pattern'` (where the planner inserts the same cast) can then use it.
@@ -259,9 +328,12 @@ WHERE am.amname = 'biscuit'
 ORDER BY opf.opfname, amop.amopstrategy;
 
 COMMENT ON VIEW biscuit_operators IS
-'Shows which operators are registered for Biscuit indexes.
-Currently text (via biscuit_text_ops); CHAR(n)/bpchar columns are
-supported via an expression index on (col::text), not a native opclass.';
+'Shows which operators are registered for Biscuit indexes, grouped by
+opfamily. Text columns can use biscuit_ops (LIKE+ILIKE, default),
+biscuit_like_ops (LIKE/NOT LIKE only), or biscuit_ilike_ops (ILIKE/NOT ILIKE
+only) -- each has its own opfamily, so this view will show a separate row
+group per opclass actually in use. CHAR(n)/bpchar columns are supported via
+an expression index on (col::text), not a native opclass.';
 
 -- FIX #4: The original SUM() returned NULL when no Biscuit indexes exist,
 -- causing pg_size_pretty() to show NULL instead of a meaningful value.
@@ -407,7 +479,9 @@ INSERT INTO biscuit_version_table (version, description) VALUES
 
 ('2.3.0', 'Parallel index scans, faster ILIKE execution, and major cache correctness improvements'),
 
-('2.4.0', 'Added expression index support and improved parallel scan and datatype compatibility');
+('2.4.0', 'Added expression index support and improved parallel scan and datatype compatibility'),
+
+('2.5.0', 'Split biscuit_text_ops into biscuit_ops (default, LIKE+ILIKE), biscuit_like_ops (LIKE-only), and biscuit_ilike_ops (ILIKE-only) so LIKE-only or ILIKE-only indexes no longer build the unused case-sensitivity structures');
 
 
 COMMENT ON TABLE biscuit_version_table IS

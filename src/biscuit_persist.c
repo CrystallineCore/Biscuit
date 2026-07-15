@@ -700,6 +700,26 @@ biscuit_persist_load(Relation index)
         idx->num_records = num_records;
         idx->capacity    = Max(capacity, 1);
 
+        /*
+         * Case-mode gating (BISCUIT_MODE_LIKE / BISCUIT_MODE_ILIKE) is
+         * deliberately NOT part of the on-disk snapshot format -- it is
+         * always recomputed fresh from the live index Relation's opclass
+         * (index->rd_opfamily), so a snapshot taken under one opclass and
+         * then loaded after a REINDEX to a different opclass can never
+         * serve the wrong structure set. See biscuit_get_column_case_mode()
+         * in biscuit_index.c.
+         */
+        if (num_columns == 1)
+        {
+            idx->legacy_case_mode = biscuit_get_column_case_mode(index, 0);
+        }
+        else
+        {
+            idx->column_case_mode = (uint8 *) palloc(num_columns * sizeof(uint8));
+            for (i = 0; i < num_columns; i++)
+                idx->column_case_mode[i] = biscuit_get_column_case_mode(index, i);
+        }
+
         idx->max_len            = rget_i32(&r);
         idx->max_length_legacy  = rget_i32(&r);
         idx->max_length_lower   = rget_i32(&r);

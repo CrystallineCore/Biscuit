@@ -10,6 +10,19 @@
 #include "biscuit_bitmap.h"
 #include "biscuit_persist.h"
 
+/* ==================== OPCLASS CASE-MODE GATING ==================== */
+
+/*
+ * Determine which structure set(s) column `col` of `index` should be
+ * built/maintained with, based on the opfamily its opclass belongs to
+ * (biscuit_ops / biscuit_like_ops / biscuit_ilike_ops -- see biscuit.sql).
+ * Returns BISCUIT_MODE_LIKE, BISCUIT_MODE_ILIKE, or BISCUIT_MODE_BOTH.
+ * Falls back to BISCUIT_MODE_BOTH (the safe default -- build everything)
+ * if the opfamily can't be resolved, e.g. for an opfamily this code
+ * doesn't recognize.
+ */
+extern uint8 biscuit_get_column_case_mode(Relation index, int col);
+
 /* ==================== DISK I/O ==================== */
 
 extern void biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx);
@@ -75,4 +88,3 @@ extern void   biscuit_adjustmembers(Oid opfamilyoid, Oid opclassoid,
                                     List *operators, List *functions);
 
 #endif /* BISCUIT_INDEX_H */
-

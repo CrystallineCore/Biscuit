@@ -1760,6 +1760,20 @@ biscuit_query_pattern(BiscuitIndex *idx, const char *pattern)
     int            wildcard_count = 0, percent_count = 0;
     bool           only_wildcards = true;
 
+    /*
+     * Defensive gate: an index built with biscuit_ilike_ops never
+     * populates the case-sensitive structures this function depends on.
+     * The planner should never route a LIKE/NOT LIKE qual to such an
+     * index (biscuit_ilike_ops's opfamily doesn't register those
+     * operators), so reaching this with legacy_case_mode missing
+     * BISCUIT_MODE_LIKE indicates a programming error, not a normal
+     * query.
+     */
+    if (!(idx->legacy_case_mode & BISCUIT_MODE_LIKE))
+        ereport(ERROR,
+                (errmsg("biscuit: this index was not built with LIKE support"),
+                 errhint("The index's opclass (biscuit_ilike_ops) only supports ILIKE/NOT ILIKE.")));
+
     if (plen == 0) {
         /* Empty pattern '' matches only records with an empty string value */
         if (idx->length_bitmaps_legacy && idx->length_bitmaps_legacy[0])
@@ -1948,8 +1962,25 @@ RoaringBitmap *
 biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern)
 {
     int            plen = strlen(pattern);
-    char          *pl   = biscuit_str_tolower(pattern, plen);
+    char          *pl;
     RoaringBitmap *result;
+
+    /*
+     * Defensive gate: an index built with biscuit_like_ops never
+     * populates the "_lower" structures this function depends on. The
+     * planner should never route an ILIKE/NOT ILIKE qual to such an
+     * index in the first place (biscuit_like_ops's opfamily doesn't
+     * register those operators -- see biscuit.sql), so reaching this
+     * with legacy_case_mode missing BISCUIT_MODE_ILIKE indicates a
+     * programming error rather than a normal query, and we fail loudly
+     * instead of dereferencing NULL/empty bitmap arrays.
+     */
+    if (!(idx->legacy_case_mode & BISCUIT_MODE_ILIKE))
+        ereport(ERROR,
+                (errmsg("biscuit: this index was not built with ILIKE support"),
+                 errhint("The index's opclass (biscuit_like_ops) only supports LIKE/NOT LIKE.")));
+
+    pl = biscuit_str_tolower(pattern, plen);
 
     /* delegate with lowercased pattern, using _lower accessors implicitly
        via biscuit_match_part_at_pos_ilike / _end_ilike / get_length_ge_lower */
@@ -1962,8 +1993,17 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern)
     plen = strlen(pl);
 
     if (plen == 0) {
-        if (idx->length_bitmaps_legacy && idx->length_bitmaps_legacy[0])
-            result = biscuit_roaring_copy(idx->length_bitmaps_legacy[0]);
+        /*
+         * Empty pattern '' matches only records with an empty string
+         * value. Use the case-insensitive length bitmap here, not the
+         * case-sensitive legacy one -- a column built with
+         * biscuit_ilike_ops only (no LIKE support) never populates
+         * length_bitmaps_legacy, and even when both are built, going
+         * through the _lower structures is the correct, mode-consistent
+         * choice for an ILIKE entry point.
+         */
+        if (idx->length_bitmaps_lower && idx->length_bitmaps_lower[0])
+            result = biscuit_roaring_copy(idx->length_bitmaps_lower[0]);
         else result = biscuit_roaring_create();
         pfree(pl); return result;
     }
@@ -2134,6 +2174,20 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
 
     if (!idx || col_idx < 0 || col_idx >= idx->num_columns || !idx->column_indices)
         return biscuit_roaring_create();
+
+    /*
+     * Defensive gate: a column built with biscuit_ilike_ops never
+     * populates the case-sensitive structures this function needs. The
+     * planner should never route a LIKE/NOT LIKE qual to such a column
+     * (biscuit_ilike_ops's opfamily doesn't register those operators),
+     * so reaching this indicates a programming error rather than a
+     * normal query.
+     */
+    if (idx->column_case_mode && !(idx->column_case_mode[col_idx] & BISCUIT_MODE_LIKE))
+        ereport(ERROR,
+                (errmsg("biscuit: column %d of this index was not built with LIKE support",
+                        col_idx),
+                 errhint("This column's opclass (biscuit_ilike_ops) only supports ILIKE/NOT ILIKE.")));
 
     col = &idx->column_indices[col_idx];
 
@@ -2315,6 +2369,20 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
 
     if (!idx || col_idx < 0 || col_idx >= idx->num_columns || !idx->column_indices)
         return biscuit_roaring_create();
+
+    /*
+     * Defensive gate: a column built with biscuit_like_ops never
+     * populates the case-insensitive "_lower" structures this function
+     * needs. The planner should never route an ILIKE/NOT ILIKE qual to
+     * such a column (biscuit_like_ops's opfamily doesn't register those
+     * operators), so reaching this indicates a programming error rather
+     * than a normal query.
+     */
+    if (idx->column_case_mode && !(idx->column_case_mode[col_idx] & BISCUIT_MODE_ILIKE))
+        ereport(ERROR,
+                (errmsg("biscuit: column %d of this index was not built with ILIKE support",
+                        col_idx),
+                 errhint("This column's opclass (biscuit_like_ops) only supports LIKE/NOT LIKE.")));
 
     col = &idx->column_indices[col_idx];
     pl  = biscuit_str_tolower(pattern, plen);

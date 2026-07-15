@@ -185,16 +185,27 @@ biscuit_rescan_multicolumn(IndexScanDesc scan,
         if (pred_is_not_like)
         {
             /*
-             * NOT LIKE inversion: the "all" set must contain only non-null
-             * indexed rows for this column.  Use the column's length_ge
-             * bitmap at index 0 (all strings of length >= 0, i.e. non-null)
-             * when available, otherwise fall back to the full record range.
+             * NOT LIKE / NOT ILIKE inversion: the "all" set must contain
+             * only non-null indexed rows for this column. Use the
+             * column's length_ge bitmap at index 0 (all strings of
+             * length >= 0, i.e. non-null) when available, otherwise fall
+             * back to the full record range.
+             *
+             * Which length_ge array to consult depends on the strategy:
+             * NOT LIKE needs the case-sensitive set, NOT ILIKE needs the
+             * case-insensitive ("_lower") set -- these are gated
+             * independently per column by the column's opclass (see
+             * biscuit_get_column_case_mode()), so a column built with
+             * only one of the two structure sets only ever has the
+             * matching array populated.
              */
             ColumnIndex   *pred_col    = &so->index->column_indices[pred->column_index];
             RoaringBitmap *all;
-            if (pred_col->length_ge_bitmaps && pred_col->length_ge_bitmaps[0])
+            RoaringBitmap **ge_arr = pred_is_ilike ? pred_col->length_ge_bitmaps_lower
+                                                    : pred_col->length_ge_bitmaps;
+            if (ge_arr && ge_arr[0])
             {
-                all = biscuit_roaring_copy(pred_col->length_ge_bitmaps[0]);
+                all = biscuit_roaring_copy(ge_arr[0]);
             }
             else
             {
@@ -352,22 +363,34 @@ biscuit_rescan(IndexScanDesc scan,
                 if (is_not)
                 {
                     /*
-                     * NOT LIKE inversion: build the live non-null set.
-                     * We must NOT include records with a NULL data_cache
-                     * entry — those rows have NULL column values and were
-                     * never indexed, so they must not appear in NOT LIKE
-                     * results (NULL LIKE x is NULL, not TRUE).
-                     * Use length_ge_bitmaps_legacy[0] when available (it
-                     * was built to contain exactly the non-null live rows),
-                     * otherwise fall back to a record-by-record scan.
+                     * NOT LIKE / NOT ILIKE inversion: build the live
+                     * non-null set. We must NOT include records with a
+                     * NULL data_cache entry — those rows have NULL
+                     * column values and were never indexed, so they must
+                     * not appear in NOT LIKE results (NULL LIKE x is
+                     * NULL, not TRUE).
+                     *
+                     * Which length_ge array to consult depends on the
+                     * strategy: NOT LIKE needs length_ge_bitmaps_legacy
+                     * (case-sensitive), NOT ILIKE needs
+                     * length_ge_bitmaps_lower (case-insensitive) -- these
+                     * are gated independently by this column's opclass
+                     * (see biscuit_get_column_case_mode()), so only the
+                     * matching array is ever populated for a
+                     * LIKE-only/ILIKE-only index. Use length_ge_bitmaps_*
+                     * [0] when available (it was built to contain exactly
+                     * the non-null live rows), otherwise fall back to a
+                     * record-by-record scan over data_cache, which is
+                     * always populated regardless of case mode.
                      */
+                    bool           is_ilike_strategy = (key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
                     RoaringBitmap *all;
+                    RoaringBitmap **ge_arr = is_ilike_strategy ? so->index->length_ge_bitmaps_lower
+                                                                : so->index->length_ge_bitmaps_legacy;
                     int j;
-                    if (so->index->length_ge_bitmaps_legacy &&
-                        so->index->length_ge_bitmaps_legacy[0])
+                    if (ge_arr && ge_arr[0])
                     {
-                        all = biscuit_roaring_copy(
-                            so->index->length_ge_bitmaps_legacy[0]);
+                        all = biscuit_roaring_copy(ge_arr[0]);
                     }
                     else
                     {

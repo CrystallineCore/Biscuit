@@ -12,6 +12,85 @@
 #include "biscuit_index.h"
 
 /* ================================================================
+ * SECTION 0 – Opclass case-mode gating
+ * ================================================================
+ *
+ * Three opclasses share the biscuit access method: biscuit_ops (LIKE +
+ * ILIKE, default), biscuit_like_ops (LIKE only), and biscuit_ilike_ops
+ * (ILIKE only) -- see biscuit.sql. Each declares its own opfamily, and
+ * PostgreSQL's relcache resolves the opfamily actually chosen for each
+ * index column into index->rd_opfamily[col] regardless of access method.
+ * That's exactly the signal we need: it reflects whatever opclass the
+ * user wrote in CREATE INDEX (explicitly, or implicitly via DEFAULT),
+ * with no dependency on catalog lookups beyond what the relcache has
+ * already done for us.
+ *
+ * biscuit_build()/biscuit_insert()/biscuit_persist_load() call this once
+ * per column and gate structure population accordingly, so a
+ * biscuit_like_ops column never spends memory/build time on the
+ * case-insensitive ("_lower") structures it can never be queried with,
+ * and vice versa for biscuit_ilike_ops.
+ */
+#if PG_VERSION_NUM < 180000
+#include "catalog/pg_opfamily.h"
+#include "utils/syscache.h"
+/*
+ * get_opfamily_name() was only added to lsyscache.h in PG18. For PG16/17
+ * we look the name up ourselves via the syscache, mirroring its
+ * missing_ok semantics (returns NULL rather than erroring).
+ */
+static char *
+biscuit_get_opfamily_name_compat(Oid opfamily, bool missing_ok)
+{
+    HeapTuple tp;
+    char     *result;
+
+    tp = SearchSysCache1(OPFAMILYOID, ObjectIdGetDatum(opfamily));
+    if (!HeapTupleIsValid(tp))
+    {
+        if (missing_ok)
+            return NULL;
+        elog(ERROR, "cache lookup failed for opfamily %u", opfamily);
+    }
+
+    result = pstrdup(NameStr(((Form_pg_opfamily) GETSTRUCT(tp))->opfname));
+    ReleaseSysCache(tp);
+    return result;
+}
+#define get_opfamily_name(opfamily, missing_ok) \
+    biscuit_get_opfamily_name_compat((opfamily), (missing_ok))
+#endif
+
+uint8
+biscuit_get_column_case_mode(Relation index, int col)
+{
+    Oid   opfamily;
+    char *famname;
+    uint8 mode;
+
+    if (!index || !index->rd_index || !index->rd_opfamily ||
+        col < 0 || col >= index->rd_index->indnatts)
+        return BISCUIT_MODE_BOTH;   /* safe default: build everything */
+
+    opfamily = index->rd_opfamily[col];
+    famname  = get_opfamily_name(opfamily, true);
+
+    if (!famname)
+        return BISCUIT_MODE_BOTH;
+
+    if (strcmp(famname, "biscuit_like_ops") == 0)
+        mode = BISCUIT_MODE_LIKE;
+    else if (strcmp(famname, "biscuit_ilike_ops") == 0)
+        mode = BISCUIT_MODE_ILIKE;
+    else
+        /* biscuit_ops, or any opfamily we don't specifically recognize. */
+        mode = BISCUIT_MODE_BOTH;
+
+    pfree(famname);
+    return mode;
+}
+
+/* ================================================================
  * SECTION 1 – Disk metadata I/O
  * ================================================================ */
 
@@ -278,10 +357,11 @@ biscuit_index_single_record(BiscuitIndex *idx,
     int byte_pos  = 0;
     int char_pos  = 0;
     int char_count = biscuit_utf8_char_count(str, byte_len);
+    uint8 mode = idx->legacy_case_mode;
 
-    /* ---- Case-sensitive character indexing ---- */
+    /* ---- Case-sensitive character indexing (LIKE-gated) ---- */
     byte_pos = char_pos = 0;
-    while (byte_pos < byte_len)
+    while ((mode & BISCUIT_MODE_LIKE) && byte_pos < byte_len)
     {
         unsigned char first_byte = (unsigned char) str[byte_pos];
         int           char_len   = biscuit_utf8_char_length(first_byte);
@@ -325,7 +405,17 @@ biscuit_index_single_record(BiscuitIndex *idx,
         char_pos++;
     }
 
-    /* ---- Case-insensitive character indexing ---- */
+    /* ---- Case-insensitive character indexing (ILIKE-gated) ---- */
+    if (!(mode & BISCUIT_MODE_ILIKE))
+    {
+        /*
+         * This column's opclass (biscuit_like_ops) never needs the
+         * case-insensitive structures -- leave the lowercased cache slot
+         * NULL and skip building any "_lower" bitmaps for this record.
+         */
+        idx->data_cache_lower[rec_idx] = NULL;
+    }
+    else
     {
         char *str_lower      = biscuit_str_tolower(str, byte_len);
         int   lower_byte_len = strlen(str_lower);
@@ -425,13 +515,14 @@ biscuit_index_column_record(BiscuitIndex *idx,
     int            byte_pos   = 0;
     int            char_pos   = 0;
     int            char_count = biscuit_utf8_char_count(str, byte_len);
+    uint8          mode       = idx->column_case_mode ? idx->column_case_mode[col] : BISCUIT_MODE_BOTH;
     (void) char_count;  /* no longer used to bump cidx->max_length here; see note below */
 
     /* ----------------------------------------------------------------
-     * Case-sensitive pass
+     * Case-sensitive pass (LIKE-gated)
      * ---------------------------------------------------------------- */
     byte_pos = char_pos = 0;
-    while (byte_pos < byte_len)
+    while ((mode & BISCUIT_MODE_LIKE) && byte_pos < byte_len)
     {
         unsigned char first_byte = (unsigned char) str[byte_pos];
         int           char_len   = biscuit_utf8_char_length(first_byte);
@@ -488,8 +579,9 @@ biscuit_index_column_record(BiscuitIndex *idx,
      */
 
     /* ----------------------------------------------------------------
-     * Case-insensitive pass
+     * Case-insensitive pass (ILIKE-gated)
      * ---------------------------------------------------------------- */
+    if (mode & BISCUIT_MODE_ILIKE)
     {
         char *str_lower      = biscuit_str_tolower(str, byte_len);
         int   lower_byte_len = (int) strlen(str_lower);
@@ -648,26 +740,41 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
             getTypeOutputInfo(coltypid, &typoutput, &typIsVarlena);
             fmgr_info(typoutput, &single_output_func);
 
+            /*
+             * Determine which structure set(s) this column's opclass
+             * actually needs -- biscuit_like_ops skips the "_lower"
+             * (ILIKE) structures below, biscuit_ilike_ops skips the
+             * case-sensitive (LIKE) ones, and biscuit_ops (or an
+             * unrecognized opfamily) builds both.
+             */
+            idx->legacy_case_mode = biscuit_get_column_case_mode(index, 0);
+
             idx->data_cache = (char **) palloc0(idx->capacity * sizeof(char *));
             idx->data_cache_lower = (char **) palloc0(idx->capacity * sizeof(char *));
 
             for (ch = 0; ch < CHAR_RANGE; ch++)
             {
-                idx->pos_idx_legacy[ch].entries  = (PosEntry *) palloc(64 * sizeof(PosEntry));
-                idx->pos_idx_legacy[ch].count    = 0;
-                idx->pos_idx_legacy[ch].capacity = 64;
-                idx->neg_idx_legacy[ch].entries  = (PosEntry *) palloc(64 * sizeof(PosEntry));
-                idx->neg_idx_legacy[ch].count    = 0;
-                idx->neg_idx_legacy[ch].capacity = 64;
-                idx->char_cache_legacy[ch]       = NULL;
+                if (idx->legacy_case_mode & BISCUIT_MODE_LIKE)
+                {
+                    idx->pos_idx_legacy[ch].entries  = (PosEntry *) palloc(64 * sizeof(PosEntry));
+                    idx->pos_idx_legacy[ch].count    = 0;
+                    idx->pos_idx_legacy[ch].capacity = 64;
+                    idx->neg_idx_legacy[ch].entries  = (PosEntry *) palloc(64 * sizeof(PosEntry));
+                    idx->neg_idx_legacy[ch].count    = 0;
+                    idx->neg_idx_legacy[ch].capacity = 64;
+                    idx->char_cache_legacy[ch]       = NULL;
+                }
 
-                idx->pos_idx_lower[ch].entries   = (PosEntry *) palloc(64 * sizeof(PosEntry));
-                idx->pos_idx_lower[ch].count     = 0;
-                idx->pos_idx_lower[ch].capacity  = 64;
-                idx->neg_idx_lower[ch].entries   = (PosEntry *) palloc(64 * sizeof(PosEntry));
-                idx->neg_idx_lower[ch].count     = 0;
-                idx->neg_idx_lower[ch].capacity  = 64;
-                idx->char_cache_lower[ch]        = NULL;
+                if (idx->legacy_case_mode & BISCUIT_MODE_ILIKE)
+                {
+                    idx->pos_idx_lower[ch].entries   = (PosEntry *) palloc(64 * sizeof(PosEntry));
+                    idx->pos_idx_lower[ch].count     = 0;
+                    idx->pos_idx_lower[ch].capacity  = 64;
+                    idx->neg_idx_lower[ch].entries   = (PosEntry *) palloc(64 * sizeof(PosEntry));
+                    idx->neg_idx_lower[ch].count     = 0;
+                    idx->neg_idx_lower[ch].capacity  = 64;
+                    idx->char_cache_lower[ch]        = NULL;
+                }
             }
 
             biscuit_init_crud_structures(idx);
@@ -730,7 +837,15 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
              * must never touch it (see the note in that function). Build
              * therefore has to derive the correct value itself, the same
              * way the multi-column build path already does.
+             *
+             * When ILIKE mode isn't built for this column,
+             * data_cache_lower[*] is NULL for every record (see the
+             * ILIKE-gated pass in biscuit_index_single_record()), so this
+             * naturally computes max_lower == 0 and the arrays below stay
+             * essentially empty -- but we still skip the population pass
+             * explicitly below to avoid doing needless work.
              */
+            if (idx->legacy_case_mode & BISCUIT_MODE_ILIKE)
             {
                 int max_lower = 0;
                 for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++)
@@ -743,16 +858,26 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
                 }
                 idx->max_length_lower = max_lower + 1;
             }
+            else
+            {
+                idx->max_length_lower = 0;
+            }
 
-            idx->length_bitmaps_legacy    = (RoaringBitmap **) palloc0(idx->max_length_legacy * sizeof(RoaringBitmap *));
-            idx->length_ge_bitmaps_legacy = (RoaringBitmap **) palloc0(idx->max_length_legacy * sizeof(RoaringBitmap *));
-            idx->length_bitmaps_lower     = (RoaringBitmap **) palloc0(idx->max_length_lower   * sizeof(RoaringBitmap *));
-            idx->length_ge_bitmaps_lower  = (RoaringBitmap **) palloc0(idx->max_length_lower   * sizeof(RoaringBitmap *));
+            if (idx->legacy_case_mode & BISCUIT_MODE_LIKE)
+            {
+                idx->length_bitmaps_legacy    = (RoaringBitmap **) palloc0(idx->max_length_legacy * sizeof(RoaringBitmap *));
+                idx->length_ge_bitmaps_legacy = (RoaringBitmap **) palloc0(idx->max_length_legacy * sizeof(RoaringBitmap *));
+                for (ch = 0; ch < idx->max_length_legacy; ch++)
+                    idx->length_ge_bitmaps_legacy[ch] = biscuit_roaring_create();
+            }
 
-            for (ch = 0; ch < idx->max_length_legacy; ch++)
-                idx->length_ge_bitmaps_legacy[ch] = biscuit_roaring_create();
-            for (ch = 0; ch < idx->max_length_lower; ch++)
-                idx->length_ge_bitmaps_lower[ch] = biscuit_roaring_create();
+            if (idx->legacy_case_mode & BISCUIT_MODE_ILIKE)
+            {
+                idx->length_bitmaps_lower     = (RoaringBitmap **) palloc0(idx->max_length_lower   * sizeof(RoaringBitmap *));
+                idx->length_ge_bitmaps_lower  = (RoaringBitmap **) palloc0(idx->max_length_lower   * sizeof(RoaringBitmap *));
+                for (ch = 0; ch < idx->max_length_lower; ch++)
+                    idx->length_ge_bitmaps_lower[ch] = biscuit_roaring_create();
+            }
 
             for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++)
             {
@@ -760,19 +885,22 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
                 int cl;
                 if (!idx->data_cache[rec_idx]) continue;
 
-                bl = strlen(idx->data_cache[rec_idx]);
-                cl = biscuit_utf8_char_count(idx->data_cache[rec_idx], bl);
-
-                if (cl < idx->max_length_legacy)
+                if (idx->legacy_case_mode & BISCUIT_MODE_LIKE)
                 {
-                    if (!idx->length_bitmaps_legacy[cl])
-                        idx->length_bitmaps_legacy[cl] = biscuit_roaring_create();
-                    biscuit_roaring_add(idx->length_bitmaps_legacy[cl], rec_idx);
-                }
-                for (int i = 0; i <= cl && i < idx->max_length_legacy; i++)
-                    biscuit_roaring_add(idx->length_ge_bitmaps_legacy[i], rec_idx);
+                    bl = strlen(idx->data_cache[rec_idx]);
+                    cl = biscuit_utf8_char_count(idx->data_cache[rec_idx], bl);
 
-                if (idx->data_cache_lower[rec_idx])
+                    if (cl < idx->max_length_legacy)
+                    {
+                        if (!idx->length_bitmaps_legacy[cl])
+                            idx->length_bitmaps_legacy[cl] = biscuit_roaring_create();
+                        biscuit_roaring_add(idx->length_bitmaps_legacy[cl], rec_idx);
+                    }
+                    for (int i = 0; i <= cl && i < idx->max_length_legacy; i++)
+                        biscuit_roaring_add(idx->length_ge_bitmaps_legacy[i], rec_idx);
+                }
+
+                if ((idx->legacy_case_mode & BISCUIT_MODE_ILIKE) && idx->data_cache_lower[rec_idx])
                 {
                     int lbl = strlen(idx->data_cache_lower[rec_idx]);
                     int lcl = biscuit_utf8_char_count(idx->data_cache_lower[rec_idx], lbl);
@@ -800,6 +928,7 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
             idx->column_data_cache       = (char ***)     palloc(natts * sizeof(char **));
             idx->column_data_cache_lower = (char ***)     palloc(natts * sizeof(char **));
             idx->column_indices          = (ColumnIndex *) palloc0(natts * sizeof(ColumnIndex));
+            idx->column_case_mode        = (uint8 *)      palloc(natts * sizeof(uint8));
 
             for (col = 0; col < natts; col++)
             {
@@ -823,19 +952,28 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
                 idx->column_data_cache[col]       = (char **) palloc0(idx->capacity * sizeof(char *));
                 idx->column_data_cache_lower[col] = (char **) palloc0(idx->capacity * sizeof(char *));
 
+                /* Per-column opclass gating -- see biscuit_get_column_case_mode(). */
+                idx->column_case_mode[col] = biscuit_get_column_case_mode(index, col);
+
                 for (ch = 0; ch < CHAR_RANGE; ch++)
                 {
-                    cidx->pos_idx[ch].entries  = (PosEntry *) palloc(64 * sizeof(PosEntry));
-                    cidx->pos_idx[ch].count    = 0; cidx->pos_idx[ch].capacity = 64;
-                    cidx->neg_idx[ch].entries  = (PosEntry *) palloc(64 * sizeof(PosEntry));
-                    cidx->neg_idx[ch].count    = 0; cidx->neg_idx[ch].capacity = 64;
-                    cidx->char_cache[ch]       = NULL;
+                    if (idx->column_case_mode[col] & BISCUIT_MODE_LIKE)
+                    {
+                        cidx->pos_idx[ch].entries  = (PosEntry *) palloc(64 * sizeof(PosEntry));
+                        cidx->pos_idx[ch].count    = 0; cidx->pos_idx[ch].capacity = 64;
+                        cidx->neg_idx[ch].entries  = (PosEntry *) palloc(64 * sizeof(PosEntry));
+                        cidx->neg_idx[ch].count    = 0; cidx->neg_idx[ch].capacity = 64;
+                        cidx->char_cache[ch]       = NULL;
+                    }
 
-                    cidx->pos_idx_lower[ch].entries  = (PosEntry *) palloc(64 * sizeof(PosEntry));
-                    cidx->pos_idx_lower[ch].count    = 0; cidx->pos_idx_lower[ch].capacity = 64;
-                    cidx->neg_idx_lower[ch].entries  = (PosEntry *) palloc(64 * sizeof(PosEntry));
-                    cidx->neg_idx_lower[ch].count    = 0; cidx->neg_idx_lower[ch].capacity = 64;
-                    cidx->char_cache_lower[ch]       = NULL;
+                    if (idx->column_case_mode[col] & BISCUIT_MODE_ILIKE)
+                    {
+                        cidx->pos_idx_lower[ch].entries  = (PosEntry *) palloc(64 * sizeof(PosEntry));
+                        cidx->pos_idx_lower[ch].count    = 0; cidx->pos_idx_lower[ch].capacity = 64;
+                        cidx->neg_idx_lower[ch].entries  = (PosEntry *) palloc(64 * sizeof(PosEntry));
+                        cidx->neg_idx_lower[ch].count    = 0; cidx->neg_idx_lower[ch].capacity = 64;
+                        cidx->char_cache_lower[ch]       = NULL;
+                    }
                 }
             }
 
@@ -907,8 +1045,17 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
                     }
 
                     str = biscuit_datum_to_text(index_values[col], idx->column_types[col], &idx->output_funcs[col], &out_len);
-                    idx->column_data_cache[col][idx->num_records]       = str;
-                    idx->column_data_cache_lower[col][idx->num_records] = biscuit_str_tolower(str, out_len);
+                    idx->column_data_cache[col][idx->num_records] = str;
+
+                    /*
+                     * Only precompute the lowercased copy when this
+                     * column's opclass actually needs ILIKE support;
+                     * biscuit_like_ops columns leave this NULL.
+                     */
+                    idx->column_data_cache_lower[col][idx->num_records] =
+                        (idx->column_case_mode[col] & BISCUIT_MODE_ILIKE)
+                            ? biscuit_str_tolower(str, out_len)
+                            : NULL;
 
                     /*
                      * Populate all character-level and case-insensitive bitmaps
@@ -929,43 +1076,50 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
             for (col = 0; col < natts; col++)
             {
                 ColumnIndex *cidx = &idx->column_indices[col];
+                uint8        col_mode = idx->column_case_mode[col];
                 int max_cl = 0;
 
-                for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++)
+                /* ---- Case-sensitive length bitmaps (LIKE-gated) ---- */
+                if (col_mode & BISCUIT_MODE_LIKE)
                 {
-                    int bl;
-                    int cl;
-                    if (!idx->column_data_cache[col][rec_idx]) continue;
-                    bl = strlen(idx->column_data_cache[col][rec_idx]);
-                    cl = biscuit_utf8_char_count(idx->column_data_cache[col][rec_idx], bl);
-                    if (cl > max_cl) max_cl = cl;
-                }
-
-                cidx->max_length = max_cl + 1;
-                cidx->length_bitmaps    = (RoaringBitmap **) palloc0(cidx->max_length * sizeof(RoaringBitmap *));
-                cidx->length_ge_bitmaps = (RoaringBitmap **) palloc0(cidx->max_length * sizeof(RoaringBitmap *));
-                for (int i = 0; i < cidx->max_length; i++)
-                    cidx->length_ge_bitmaps[i] = biscuit_roaring_create();
-
-                for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++)
-                {
-                    int bl;
-                    int cl;
-                    if (!idx->column_data_cache[col][rec_idx]) continue;
-                    bl = strlen(idx->column_data_cache[col][rec_idx]);
-                    cl = biscuit_utf8_char_count(idx->column_data_cache[col][rec_idx], bl);
-                    if (cl < cidx->max_length)
+                    for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++)
                     {
-                        if (!cidx->length_bitmaps[cl]) cidx->length_bitmaps[cl] = biscuit_roaring_create();
-                        biscuit_roaring_add(cidx->length_bitmaps[cl], rec_idx);
+                        int bl;
+                        int cl;
+                        if (!idx->column_data_cache[col][rec_idx]) continue;
+                        bl = strlen(idx->column_data_cache[col][rec_idx]);
+                        cl = biscuit_utf8_char_count(idx->column_data_cache[col][rec_idx], bl);
+                        if (cl > max_cl) max_cl = cl;
                     }
-                    for (int i = 0; i <= cl && i < cidx->max_length; i++)
-                        biscuit_roaring_add(cidx->length_ge_bitmaps[i], rec_idx);
+
+                    cidx->max_length = max_cl + 1;
+                    cidx->length_bitmaps    = (RoaringBitmap **) palloc0(cidx->max_length * sizeof(RoaringBitmap *));
+                    cidx->length_ge_bitmaps = (RoaringBitmap **) palloc0(cidx->max_length * sizeof(RoaringBitmap *));
+                    for (int i = 0; i < cidx->max_length; i++)
+                        cidx->length_ge_bitmaps[i] = biscuit_roaring_create();
+
+                    for (rec_idx = 0; rec_idx < idx->num_records; rec_idx++)
+                    {
+                        int bl;
+                        int cl;
+                        if (!idx->column_data_cache[col][rec_idx]) continue;
+                        bl = strlen(idx->column_data_cache[col][rec_idx]);
+                        cl = biscuit_utf8_char_count(idx->column_data_cache[col][rec_idx], bl);
+                        if (cl < cidx->max_length)
+                        {
+                            if (!cidx->length_bitmaps[cl]) cidx->length_bitmaps[cl] = biscuit_roaring_create();
+                            biscuit_roaring_add(cidx->length_bitmaps[cl], rec_idx);
+                        }
+                        for (int i = 0; i <= cl && i < cidx->max_length; i++)
+                            biscuit_roaring_add(cidx->length_ge_bitmaps[i], rec_idx);
+                    }
                 }
 
-                /* Case-insensitive length bitmaps — compute max_length_lower independently.
-                 * Cannot simply copy max_length: lowercasing can change character count
+                /* Case-insensitive length bitmaps (ILIKE-gated) — compute
+                 * max_length_lower independently. Cannot simply copy
+                 * max_length: lowercasing can change character count
                  * (e.g. German ß → ss doubles that character). */
+                if (col_mode & BISCUIT_MODE_ILIKE)
                 {
                     int max_cl_lower = 0;
 
@@ -1303,6 +1457,9 @@ biscuit_insert(Relation index,
             /* Grow length bitmaps if needed */
             {
                 int cl = biscuit_utf8_char_count(str, byte_len);
+
+                if (idx->legacy_case_mode & BISCUIT_MODE_LIKE)
+                {
                 if (cl >= idx->max_length_legacy)
                 {
                     int old_ml = idx->max_length_legacy;
@@ -1335,12 +1492,14 @@ biscuit_insert(Relation index,
                 biscuit_roaring_add(idx->length_bitmaps_legacy[cl], slot);
                 for (int i = 0; i <= cl && i < idx->max_length_legacy; i++)
                     biscuit_roaring_add(idx->length_ge_bitmaps_legacy[i], slot);
+                }
 
                 /*
-                 * Lowercase length bitmaps.
+                 * Lowercase length bitmaps (ILIKE-gated).
                  * data_cache_lower[slot] was populated by biscuit_index_single_record
-                 * above; for a NULL-valued column this slot was zeroed by FIX A so
-                 * the guard below is always reliable.
+                 * above -- which itself only fills it in when legacy_case_mode
+                 * includes BISCUIT_MODE_ILIKE (NULL otherwise), so this guard
+                 * already skips the block correctly for a LIKE-only column.
                  */
                 if (idx->data_cache_lower[slot])
                 {
@@ -1397,10 +1556,17 @@ biscuit_insert(Relation index,
                  * Pre-compute the lowercased copy so ILIKE queries can use
                  * column_data_cache_lower directly, matching the invariant
                  * established at build/load time.  Mirror NULL to NULL for
-                 * the null-column case handled below.
+                 * the null-column case handled below, and also leave it
+                 * NULL when this column's opclass doesn't need ILIKE
+                 * support (biscuit_like_ops) -- matching the gating
+                 * biscuit_index_column_record() already applies to the
+                 * bitmap structures themselves.
                  */
                 if (idx->column_data_cache_lower)
-                    idx->column_data_cache_lower[col][slot] = biscuit_str_tolower(str, out_len);
+                    idx->column_data_cache_lower[col][slot] =
+                        (idx->column_case_mode && (idx->column_case_mode[col] & BISCUIT_MODE_ILIKE))
+                            ? biscuit_str_tolower(str, out_len)
+                            : NULL;
 
                 biscuit_index_column_record(idx, col, str, out_len, slot);
 
@@ -1428,7 +1594,10 @@ biscuit_insert(Relation index,
                 {
                     ColumnIndex *cidx = &idx->column_indices[col];
                     int          cl   = biscuit_utf8_char_count(str, out_len);
+                    uint8        col_mode = idx->column_case_mode ? idx->column_case_mode[col] : BISCUIT_MODE_BOTH;
 
+                    if (col_mode & BISCUIT_MODE_LIKE)
+                    {
                     if (cl >= cidx->max_length)
                     {
                         int old_ml = cidx->max_length;
@@ -1456,8 +1625,9 @@ biscuit_insert(Relation index,
                     biscuit_roaring_add(cidx->length_bitmaps[cl], slot);
                     for (int i = 0; i <= cl && i < cidx->max_length; i++)
                         biscuit_roaring_add(cidx->length_ge_bitmaps[i], slot);
+                    }
 
-                    /* Lowercase length bitmaps */
+                    /* Lowercase length bitmaps (ILIKE-gated via column_data_cache_lower being NULL when disabled) */
                     if (idx->column_data_cache_lower)
                     {
                         const char *lstr = idx->column_data_cache_lower[col][slot];
