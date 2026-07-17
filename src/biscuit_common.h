@@ -114,8 +114,52 @@ typedef struct {
 /* ==================== CONSTANTS ==================== */
 
 #define BISCUIT_MAGIC                   0x42495343  /* "BISC" */
-#define BISCUIT_VERSION                 1
+#define BISCUIT_VERSION                 2           /* on-disk format cutover: WAL-logged
+                                                       * pending-list storage replaces the old
+                                                       * external-file snapshot mechanism.
+                                                       * No dual-path reader -- old indexes
+                                                       * (version 1) must be REINDEXed. */
 #define BISCUIT_METAPAGE_BLKNO          0
+
+/*
+ * BISCUIT_PAGE_FORMAT_VERSION
+ *
+ * Guards the *binary layout* of the individual page structs below
+ * (BiscuitBlobChunkHeader, BiscuitPendingPageHeader, BiscuitPendingRecord,
+ * BiscuitDirPageHeader, BiscuitDirEntry, BiscuitPageOpaqueData) rather than
+ * the overall extension/catalog-visible format that BISCUIT_VERSION guards.
+ * Kept separate so a future change that only touches one page struct's
+ * layout (e.g. widening BiscuitPendingRecord) doesn't have to be bundled
+ * with an unrelated BISCUIT_VERSION bump, and so page-level tools
+ * (pg_filedump-style inspection, amcheck) can validate a page in isolation
+ * against this field without needing to know anything about the rest of
+ * the extension's format.
+ */
+#define BISCUIT_PAGE_FORMAT_VERSION     1
+
+/*
+ * BISCUIT_MAX_DIR_COLUMNS
+ *
+ * Upper bound on the number of per-column directory chain roots the
+ * metapage can hold directly (BiscuitMetaPageData.dir_roots[]). Chosen
+ * generously above any realistic multi-column index width; the
+ * single-column (legacy) case always uses slot 0. This is a metapage
+ * sizing constant only -- it does not bound how many *entries* a given
+ * column's directory chain can hold, since each chain grows across as
+ * many BISCUIT_PAGE_DIR pages as needed.
+ */
+#define BISCUIT_MAX_DIR_COLUMNS         32
+
+/*
+ * BISCUIT_DEFAULT_PENDING_LIST_LIMIT
+ *
+ * Default value for BiscuitMetaPageData.pending_list_limit: the
+ * per-structure pending-chain byte size that triggers an opportunistic
+ * drain (design doc §3). Mirrors gin_pending_list_limit but scoped much
+ * smaller, since Biscuit has thousands of independent small structures
+ * rather than one shared index-wide list.
+ */
+#define BISCUIT_DEFAULT_PENDING_LIST_LIMIT   (64 * 1024)
 #define CHAR_RANGE                      256
 #define TOMBSTONE_CLEANUP_THRESHOLD     1000
 #define RADIX_SORT_THRESHOLD            5000
@@ -184,30 +228,106 @@ typedef struct {
     int capacity;
 } CharIndex;
 
-/* Disk meta-page */
+/*
+ * Disk meta-page.
+ *
+ * BISCUIT_VERSION 2: this is a clean format cutover (see design doc) --
+ * the old `root` field (dead weight, never pointed at anything under the
+ * legacy file-snapshot design) is dropped outright rather than kept
+ * unused for compatibility, since old (version-1) indexes must be
+ * REINDEXed anyway and there is no dual-path reader.
+ */
 typedef struct BiscuitMetaPageData {
     uint32 magic;
-    uint32 version;
-    BlockNumber root;
+    uint32 version;              /* extension/catalog format version,
+                                   * BISCUIT_VERSION */
+    uint32 page_format_version;  /* binary page-struct layout version,
+                                   * BISCUIT_PAGE_FORMAT_VERSION -- see its
+                                   * comment above for why this is tracked
+                                   * separately from `version` */
     uint32 num_records;
 
     /*
-     * Monotonic generation counter.  Mirrors idx->gen at the time of the
-     * last biscuit_write_metadata_to_disk() call, so a cold-loaded
-     * snapshot can be recognized as stale relative to the live
-     * heap-backed state.  See the comment on idx->gen in the
+     * Monotonic generation counter.  Bumped in lockstep with idx->gen on
+     * every durable mutation.  See the comment on idx->gen in the
      * BiscuitIndex struct for the (intentionally non-transactional)
      * semantics.
      */
     uint64 gen;
 
-    /*
-     * Reserved for future metadata.  Writers must zero-fill this; readers
-     * must ignore its contents (not rely on any value found here), so
-     * old readers stay forward-compatible with newer writers that start
-     * using a slot here.
+    /* ---------------- Directory: per-column chain roots ----------------
+     *
+     * Each column's directory (a chain of BISCUIT_PAGE_DIR pages, each
+     * holding a packed BiscuitDirEntry[] -- see BiscuitDirPageHeader
+     * below) is rooted independently, one entry per indexed column, so
+     * that concurrent build/scan/drain activity against different
+     * columns never has to walk or lock a shared, index-wide directory
+     * chain to find its own entries. The single-column (legacy) case
+     * always uses dir_roots[0].
      */
-    uint32 reserved[4];
+    int32       num_dir_columns;                     /* number of populated
+                                                        * entries in dir_roots[]
+                                                        * below (1 for the
+                                                        * legacy single-column
+                                                        * case) */
+    BlockNumber dir_roots[BISCUIT_MAX_DIR_COLUMNS];   /* dir_roots[col] ==
+                                                        * InvalidBlockNumber
+                                                        * until that column's
+                                                        * directory chain has
+                                                        * been allocated */
+
+    /* ---------------- FSM bootstrap ----------------
+     *
+     * Biscuit pages retired by a drain are not immediately handed back to
+     * the ordinary Postgres index FSM (storage/indexfsm.h): they are
+     * deferred-recycle-gated on BiscuitPageOpaqueData.recycle_xid (see its
+     * comment) and must not be reused until no concurrent scan could
+     * still be walking them. fsm_root is the head of Biscuit's own
+     * recycle_xid-gated freelist chain (plain BISCUIT_PAGE_PENDING-shaped
+     * link list of retired-but-not-yet-recyclable pages, reusing
+     * opaque.next for chaining); only once biscuit_vacuumcleanup()'s
+     * horizon check clears a page does it get pushed to the standard
+     * index FSM for actual reuse. InvalidBlockNumber until the first page
+     * is ever retired -- this list is allocated lazily, not at build
+     * time, since a fresh index retires nothing.
+     */
+    BlockNumber fsm_root;
+    uint32      fsm_page_count;   /* pages currently linked into fsm_root's
+                                    * chain, awaiting their recycle_xid
+                                    * horizon; observability only, not
+                                    * load-bearing for correctness */
+
+    /* ---------------- Pending-list tuning / stats ----------------
+     * See design doc §3 and Round 5, finding 1.
+     */
+    uint32 pending_list_limit;    /* per-structure byte threshold that
+                                    * triggers an opportunistic drain;
+                                    * GUC-overridable, defaults to
+                                    * BISCUIT_DEFAULT_PENDING_LIST_LIMIT */
+    uint64 total_pending_bytes;   /* approximate sum of pending_bytes across
+                                    * all directory entries. NOT updated on
+                                    * the append path (that would reintroduce
+                                    * the cross-structure contention point
+                                    * fixed in design doc Round 5) --
+                                    * recomputed from scratch only by
+                                    * biscuit_vacuumcleanup()'s existing full
+                                    * directory walk. Stale by up to one
+                                    * vacuum cycle; observability only. */
+    uint64 total_drains;          /* lifetime count of drains performed
+                                    * (size-threshold trigger or
+                                    * vacuumcleanup's unconditional pass);
+                                    * observability counter for tuning
+                                    * pending_list_limit and autovacuum
+                                    * cadence */
+
+    /*
+     * Reserved for future metadata. No backward-compat constraint on this
+     * cutover (clean format bump), so headroom is cheap. Writers must
+     * zero-fill this; readers must ignore its contents (not rely on any
+     * value found here), so old readers stay forward-compatible with
+     * newer writers that start using a slot here.
+     */
+    uint32 reserved[6];
 } BiscuitMetaPageData;
 
 typedef BiscuitMetaPageData *BiscuitMetaPage;
@@ -369,78 +489,113 @@ typedef struct BiscuitDirEntry
 #define BISCUIT_DIR_KIND_LEN      4
 #define BISCUIT_DIR_KIND_LEN_GE   5
 
+/*
+ * BiscuitDirPageHeader
+ * Header at the start of each page's data area in a per-column
+ * directory chain (BISCUIT_PAGE_DIR, one chain per BiscuitMetaPageData
+ * .dir_roots[col] -- see metapage comment). Entries are packed and
+ * appended in the order their structures are first referenced during
+ * build/insert; a page fills up to num_entries * sizeof(BiscuitDirEntry)
+ * and a new tail page is linked via opaque.next when it can't fit the
+ * next entry. Unlike the pending-list chain, directory entries are
+ * mutated in place (pending_count/pending_bytes/blob_head are updated on
+ * their existing entry, not re-appended), so a directory page never
+ * shrinks and entries are never relocated once written -- an entry's
+ * (page, offset) is stable for the life of the structure it describes.
+ */
+typedef struct BiscuitDirPageHeader
+{
+    uint32  num_entries;    /* entries currently stored on this page */
+    uint32  max_entries;    /* capacity for this page, set at alloc  */
+    /* num_entries * sizeof(BiscuitDirEntry) entries follow */
+} BiscuitDirPageHeader;
+
+/*
+ * Page-capacity helpers.
+ *
+ * All three chained page types share the same page layout: standard
+ * PostgreSQL page header, a variable-length array of fixed-size records
+ * immediately following a small fixed header, and a BiscuitPageOpaqueData
+ * special area (PageAddSpecial'd, per BISCUIT_PAGE_* kind) at the end.
+ * These macros compute how many records of each kind fit on a page of a
+ * given size, for use when a chain allocates a new page and needs to set
+ * max_records/max_entries in that page's header.
+ */
+#define BiscuitPendingPageMaxRecords(pagesize) \
+    (((pagesize) - MAXALIGN(SizeOfPageHeaderData) \
+                  - MAXALIGN(sizeof(BiscuitPendingPageHeader)) \
+                  - MAXALIGN(sizeof(BiscuitPageOpaqueData))) \
+     / sizeof(BiscuitPendingRecord))
+
+#define BiscuitDirPageMaxEntries(pagesize) \
+    (((pagesize) - MAXALIGN(SizeOfPageHeaderData) \
+                  - MAXALIGN(sizeof(BiscuitDirPageHeader)) \
+                  - MAXALIGN(sizeof(BiscuitPageOpaqueData))) \
+     / sizeof(BiscuitDirEntry))
+
+/*
+ * Usable payload bytes for one BiscuitBlobChunkHeader page (the
+ * compacted-blob chain has no separate "max records" notion since each
+ * chunk simply stores as many raw serialized bytes as fit).
+ */
+#define BiscuitBlobChunkMaxPayload(pagesize) \
+    ((pagesize) - MAXALIGN(SizeOfPageHeaderData) \
+                - MAXALIGN(sizeof(BiscuitBlobChunkHeader)) \
+                - MAXALIGN(sizeof(BiscuitPageOpaqueData)))
+
 /* ---- METAPAGE EXTENSION ----
  *
- * Since this is a clean format cutover (BISCUIT_VERSION bump,
- * REINDEX required, no dual-path reader -- see design doc), the old
- * BiscuitMetaPageData.reserved[4] slots are promoted to named fields
- * below rather than kept behind a version check. The struct itself
- * (above, unmodified in this diff) should be edited in the follow-up
- * implementation patch to read:
- * *   typedef struct BiscuitMetaPageData {
- *       uint32      magic;
- *       uint32      version;              -- bumped to BISCUIT_VERSION 2
- *       uint32      num_records;
- *       uint64      gen;
+ * Implemented above (BiscuitMetaPageData): this is a clean format cutover
+ * (BISCUIT_VERSION bumped to 2, REINDEX required, no dual-path reader --
+ * see design doc), so the old `root` field and the old reserved[4] slots
+ * were dropped/promoted outright rather than kept behind a version check.
  *
- *       BlockNumber dir_root;             -- root of the directory chain
- *                                             (BISCUIT_PAGE_DIR pages, each
- *                                             a packed BiscuitDirEntry[]).
- *                                             Replaces the old `root` field
- *                                             outright -- this is a clean
- *                                             cutover with no dual-path
- *                                             reader and a mandatory
- *                                             REINDEX, so there is no
- *                                             compatibility reason to keep
- *                                             a dead slot around; dropped
- *                                             rather than retained-unused
- *                                             (see design doc, "Addressing
- *                                             review feedback").
- *       uint32      pending_list_limit;   -- per-structure byte threshold,
- *                                             mirrors gin_pending_list_limit;
- *                                             GUC-settable, see design doc pt 3
- *       uint64      total_pending_bytes;  -- approximate sum of pending_bytes
- *                                             across all directory entries.
- *                                             NOT updated on every append --
- *                                             see design doc Round 5, finding 1.
- *                                             Recomputed from scratch only by
- *                                             biscuit_vacuumcleanup()'s existing
- *                                             full directory walk (§3); an
- *                                             observability/monitoring figure,
- *                                             stale by up to one vacuum cycle,
- *                                             not a gate on any code path.
- *       uint64      total_drains;         -- lifetime count of drains
- *                                             performed (size-threshold
- *                                             trigger on the write path,
- *                                             or vacuumcleanup's
- *                                             unconditional pass) --
- *                                             observability counter for
- *                                             tuning pending_list_limit
- *                                             and autovacuum cadence
- *                                             against the merge-at-scan
- *                                             cost bound in design doc §4.
+ * One deliberate deviation from the design doc's original single
+ * `dir_root`: the metapage now holds one directory-chain root per
+ * indexed column (`dir_roots[BISCUIT_MAX_DIR_COLUMNS]`,
+ * `num_dir_columns`) instead of a single shared root with `col` as just
+ * another field inside each BiscuitDirEntry. This keeps each column's
+ * directory chain, and therefore its locking (§6) and drain traffic,
+ * fully independent at the chain-root level, not just at the
+ * individual-entry level -- a multi-column index's columns never have to
+ * walk or contend on a shared root page to find their own entries. The
+ * per-entry `col` field on BiscuitDirEntry is kept regardless, since a
+ * single column's chain can still hold entries for multiple `kind`s and
+ * multiple case-mode sets and having the field is cheap self-description
+ * for page-level tooling; it should just always agree with the chain's
+ * dir_roots[] index it was reached through.
  *
- *       uint32      reserved[8];          -- no backward-compat constraint
- *                                             on this cutover (clean
- *                                             format bump), so headroom is
- *                                             cheap; left generous for
- *                                             fields not yet needed (e.g.
- *                                             a per-structure drain-cost
- *                                             histogram, or container-
- *                                             level addressing metadata
- *                                             for the deferred v2 in §5).
- *   } BiscuitMetaPageData;
+ * FSM bootstrap (`fsm_root`, `fsm_page_count`) is new relative to the
+ * design doc's text but implements the deferred-recycle mechanism the
+ * doc already specifies (Addressing review feedback, point 1): a page
+ * with recycle_xid set is not immediately FSM-eligible, so something has
+ * to hold onto "pages retired but not yet recyclable" until
+ * biscuit_vacuumcleanup()'s horizon check clears them for the ordinary
+ * index FSM. fsm_root is that holding chain's head.
+ *
+ * `page_format_version` is new relative to the design doc's text too --
+ * see its own comment above (BISCUIT_PAGE_FORMAT_VERSION) for why it's
+ * tracked separately from `version`.
  *
  * total_pending_bytes is deliberately NOT maintained synchronously on the
- * append path (an earlier version of this doc described it as bumped on
- * every append "same spirit as BiscuitIndex.gen" -- that was wrong, and
- * has been corrected; see design doc Round 5, finding 1, for why a
+ * append path (an earlier version of the design doc described it as
+ * bumped on every append "same spirit as BiscuitIndex.gen" -- that was
+ * wrong, and was corrected; see design doc Round 5, finding 1, for why a
  * per-append write to a single shared metapage field is a global
  * serialization point that contradicts §6's no-cross-structure-contention
  * guarantee). The only synchronously-maintained pending-byte counters are
  * the per-structure `BiscuitDirEntry.pending_bytes` fields, which is also
  * all the §3 size-threshold trigger actually needs -- it was never
  * necessary for the append path to touch anything index-wide.
+ *
+ * Scope note: this header only defines the metapage layout and the page
+ * structs it points at (BiscuitDirPageHeader alongside the existing
+ * BiscuitBlobChunkHeader/BiscuitPendingPageHeader). Directory
+ * lookup/insert, compacted-blob chunk read/write, and pending-list
+ * append/drain logic are all still unimplemented -- see biscuit_index.c's
+ * biscuit_write_metadata_to_disk()/biscuit_read_metadata_from_disk() for
+ * the metapage read/write that *is* wired up in this phase, and the
+ * design doc for what's still pending.
  */
 
 /* ==================== DESIGN NOTES (see accompanying doc) ==================== */

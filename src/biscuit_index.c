@@ -101,31 +101,98 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
     Page               page;
     GenericXLogState  *state;
     BiscuitMetaPageData *meta;
+    bool               is_new_page;
 
-    //buf   = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
-    
-    {
-        BlockNumber nblocks = RelationGetNumberOfBlocks(index);
-        if (nblocks == 0)
-            buf = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
-        else
-            buf = ReadBuffer(index, BISCUIT_METAPAGE_BLKNO);
-    }
-    
+    /*
+     * This function is called repeatedly over an index's lifetime (every
+     * BISCUIT_SNAPSHOT_GEN_THRESHOLD generations from biscuit_insert(),
+     * and unconditionally from biscuit_vacuumcleanup() -- see callers).
+     * Only num_records/gen actually change on those calls; the directory
+     * roots, FSM bootstrap state, and pending-list tuning/stats
+     * (allocated/maintained by later phases, not yet by anything in this
+     * one) must survive every such call, not be reset to "nothing
+     * allocated yet" each time. So: read the existing page's values
+     * first (if any), and carry them forward across the PageInit below
+     * rather than reinitializing them.
+     */
+    BlockNumber nblocks = RelationGetNumberOfBlocks(index);
+    is_new_page = (nblocks == 0);
+
+    if (is_new_page)
+        buf = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
+    else
+        buf = ReadBuffer(index, BISCUIT_METAPAGE_BLKNO);
+
     LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 
     state = GenericXLogStart(index);
     page  = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
+
+    /*
+     * Snapshot the carry-forward fields before PageInit() wipes the page
+     * (PageInit() zeroes the whole page including the special area, so
+     * this must happen while `page` still holds the pre-init contents;
+     * on a freshly-extended P_NEW page there is nothing meaningful to
+     * carry forward, so fall back to defaults instead).
+     */
+    BlockNumber prev_dir_roots[BISCUIT_MAX_DIR_COLUMNS];
+    int32       prev_num_dir_columns;
+    BlockNumber prev_fsm_root;
+    uint32      prev_fsm_page_count;
+    uint32      prev_pending_list_limit;
+    uint64      prev_total_pending_bytes;
+    uint64      prev_total_drains;
+    uint32      prev_reserved[6];
+
+    if (!is_new_page && !PageIsNew(page) && !PageIsEmpty(page))
+    {
+        BiscuitMetaPageData *old = (BiscuitMetaPageData *) PageGetSpecialPointer(page);
+
+        if (old->magic == BISCUIT_MAGIC)
+        {
+            prev_num_dir_columns = old->num_dir_columns;
+            memcpy(prev_dir_roots, old->dir_roots, sizeof(prev_dir_roots));
+            prev_fsm_root             = old->fsm_root;
+            prev_fsm_page_count       = old->fsm_page_count;
+            prev_pending_list_limit   = old->pending_list_limit;
+            prev_total_pending_bytes  = old->total_pending_bytes;
+            prev_total_drains         = old->total_drains;
+            memcpy(prev_reserved, old->reserved, sizeof(prev_reserved));
+            goto have_prev_values;
+        }
+    }
+
+    /* No usable prior page (new relation, or an unrecognized/foreign one): defaults. */
+    prev_num_dir_columns = 0;
+    for (int i = 0; i < BISCUIT_MAX_DIR_COLUMNS; i++)
+        prev_dir_roots[i] = InvalidBlockNumber;
+    prev_fsm_root            = InvalidBlockNumber;
+    prev_fsm_page_count      = 0;
+    prev_pending_list_limit  = BISCUIT_DEFAULT_PENDING_LIST_LIMIT;
+    prev_total_pending_bytes = 0;
+    prev_total_drains        = 0;
+    memset(prev_reserved, 0, sizeof(prev_reserved));
+
+have_prev_values:
 
     PageInit(page, BufferGetPageSize(buf), sizeof(BiscuitMetaPageData));
 
     meta          = (BiscuitMetaPageData *) PageGetSpecialPointer(page);
     meta->magic   = BISCUIT_MAGIC;
     meta->version = BISCUIT_VERSION;
+    meta->page_format_version = BISCUIT_PAGE_FORMAT_VERSION;
     meta->num_records = idx->num_records;
-    meta->root    = 0;
     meta->gen     = idx->gen;
-    memset(meta->reserved, 0, sizeof(meta->reserved));
+
+    /* Carried forward from the previous page contents (or defaults). */
+    meta->num_dir_columns = prev_num_dir_columns;
+    memcpy(meta->dir_roots, prev_dir_roots, sizeof(meta->dir_roots));
+    meta->fsm_root            = prev_fsm_root;
+    meta->fsm_page_count      = prev_fsm_page_count;
+    meta->pending_list_limit  = prev_pending_list_limit;
+    meta->total_pending_bytes = prev_total_pending_bytes;
+    meta->total_drains        = prev_total_drains;
+    memcpy(meta->reserved, prev_reserved, sizeof(meta->reserved));
 
     GenericXLogFinish(state);
     UnlockReleaseBuffer(buf);
@@ -164,7 +231,20 @@ biscuit_read_metadata_from_disk(Relation index,
 
     meta = (BiscuitMetaPageData *) PageGetSpecialPointer(page);
 
-    if (meta->magic != BISCUIT_MAGIC)
+    /*
+     * magic identifies this as a Biscuit metapage at all; version/
+     * page_format_version identify which layout it was written with.
+     * BISCUIT_VERSION 2's metapage layout (dir_roots/fsm_root/pending-list
+     * tuning) is not compatible with a version-1 page (which had `root`
+     * and a differently-sized reserved area in the same offsets) -- this
+     * is the clean cutover the design doc calls for, so a mismatch here
+     * is treated exactly like "no snapshot", forcing the normal REINDEX/
+     * from-heap rebuild path rather than trying to interpret bytes
+     * written under the old layout as if they were the new one.
+     */
+    if (meta->magic != BISCUIT_MAGIC ||
+        meta->version != BISCUIT_VERSION ||
+        meta->page_format_version != BISCUIT_PAGE_FORMAT_VERSION)
     {
         UnlockReleaseBuffer(buf);
         *num_records = *num_columns = *max_len = 0;
@@ -175,7 +255,12 @@ biscuit_read_metadata_from_disk(Relation index,
     *num_records = meta->num_records;
     *num_columns = 0;
     *max_len     = 0;
-    /* meta->reserved is intentionally not surfaced to callers. */
+    /* meta->reserved, dir_roots[], fsm_root, and pending-list tuning/stats
+     * are intentionally not surfaced through this call's signature --
+     * nothing in this phase consumes them yet (no directory/blob/pending
+     * read path exists). A later phase that needs them should read the
+     * metapage directly rather than growing this function's out-param
+     * list further. */
     if (gen) *gen = meta->gen;
 
     UnlockReleaseBuffer(buf);
