@@ -212,6 +212,239 @@ typedef struct BiscuitMetaPageData {
 
 typedef BiscuitMetaPageData *BiscuitMetaPage;
 
+/* ==================== WAL-LOGGED PAGE STORAGE ====================
+ *
+ * Replaces biscuit_persist.c's external-file snapshot mechanism.
+ * Every bitmap/CharIndex/length-array structure ("structure" below)
+ * now lives entirely inside the index relation's own pages, split
+ * into two chains:
+ *
+ *   (a) COMPACTED CHAIN  -- CRoaring's serialized bytes, chunked
+ *       across ordinary data pages (a plain blob store, no
+ *       structure-specific logic).
+ *   (b) PENDING CHAIN    -- an append-only list of raw (TID, op)
+ *       delta records not yet folded into the compacted blob,
+ *       mirroring GIN's pending list design.
+ *
+ * See the design doc at the bottom of this section for the
+ * merge/drain trigger, read-time reconciliation strategy, and
+ * locking rules that go with these structs.
+ */
+
+/* ---- shared chunk/page "kind" tag, stored in the opaque area ---- */
+#define BISCUIT_PAGE_BLOB     1     /* compacted-blob chunk page   */
+#define BISCUIT_PAGE_PENDING  2     /* pending-delta list page     */
+#define BISCUIT_PAGE_DIR      3     /* directory page              */
+
+/*
+ * BiscuitPageOpaqueData
+ * Standard opaque footer (PageAddSpecial) on every non-meta Biscuit
+ * page, so any page can be identified/validated in isolation (crash
+ * recovery, pg_filedump-style inspection, amcheck) without consulting
+ * the directory.
+ */
+typedef struct BiscuitPageOpaqueData
+{
+    BlockNumber next;      /* next page in this chain, or InvalidBlockNumber */
+    uint16      page_kind; /* one of BISCUIT_PAGE_* above */
+    uint16      flags;     /* page_kind-specific, see below */
+
+    /*
+     * recycle_xid
+     * Set when a page is unlinked from its chain by a drain (old
+     * compacted-chain pages, drained pending-chain pages). InvalidXid on
+     * a live, in-chain page. A page with recycle_xid set must not be
+     * handed out by the FSM to a new chain until no scan could still
+     * hold a pointer to it -- i.e. until recycle_xid precedes the
+     * oldest xmin any concurrent backend could still be running with,
+     * the same "deferred recycle" rule GIN uses for its own deleted
+     * pages and btree uses via RecentGlobalXmin-gated recycling.
+     * See design doc, "Addressing review feedback", point 1.
+     */
+    TransactionId recycle_xid;
+} BiscuitPageOpaqueData;
+
+typedef BiscuitPageOpaqueData *BiscuitPageOpaque;
+
+/* flags for BISCUIT_PAGE_PENDING pages */
+#define BISCUIT_PENDING_FLAG_TAIL   0x0001  /* this is the current append target */
+
+/* ---- (a) COMPACTED-BLOB CHUNK CHAIN ---- */
+
+/*
+ * BiscuitBlobChunkHeader
+ * Header at the start of each page's data area in a compacted-blob
+ * chunk chain. One structure's serialized roaring_bitmap_t bytes are
+ * split across as many chunk pages as needed (same primitive as a
+ * plain TOAST-like blob store -- no per-structure semantics here).
+ *
+ * total_len/total_chunks are duplicated on every chunk (not just the
+ * head) purely so a reader landing mid-chain via a stale directory
+ * entry can sanity-check itself; they are not required for correct
+ * sequential reassembly, which relies solely on opaque.next.
+ */
+typedef struct BiscuitBlobChunkHeader
+{
+    uint32  total_len;      /* total byte length of the reassembled blob */
+    uint32  total_chunks;   /* total number of chunks in this chain      */
+    uint32  chunk_seq;      /* 0-based sequence number of this chunk     */
+    uint32  chunk_len;      /* bytes of blob payload stored on this page */
+    /* chunk_len bytes of raw CRoaring-serialized payload follow */
+} BiscuitBlobChunkHeader;
+
+/* ---- (b) PENDING-DELTA LIST CHAIN ---- */
+
+#define BISCUIT_PENDING_OP_ADD     1
+#define BISCUIT_PENDING_OP_REMOVE  2
+
+/*
+ * BiscuitPendingRecord
+ * One raw delta against a structure's compacted bitmap. `value` is
+ * the roaring-bitmap uint32 element -- for record-position bitmaps
+ * this is the record slot index (not a raw ItemPointerData; Biscuit
+ * already maps TIDs to dense uint32 slots elsewhere, so the pending
+ * record reuses that same domain to stay a fixed-size 8-byte record
+ * and pack densely on a page).
+ */
+typedef struct BiscuitPendingRecord
+{
+    uint32  value;   /* roaring-bitmap element (record slot) */
+    uint8   op;      /* BISCUIT_PENDING_OP_ADD / _REMOVE */
+    uint8   reserved[3];
+} BiscuitPendingRecord;
+
+/*
+ * BiscuitPendingPageHeader
+ * Header at the start of each page's data area in a pending-list
+ * chain. Records are appended packed and in order; a page fills up
+ * to num_records * sizeof(BiscuitPendingRecord) and a new tail page
+ * is allocated when it can't fit the next record (GIN-style: no
+ * in-place compaction of a pending page, only whole-chain drain).
+ */
+typedef struct BiscuitPendingPageHeader
+{
+    uint32  num_records;    /* records currently stored on this page */
+    uint32  max_records;    /* capacity for this page, set at alloc  */
+    /* num_records * sizeof(BiscuitPendingRecord) records follow */
+} BiscuitPendingPageHeader;
+
+/* ---- DIRECTORY ---- */
+
+/*
+ * BiscuitDirEntry
+ * Whole-bitmap-granularity directory entry: (col, is_lower, kind,
+ * char, position) -> this pair of chain heads. Container-level
+ * (per-block-of-the-bitmap) addressing is explicitly out of scope
+ * for this design -- see design doc point 5. This is a further
+ * write-amplification reduction for a *later* iteration, not a fix
+ * for any correctness or performance problem this design has.
+ *
+ * pending_count/pending_bytes are maintained incrementally on every
+ * append and reset on drain, so the size-threshold check in point 3
+ * is an O(1) field read rather than a chain walk.
+ */
+typedef struct BiscuitDirEntry
+{
+    /* identity -- see biscuit_pattern.c accessor naming for kind values */
+    int16   col;            /* column index, or -1 for legacy single-column */
+    bool    is_lower;        /* case-insensitive structure set?             */
+    uint8   kind;            /* BISCUIT_DIR_KIND_* -- pos/neg/cache/len/len_ge */
+    int32   ch;               /* character (unsigned char), or -1 if n/a     */
+    int32   position;         /* pos/neg_offset/length value, or -1 if n/a   */
+
+    /* compacted-blob chain */
+    BlockNumber blob_head;    /* InvalidBlockNumber if structure is empty/absent */
+
+    /* pending-delta chain */
+    BlockNumber pending_head; /* InvalidBlockNumber if none ever allocated   */
+    BlockNumber pending_tail; /* == pending_head if single page; cached to
+                                * make append O(1) instead of a chain walk   */
+    uint32      pending_count;  /* total undained records across the chain  */
+    uint32      pending_bytes;  /* total undrained bytes, for the size trigger */
+} BiscuitDirEntry;
+
+#define BISCUIT_DIR_KIND_POS      1
+#define BISCUIT_DIR_KIND_NEG      2
+#define BISCUIT_DIR_KIND_CACHE    3
+#define BISCUIT_DIR_KIND_LEN      4
+#define BISCUIT_DIR_KIND_LEN_GE   5
+
+/* ---- METAPAGE EXTENSION ----
+ *
+ * Since this is a clean format cutover (BISCUIT_VERSION bump,
+ * REINDEX required, no dual-path reader -- see design doc), the old
+ * BiscuitMetaPageData.reserved[4] slots are promoted to named fields
+ * below rather than kept behind a version check. The struct itself
+ * (above, unmodified in this diff) should be edited in the follow-up
+ * implementation patch to read:
+ * *   typedef struct BiscuitMetaPageData {
+ *       uint32      magic;
+ *       uint32      version;              -- bumped to BISCUIT_VERSION 2
+ *       uint32      num_records;
+ *       uint64      gen;
+ *
+ *       BlockNumber dir_root;             -- root of the directory chain
+ *                                             (BISCUIT_PAGE_DIR pages, each
+ *                                             a packed BiscuitDirEntry[]).
+ *                                             Replaces the old `root` field
+ *                                             outright -- this is a clean
+ *                                             cutover with no dual-path
+ *                                             reader and a mandatory
+ *                                             REINDEX, so there is no
+ *                                             compatibility reason to keep
+ *                                             a dead slot around; dropped
+ *                                             rather than retained-unused
+ *                                             (see design doc, "Addressing
+ *                                             review feedback").
+ *       uint32      pending_list_limit;   -- per-structure byte threshold,
+ *                                             mirrors gin_pending_list_limit;
+ *                                             GUC-settable, see design doc pt 3
+ *       uint64      total_pending_bytes;  -- approximate sum of pending_bytes
+ *                                             across all directory entries.
+ *                                             NOT updated on every append --
+ *                                             see design doc Round 5, finding 1.
+ *                                             Recomputed from scratch only by
+ *                                             biscuit_vacuumcleanup()'s existing
+ *                                             full directory walk (§3); an
+ *                                             observability/monitoring figure,
+ *                                             stale by up to one vacuum cycle,
+ *                                             not a gate on any code path.
+ *       uint64      total_drains;         -- lifetime count of drains
+ *                                             performed (size-threshold
+ *                                             trigger on the write path,
+ *                                             or vacuumcleanup's
+ *                                             unconditional pass) --
+ *                                             observability counter for
+ *                                             tuning pending_list_limit
+ *                                             and autovacuum cadence
+ *                                             against the merge-at-scan
+ *                                             cost bound in design doc §4.
+ *
+ *       uint32      reserved[8];          -- no backward-compat constraint
+ *                                             on this cutover (clean
+ *                                             format bump), so headroom is
+ *                                             cheap; left generous for
+ *                                             fields not yet needed (e.g.
+ *                                             a per-structure drain-cost
+ *                                             histogram, or container-
+ *                                             level addressing metadata
+ *                                             for the deferred v2 in §5).
+ *   } BiscuitMetaPageData;
+ *
+ * total_pending_bytes is deliberately NOT maintained synchronously on the
+ * append path (an earlier version of this doc described it as bumped on
+ * every append "same spirit as BiscuitIndex.gen" -- that was wrong, and
+ * has been corrected; see design doc Round 5, finding 1, for why a
+ * per-append write to a single shared metapage field is a global
+ * serialization point that contradicts §6's no-cross-structure-contention
+ * guarantee). The only synchronously-maintained pending-byte counters are
+ * the per-structure `BiscuitDirEntry.pending_bytes` fields, which is also
+ * all the §3 size-threshold trigger actually needs -- it was never
+ * necessary for the append path to touch anything index-wide.
+ */
+
+/* ==================== DESIGN NOTES (see accompanying doc) ==================== */
+
 /* Per-column bitmap index (case-sensitive + case-insensitive) */
 typedef struct {
     /* Case-sensitive */
