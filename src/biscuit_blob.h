@@ -60,6 +60,15 @@
  * than assuming the caller did.
  */
 
+/*
+ * biscuit_ensure_synchronous_commit
+ * Exported so other translation units performing their own durable
+ * GenericXLog-based page mutations (biscuit_dir.c, biscuit_persist.c) can
+ * apply the same guarantee without duplicating the reasoning above --
+ * see this file's biscuit_blob.c definition for the full explanation.
+ */
+extern void biscuit_ensure_synchronous_commit(void);
+
 #include "biscuit_common.h"
 #include "biscuit_bitmap.h"
 
@@ -148,6 +157,20 @@ extern void biscuit_page_read_blob(Relation index,
  * uses for the same reason.
  */
 extern void biscuit_page_free_blob(Relation index, BlockNumber head);
+
+/*
+ * biscuit_page_free_chain
+ *
+ * Alias for biscuit_page_free_blob() under a name that doesn't imply
+ * "blob chains only" -- the retirement walk (biscuit_free_chain() in
+ * biscuit_blob.c) never inspects page_kind, so it works identically on a
+ * pending chain, a directory chain, or a blob chain. Callers outside this
+ * file that are retiring a non-blob chain (e.g. the directory layer
+ * freeing a drained pending chain, or a whole BISCUIT_PAGE_DIR chain on
+ * index drop) should call this name instead, purely for readability at
+ * the call site.
+ */
+extern void biscuit_page_free_chain(Relation index, BlockNumber head);
 
 /* ==================== PENDING-DELTA LIST CHAIN ==================== */
 

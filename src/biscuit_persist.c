@@ -1,225 +1,199 @@
 /*
  * biscuit_persist.c
- * Best-effort disk snapshot persistence for BiscuitIndex.
+ * BiscuitIndex save/load/drop against the WAL-logged directory +
+ * compacted-blob + pending-list page format (see the design doc,
+ * "Biscuit WAL-Logged Storage: Pending-List Design", and biscuit_dir.c /
+ * biscuit_blob.c for the primitives this file is built on).
  *
- * Design
- * ------
- * One flat file per index at:
- *     $PGDATA/pg_biscuit/<dboid>_<indexoid>.bsc
+ * This is a full replacement of the old external-file snapshot mechanism
+ * (a flat file per index under $PGDATA/pg_biscuit/, written with a
+ * temp-file-then-rename swap and a trailing CRC32C checksum) -- that
+ * mechanism, and every helper specific to it (biscuit_persist_path/
+ * _tmp_path/_ensure_dir, the FILE*-based WStream/RStream read/write
+ * helpers), is deleted outright, not wrapped or version-gated. There is
+ * no dual-format reader: BISCUIT_VERSION was already bumped for the
+ * pending-list cutover (see biscuit_common.h), so any pre-existing index
+ * must be REINDEXed under this extension version -- that is an accepted,
+ * expected requirement, not something this file tries to work around.
  *
- * We deliberately do NOT use index relation pages / GenericXLog for
- * this -- these snapshots can be tens to hundreds of MB (every roaring
- * bitmap + every string cache) and are pure derived data, not data
- * that needs to participate in WAL replay or crash recovery. A plain
- * OS file, written with a temp-file-then-rename swap, gives us:
+ * What "save"/"load"/"drop" mean now
+ * -----------------------------------
+ * Every bitmap-shaped structure this file used to dump into one flat file
+ * (a `pos_idx[ch]` entry's bitmap, a `char_cache[ch]`, a
+ * `length_bitmaps[i]`, etc.) now gets its own BiscuitDirEntry, at exactly
+ * the granularity biscuit_common.h's design already addresses at:
+ * `(col, is_lower, kind, ch, position)`. biscuit_persist_save() walks
+ * every one of those structures and biscuit_dir_upsert()s its current
+ * in-memory content as a compacted blob (biscuit_page_write_blob()),
+ * freeing whatever blob chain previously occupied that directory entry.
+ * biscuit_persist_load() does the reverse: one pass over every directory
+ * entry a column's chain holds, decoding each one's blob (and merging in
+ * any pending deltas -- see biscuit_persist_merge_pending() below; dead
+ * code for now since nothing appends to a pending chain yet, but correct
+ * once CRUD wiring lands) back into the right BiscuitIndex field.
  *
- *   - no interaction with the buffer manager / WAL for bulk bitmap data
- *   - atomic replacement (a crash mid-write never leaves a half-written
- *     file where the real name is)
- *   - trivial invalidation: just unlink it, biscuit_load_index() falls
- *     back to a normal from-heap rebuild if the file is absent/corrupt
+ * The rest of BiscuitIndex's persistent state that isn't a
+ * RoaringBitmap-per-(ch,position) structure at all -- the tid array, the
+ * tombstone bitmap, the free-slot list, the per-record string caches, and
+ * assorted scalar bookkeeping (capacity, max_len, insert/update/delete
+ * counts, ...) -- reuses the exact same directory+blob machinery under a
+ * few new BISCUIT_DIR_KIND_* values added for this file specifically
+ * (TIDS/TOMBSTONES/FREELIST/STRCACHE/HEADER -- see biscuit_common.h).
+ * biscuit_blob.c's chunk chain has no bitmap-specific logic at all ("just
+ * bytes in, bytes out", design doc §1), so it works identically for a
+ * flat ItemPointerData[] dump or a length-prefixed string array as it
+ * does for a serialized RoaringBitmap.
  *
- * Bitmap serialization is format-per-build: on HAVE_ROARING builds we
- * use CRoaring's own native "portable" format (a bulk memcpy-shaped
- * dump of its compressed containers -- no per-value reconstruction
- * loop on load). On fallback-bitset builds we dump the block array
- * directly, same bulk-copy shape, just uncompressed. Either way,
- * loading a bitmap is a fread() into a buffer plus one bulk parse
- * call, not millions of individual add() calls, which is what keeps
- * snapshot load fast even for large indexes.
+ * There is no more "is the snapshot stale relative to the metapage's
+ * generation" check, and no separate concept of "snapshot" vs "live
+ * state" at all: the directory + blob pages this file reads and writes
+ * *are* the durable state, always current as of whichever
+ * biscuit_persist_save() call last touched them, not a point-in-time
+ * dump that can drift out of sync with something else. This is exactly
+ * the shift the design doc's Round 5/6 discussion describes (deleting
+ * the old cache/snapshot-staleness machinery because there is no
+ * "expensive reconstruction to amortize" left once the durable pages
+ * themselves are what's being read).
  *
- * Integrity: every snapshot ends with a trailing CRC32C checksum
- * covering all preceding bytes (header + body). The checksum is
- * accumulated incrementally inside wput()/rget() -- the same single
- * pass that already writes/reads every field -- so verifying a
- * multi-hundred-MB snapshot costs no extra I/O and no separate
- * whole-file hashing pass; it just falls out of the write/read we were
- * doing anyway. CRC32C (not a cryptographic hash) is used deliberately:
- * it is SIMD-accelerated by Postgres's own port/pg_crc32c.h (the same
- * routine WAL and pg_control use) and is more than sufficient to catch
- * the failure modes we actually care about here -- a crash mid-write
- * or on-disk bit rot -- as opposed to a malicious adversary. On load,
- * a checksum mismatch is treated exactly like a truncated/corrupt
- * snapshot: discard and fall back to a full from-heap rebuild.
- * BISCUIT_PERSIST_VERSION should be bumped whenever the on-disk format
- * changes, so an incompatible snapshot is cleanly rejected (and
- * rebuilt from the heap) rather than misread.
- *
- * Consistency model (per user requirements: read-mostly, best-effort):
- *   - Snapshot is written at the end of biscuit_build() (CREATE INDEX /
- *     first cold load) and should also be re-written after mutating
- *     paths (biscuit_insert / biscuit_bulkdelete) if write volume ever
- *     becomes non-trivial -- see biscuit_index.c call sites.
- *   - On load, we sanity-check the header (magic/version), that
- *     num_records is non-negative and columns match the index's
- *     current attribute count, that the trailing CRC32C checksum
- *     matches the bytes actually read, AND that the generation
- *     recorded in the snapshot header matches the live generation in
- *     the index's metapage (BiscuitMetaPageData.gen). A mismatch on
- *     any of these means the snapshot is stale or unusable, so it is
- *     discarded (WARNING) and the caller falls back to a normal
- *     rebuild -- we never load data known to be stale or corrupt.
+ * A behavioral note worth flagging explicitly: the old file-based
+ * biscuit_persist_save() deliberately took a bare Oid (not a Relation)
+ * specifically so biscuit_cache.c's proc-exit callback could call it very
+ * late in backend shutdown, since building a file path needs no catalog
+ * access. That assumption no longer holds -- this version needs a real
+ * Relation (relation_open()) to reach the buffer manager, and
+ * relation_open() is not safe to call from a true proc-exit context. This
+ * is not fixed in this file: biscuit_cache.c's whole proc-exit-flush
+ * design is already slated for deletion (not adaptation) in a later
+ * phase per the design doc's Round 5 finding, so patching this file to
+ * accommodate a caller that's about to be deleted would be wasted work.
+ * Flagging it here so whoever does that deletion isn't surprised by why
+ * the old proc-exit flush call site can no longer work.
  */
 
 #include "biscuit_common.h"
 #include "biscuit_bitmap.h"
-#include "biscuit_cache.h"
+#include "biscuit_blob.h"
+#include "biscuit_dir.h"
 #include "biscuit_persist.h"
-#include "biscuit_index.h"   /* for biscuit_read_metadata_from_disk() */
-
-#include "port/pg_crc32c.h"
-
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-#include <errno.h>
-
-#define BISCUIT_PERSIST_MAGIC    (BISCUIT_MAGIC ^ 0x01)
-#define BISCUIT_PERSIST_VERSION  1  /* bump if the on-disk format changes */
-#define BISCUIT_PERSIST_DIR      "pg_biscuit"
-#define BISCUIT_PERSIST_HEADER_RESERVED  4  /* uint32 slots reserved for future metadata */
+#include "biscuit_index.h"   /* for biscuit_get_column_case_mode() /
+                               * biscuit_read_metadata_from_disk() */
+#include "access/relation.h"
 
 /* ================================================================
- * Path helpers
- * ================================================================ */
-
-static void
-biscuit_persist_path(Oid indexoid, char *buf, size_t bufsz)
-{
-    snprintf(buf, bufsz, "%s/%s/%u_%u.bsc",
-             DataDir, BISCUIT_PERSIST_DIR,
-             MyDatabaseId, indexoid);
-}
-
-static void
-biscuit_persist_tmp_path(Oid indexoid, char *buf, size_t bufsz)
-{
-    snprintf(buf, bufsz, "%s/%s/%u_%u.bsc.tmp%d",
-             DataDir, BISCUIT_PERSIST_DIR,
-             MyDatabaseId, indexoid, MyProcPid);
-}
-
-static bool
-biscuit_persist_ensure_dir(void)
-{
-    char dirpath[MAXPGPATH];
-
-    snprintf(dirpath, sizeof(dirpath), "%s/%s", DataDir, BISCUIT_PERSIST_DIR);
-
-    if (mkdir(dirpath, S_IRWXU) != 0 && errno != EEXIST)
-    {
-        elog(WARNING, "biscuit: could not create snapshot directory \"%s\": %m",
-             dirpath);
-        return false;
-    }
-    return true;
-}
-
-/* ================================================================
- * Low-level buffered write/read helpers.
- * All writes go through these so a short write/read is always caught
- * rather than silently producing a truncated/garbage snapshot.
+ * Small in-memory growable-buffer (write) / cursor (read) helpers.
  *
- * Both streams also carry a running CRC32C (crc) that is updated on
- * every successful write/read inside wput()/rget(). This is the
- * mechanism that makes the trailing checksum "free": since every
- * field write/read already funnels through these two functions, the
- * checksum is accumulated as a side effect of I/O we are doing
- * anyway, rather than requiring a dedicated full-file hashing pass
- * before write or after load. Callers that need the final value call
- * FIN_CRC32C() on a copy of the accumulator (see biscuit_persist_save
- * / biscuit_persist_load) -- the trailer write/read itself must not
- * be included, so it happens via the same wput_u32()/rget_u32() calls
- * but its contribution to the accumulator is simply never inspected.
+ * These are the direct replacement for the old WStream/RStream: same
+ * length-prefixed-field shape, but built against a palloc'd in-memory
+ * buffer instead of a FILE* -- the buffer is what gets handed to
+ * biscuit_page_write_blob()/comes back from biscuit_page_read_blob(),
+ * which do the actual paging/WAL-logging. No checksum here: that was
+ * specifically for detecting a torn/corrupt *file write*, a failure mode
+ * that doesn't exist for these blobs (they're GenericXLog-protected pages
+ * -- biscuit_page_read_blob() already cross-checks total_len/total_chunks/
+ * chunk_seq on every chunk and ERRORs on a structural mismatch).
  * ================================================================ */
 
 typedef struct
 {
-    FILE      *fp;
-    bool       error;
-    pg_crc32c  crc;
-} WStream;
-
-typedef struct
-{
-    FILE      *fp;
-    bool       error;
-    pg_crc32c  crc;
-} RStream;
+    char   *data;
+    Size    len;
+    Size    cap;
+} PBuf;
 
 static void
-wput(WStream *w, const void *data, size_t len)
+pbuf_init(PBuf *b)
 {
-    if (w->error || len == 0)
-        return;
-    if (fwrite(data, 1, len, w->fp) != len)
-    {
-        w->error = true;
-        return;
-    }
-    COMP_CRC32C(w->crc, data, len);
+    b->cap  = 256;
+    b->len  = 0;
+    b->data = (char *) palloc(b->cap);
 }
 
 static void
-wput_i32(WStream *w, int32 v)  { wput(w, &v, sizeof(v)); }
-static void
-wput_i64(WStream *w, int64 v)  { wput(w, &v, sizeof(v)); }
-static void
-wput_u32(WStream *w, uint32 v) { wput(w, &v, sizeof(v)); }
+pbuf_put(PBuf *b, const void *p, Size n)
+{
+    if (n == 0)
+        return;
+    if (b->len + n > b->cap)
+    {
+        while (b->cap < b->len + n)
+            b->cap *= 2;
+        b->data = (char *) repalloc(b->data, b->cap);
+    }
+    memcpy(b->data + b->len, p, n);
+    b->len += n;
+}
 
-/* length-prefixed string; len = -1 encodes NULL */
+static void pbuf_put_i32(PBuf *b, int32 v)  { pbuf_put(b, &v, sizeof(v)); }
+static void pbuf_put_i64(PBuf *b, int64 v)  { pbuf_put(b, &v, sizeof(v)); }
+static void pbuf_put_u32(PBuf *b, uint32 v) { pbuf_put(b, &v, sizeof(v)); }
+
 static void
-wput_str(WStream *w, const char *s)
+pbuf_put_str(PBuf *b, const char *s)
 {
     if (!s)
     {
-        wput_i32(w, -1);
+        pbuf_put_i32(b, -1);
         return;
     }
     {
         int32 len = (int32) strlen(s);
-        wput_i32(w, len);
-        wput(w, s, len);
+        pbuf_put_i32(b, len);
+        pbuf_put(b, s, len);
     }
 }
 
-static bool
-rget(RStream *r, void *data, size_t len)
+typedef struct
 {
-    if (r->error || len == 0)
-        return len == 0;
-    if (fread(data, 1, len, r->fp) != len)
+    const char *data;
+    Size        len;
+    Size        pos;
+    bool        error;
+} PCur;
+
+static void
+pcur_init(PCur *c, const char *data, Size len)
+{
+    c->data  = data;
+    c->len   = len;
+    c->pos   = 0;
+    c->error = false;
+}
+
+static bool
+pcur_get(PCur *c, void *out, Size n)
+{
+    if (c->error || c->pos + n > c->len)
     {
-        r->error = true;
+        c->error = true;
         return false;
     }
-    COMP_CRC32C(r->crc, data, len);
+    memcpy(out, c->data + c->pos, n);
+    c->pos += n;
     return true;
 }
 
 static int32
-rget_i32(RStream *r) { int32 v = 0; rget(r, &v, sizeof(v)); return v; }
+pcur_get_i32(PCur *c) { int32 v = 0; pcur_get(c, &v, sizeof(v)); return v; }
 static int64
-rget_i64(RStream *r) { int64 v = 0; rget(r, &v, sizeof(v)); return v; }
+pcur_get_i64(PCur *c) { int64 v = 0; pcur_get(c, &v, sizeof(v)); return v; }
 static uint32
-rget_u32(RStream *r) { uint32 v = 0; rget(r, &v, sizeof(v)); return v; }
+pcur_get_u32(PCur *c) { uint32 v = 0; pcur_get(c, &v, sizeof(v)); return v; }
 
-/* returns palloc'd string, or NULL; *out_null set accordingly */
 static char *
-rget_str(RStream *r, MemoryContext cxt)
+pcur_get_str(PCur *c, MemoryContext cxt)
 {
-    int32 len = rget_i32(r);
-    char *s;
+    int32         len = pcur_get_i32(c);
+    char         *s;
     MemoryContext old;
 
-    if (r->error || len < 0)
+    if (c->error || len < 0)
         return NULL;
 
     old = MemoryContextSwitchTo(cxt);
-    s = (char *) palloc(len + 1);
+    s   = (char *) palloc(len + 1);
     MemoryContextSwitchTo(old);
 
-    if (!rget(r, s, len))
+    if (!pcur_get(c, s, len))
     {
         pfree(s);
         return NULL;
@@ -229,194 +203,238 @@ rget_str(RStream *r, MemoryContext cxt)
 }
 
 /* ================================================================
- * Bitmap (de)serialization -- engine-agnostic: count + uint32 values
+ * Generic per-structure directory+blob write/read.
+ *
+ * These are the only two functions that actually call biscuit_dir_*()/
+ * biscuit_page_*_blob() -- everything else in this file (the CharIndex/
+ * length-array/string-cache walkers below) is just enumerating which
+ * (col, is_lower, kind, ch, position) identities exist and calling
+ * through these two.
  * ================================================================ */
-
-#ifdef HAVE_ROARING
 
 /*
- * Native CRoaring "portable" format: a direct bulk memcpy-shaped dump of
- * the bitmap's own compressed containers.  This is what actually makes
- * deserialize fast -- there is no per-value reconstruction loop at all,
- * unlike the count+values format this replaces (which forced a
- * biscuit_roaring_add() call, and full container-selection logic, for
- * every single set bit -- the source of the 8s load time).
+ * Write (or overwrite) one structure's raw bytes. data == NULL / len == 0
+ * means "this structure is absent" -- mirrors biscuit_page_write_blob()'s
+ * own len==0 contract, and an absent structure with a pre-existing
+ * directory entry has that entry's blob_head reset to InvalidBlockNumber
+ * (not deleted -- directory entries are never removed, per §5) so a
+ * later re-population finds the same entry via biscuit_dir_find().
+ *
+ * When neither an existing entry nor new data exist, no directory entry
+ * is created at all -- an absent structure that was never written stays
+ * simply unreferenced, exactly like today's in-memory NULL RoaringBitmap*
+ * fields.
  */
 static void
-wput_bitmap(WStream *w, const RoaringBitmap *rb)
+biscuit_persist_write_raw(Relation index,
+                           int32 col, bool is_lower, uint8 kind,
+                           int32 ch, int32 position,
+                           const char *data, uint32 len)
 {
-    if (!rb)
+    BiscuitDirEntry    existing;
+    BiscuitDirEntryRef ref;
+    BiscuitDirEntry    newentry;
+    BlockNumber        new_head = InvalidBlockNumber;
+
+    if (data && len > 0)
+        biscuit_page_write_blob(index, data, len, &new_head, NULL);
+
+    if (biscuit_dir_find(index, col, is_lower, kind, ch, position, &existing, &ref))
     {
-        wput_i64(w, -1);   /* NULL marker */
+        BlockNumber old_head = existing.blob_head;
+
+        newentry = existing;
+        newentry.blob_head = new_head;
+        biscuit_dir_update(index, &ref, &newentry);
+
+        if (old_head != InvalidBlockNumber && old_head != new_head)
+            biscuit_page_free_blob(index, old_head);
         return;
     }
-    {
-        size_t  sz  = roaring_bitmap_portable_size_in_bytes(rb);
-        char   *buf = (char *) palloc(sz);
 
-        roaring_bitmap_portable_serialize(rb, buf);
-        wput_i64(w, (int64) sz);
-        wput(w, buf, sz);
-        pfree(buf);
-    }
+    if (new_head == InvalidBlockNumber)
+        return;   /* nothing to persist, nothing existed before */
+
+    memset(&newentry, 0, sizeof(newentry));
+    newentry.col           = (int16) col;
+    newentry.is_lower      = is_lower;
+    newentry.kind          = kind;
+    newentry.ch            = ch;
+    newentry.position       = position;
+    newentry.blob_head      = new_head;
+    newentry.pending_head   = InvalidBlockNumber;
+    newentry.pending_tail   = InvalidBlockNumber;
+    newentry.pending_count  = 0;
+    newentry.pending_bytes  = 0;
+
+    biscuit_dir_insert(index, &newentry, NULL);
 }
 
-static RoaringBitmap *
-rget_bitmap(RStream *r)
+static void
+biscuit_persist_write_bitmap(Relation index,
+                              int32 col, bool is_lower, uint8 kind,
+                              int32 ch, int32 position,
+                              const RoaringBitmap *bm)
 {
-    int64 sz = rget_i64(r);
-    char *buf;
-    RoaringBitmap *rb;
+    char   *buf = NULL;
+    uint32  len = 0;
 
-    if (r->error || sz < 0)
-        return NULL;
+    if (bm)
+        buf = biscuit_roaring_serialize(bm, &len);
 
-    buf = (char *) palloc(sz);
-    if (!rget(r, buf, sz))
-    {
+    biscuit_persist_write_raw(index, col, is_lower, kind, ch, position, buf, len);
+
+    if (buf)
         pfree(buf);
-        return NULL;
-    }
-
-    rb = roaring_bitmap_portable_deserialize_safe(buf, sz);
-    pfree(buf);
-    return rb;   /* NULL on corrupt input -- caller treats as load failure */
 }
-
-#else  /* !HAVE_ROARING -- fallback bitset */
 
 /*
- * The fallback bitmap is already just a flat uint64_t[] -- serialize it
- * as a raw block dump rather than expanding to individual set bits and
- * calling add() in a loop.  Same bulk-memcpy shape as the roaring path
- * above, just without compression.
+ * biscuit_persist_merge_pending
+ *
+ * Read-only walk of a pending chain, applying every record to `target`
+ * via the existing biscuit_roaring_add()/_remove() -- the design doc §4
+ * merge-at-scan strategy, applied here to give biscuit_persist_load() the
+ * same correctness guarantee a live scan would have. Deliberately NOT
+ * biscuit_pending_drain(): that function is destructive (frees the
+ * pending chain and optionally rewrites the blob), which is exactly wrong
+ * for a read -- per §4, "a scan never triggers a drain". This duplicates
+ * the small read-loop portion of biscuit_pending_drain()'s walk rather
+ * than exposing a new non-destructive primitive from biscuit_blob.h,
+ * since that file's exported contract wasn't part of this phase's scope.
+ *
+ * Dead code in practice as of this phase: nothing yet appends to a
+ * pending chain (that's future CRUD call-site wiring), so every
+ * directory entry's pending_head is InvalidBlockNumber and this is never
+ * actually invoked with real records. Implemented now anyway so
+ * biscuit_persist_load() is correct the moment that wiring lands, rather
+ * than silently ignoring pending deltas until someone remembers to add
+ * this.
  */
 static void
-wput_bitmap(WStream *w, const RoaringBitmap *rb)
+biscuit_persist_merge_pending(Relation index, BlockNumber pending_head, RoaringBitmap *target)
 {
-    if (!rb)
+    BlockNumber cur = pending_head;
+
+    while (cur != InvalidBlockNumber)
     {
-        wput_i32(w, -1);   /* NULL marker */
-        return;
-    }
-    wput_i32(w, rb->num_blocks);
-    if (rb->num_blocks > 0)
-        wput(w, rb->blocks, rb->num_blocks * sizeof(uint64_t));
-}
+        Buffer                     buf = ReadBuffer(index, cur);
+        Page                       page;
+        BiscuitPendingPageHeader  *hdr;
+        BiscuitPendingRecord      *rec;
+        BiscuitPageOpaque          opaque;
+        BlockNumber                next;
+        uint32                     i;
 
-static RoaringBitmap *
-rget_bitmap(RStream *r)
-{
-    int32 num_blocks = rget_i32(r);
-    RoaringBitmap *rb;
+        LockBuffer(buf, BUFFER_LOCK_SHARE);
+        page = BufferGetPage(buf);
+        hdr  = (BiscuitPendingPageHeader *) ((char *) page + SizeOfPageHeaderData);
+        rec  = (BiscuitPendingRecord *) ((char *) hdr + MAXALIGN(sizeof(BiscuitPendingPageHeader)));
 
-    if (r->error || num_blocks < 0)
-        return NULL;
-
-    rb = (RoaringBitmap *) palloc0(sizeof(RoaringBitmap));
-    rb->num_blocks = num_blocks;
-    rb->capacity   = num_blocks;
-    rb->blocks     = (uint64_t *) palloc0(Max(num_blocks, 1) * sizeof(uint64_t));
-
-    if (num_blocks > 0 && !rget(r, rb->blocks, num_blocks * sizeof(uint64_t)))
-    {
-        pfree(rb->blocks);
-        pfree(rb);
-        return NULL;
-    }
-    return rb;
-}
-
-#endif /* HAVE_ROARING */
-
-/* ================================================================
- * CharIndex (de)serialization
- * ================================================================ */
-
-static void
-wput_charindex(WStream *w, const CharIndex *ci)
-{
-    int i;
-    wput_i32(w, ci->count);
-    for (i = 0; i < ci->count; i++)
-    {
-        wput_i32(w, ci->entries[i].pos);
-        wput_bitmap(w, ci->entries[i].bitmap);
-    }
-}
-
-/* ci must already have entries/capacity allocated (mirrors the
- * skeleton-allocation pattern used elsewhere in this codebase) */
-static bool
-rget_charindex(RStream *r, CharIndex *ci)
-{
-    int count = rget_i32(r);
-    int i;
-
-    if (r->error || count < 0)
-        return false;
-
-    if (count > ci->capacity)
-    {
-        ci->entries  = (PosEntry *) repalloc(ci->entries, count * sizeof(PosEntry));
-        ci->capacity = count;
-    }
-    ci->count = count;
-
-    for (i = 0; i < count; i++)
-    {
-        ci->entries[i].pos    = rget_i32(r);
-        ci->entries[i].bitmap = rget_bitmap(r);
-        if (r->error)
-            return false;
-    }
-    return true;
-}
-
-/* ================================================================
- * length_bitmaps[] / length_ge_bitmaps[] array (de)serialization
- * ================================================================ */
-
-static void
-wput_bitmap_array(WStream *w, RoaringBitmap **arr, int n)
-{
-    int i;
-    wput_i32(w, arr ? n : -1);
-    if (!arr)
-        return;
-    for (i = 0; i < n; i++)
-        wput_bitmap(w, arr[i]);
-}
-
-static RoaringBitmap **
-rget_bitmap_array(RStream *r, int *out_n, MemoryContext cxt)
-{
-    int n = rget_i32(r);
-    RoaringBitmap **arr;
-    int i;
-    MemoryContext old;
-
-    if (r->error || n < 0)
-    {
-        *out_n = 0;
-        return NULL;
-    }
-
-    old = MemoryContextSwitchTo(cxt);
-    arr = (RoaringBitmap **) palloc0(n * sizeof(RoaringBitmap *));
-    MemoryContextSwitchTo(old);
-
-    for (i = 0; i < n; i++)
-    {
-        arr[i] = rget_bitmap(r);
-        if (r->error)
+        for (i = 0; i < hdr->num_records; i++)
         {
-            *out_n = 0;
-            return NULL;
+            if (rec[i].op == BISCUIT_PENDING_OP_ADD)
+                biscuit_roaring_add(target, rec[i].value);
+            else if (rec[i].op == BISCUIT_PENDING_OP_REMOVE)
+                biscuit_roaring_remove(target, rec[i].value);
         }
+
+        opaque = (BiscuitPageOpaque) PageGetSpecialPointer(page);
+        next   = opaque->next;
+        UnlockReleaseBuffer(buf);
+        cur = next;
     }
-    *out_n = n;
-    return arr;
+}
+
+/*
+ * Decode one directory entry's compacted blob, merging in its pending
+ * chain if it has one. Returns NULL for a genuinely absent structure
+ * (blob_head == InvalidBlockNumber and no pending records either) --
+ * callers store that straight into a RoaringBitmap* field, matching
+ * today's "NULL means absent" convention throughout biscuit_bitmap.c/
+ * biscuit_pattern.c.
+ */
+static RoaringBitmap *
+biscuit_persist_decode_entry(Relation index, const BiscuitDirEntry *entry)
+{
+    RoaringBitmap *bm = NULL;
+
+    if (entry->blob_head != InvalidBlockNumber)
+    {
+        char   *data;
+        uint32  len;
+
+        biscuit_page_read_blob(index, entry->blob_head, &data, &len);
+        bm = biscuit_roaring_deserialize(data, len);
+        if (data)
+            pfree(data);
+    }
+
+    if (entry->pending_head != InvalidBlockNumber)
+    {
+        if (!bm)
+            bm = biscuit_roaring_create();
+        biscuit_persist_merge_pending(index, entry->pending_head, bm);
+    }
+
+    return bm;
+}
+
+/* ================================================================
+ * CharIndex (pos_idx[ch] / neg_idx[ch]) save/load
+ * ================================================================ */
+
+static void
+biscuit_persist_save_charindex(Relation index, int32 col, bool is_lower,
+                                uint8 kind, int32 ch, const CharIndex *ci)
+{
+    int i;
+
+    for (i = 0; i < ci->count; i++)
+        biscuit_persist_write_bitmap(index, col, is_lower, kind, ch,
+                                      ci->entries[i].pos, ci->entries[i].bitmap);
+}
+
+static void
+biscuit_persist_save_length_arrays(Relation index, int32 col, bool is_lower,
+                                    RoaringBitmap **len_arr, RoaringBitmap **len_ge_arr,
+                                    int max_length)
+{
+    int i;
+
+    for (i = 0; i < max_length; i++)
+    {
+        if (len_arr)
+            biscuit_persist_write_bitmap(index, col, is_lower, BISCUIT_DIR_KIND_LEN,
+                                          -1, i, len_arr[i]);
+        if (len_ge_arr)
+            biscuit_persist_write_bitmap(index, col, is_lower, BISCUIT_DIR_KIND_LEN_GE,
+                                          -1, i, len_ge_arr[i]);
+    }
+}
+
+static void
+biscuit_persist_save_strcache(Relation index, int32 col,
+                               char **cache, char **cache_lower, int num_records)
+{
+    PBuf b1, b2;
+    int  i;
+
+    pbuf_init(&b1);
+    pbuf_init(&b2);
+
+    for (i = 0; i < num_records; i++)
+    {
+        pbuf_put_str(&b1, cache ? cache[i] : NULL);
+        pbuf_put_str(&b2, cache_lower ? cache_lower[i] : NULL);
+    }
+
+    biscuit_persist_write_raw(index, col, false, BISCUIT_DIR_KIND_STRCACHE, -1, -1,
+                               b1.len ? b1.data : NULL, (uint32) b1.len);
+    biscuit_persist_write_raw(index, col, true, BISCUIT_DIR_KIND_STRCACHE, -1, -1,
+                               b2.len ? b2.data : NULL, (uint32) b2.len);
+
+    pfree(b1.data);
+    pfree(b2.data);
 }
 
 /* ================================================================
@@ -426,179 +444,161 @@ rget_bitmap_array(RStream *r, int *out_n, MemoryContext cxt)
 void
 biscuit_persist_save(Oid indexoid, BiscuitIndex *idx)
 {
-    char     finalpath[MAXPGPATH];
-    char     tmppath[MAXPGPATH];
-    WStream  w;
-    int      ch, i;
+    Relation index;
 
-    if (!biscuit_persist_ensure_dir())
-        return;
+    index = relation_open(indexoid, RowExclusiveLock);
 
-    biscuit_persist_path(indexoid, finalpath, sizeof(finalpath));
-    biscuit_persist_tmp_path(indexoid, tmppath, sizeof(tmppath));
-
-    w.fp    = fopen(tmppath, "wb");
-    w.error = false;
-    INIT_CRC32C(w.crc);
-    if (!w.fp)
+    PG_TRY();
     {
-        elog(WARNING, "biscuit: could not create snapshot file \"%s\": %m", tmppath);
-        return;
-    }
+        PBuf header;
+        int  ch, i;
 
-    /* ---- header ---- */
-    wput_u32(&w, BISCUIT_PERSIST_MAGIC);
-    wput_u32(&w, BISCUIT_PERSIST_VERSION);
-    /*
-     * Generation this snapshot represents.  Written exactly once, here,
-     * as part of the shared header path -- both the single-column and
-     * multi-column serialization bodies below are pure continuations of
-     * this same write sequence and have no early-return that could skip
-     * past it.
-     */
-    wput_i64(&w, (int64) idx->gen);
-    /* Reserved for future header metadata; zero-filled so old readers
-     * (there are none yet, but this keeps the pattern consistent with
-     * the metapage's own reserved slots) ignore it safely. */
-    {
-        int resv;
-        for (resv = 0; resv < BISCUIT_PERSIST_HEADER_RESERVED; resv++)
-            wput_u32(&w, 0);
-    }
-    wput_i32(&w, idx->num_columns);
-    wput_i32(&w, idx->num_records);
-    wput_i32(&w, idx->capacity);
-    wput_i32(&w, idx->max_len);
-    wput_i32(&w, idx->max_length_legacy);
-    wput_i32(&w, idx->max_length_lower);
-    wput_i64(&w, idx->insert_count);
-    wput_i64(&w, idx->update_count);
-    wput_i64(&w, idx->delete_count);
-    wput_i32(&w, idx->tombstone_count);
+        /* ---- scalar bookkeeping (see BISCUIT_DIR_KIND_HEADER comment) ---- */
+        pbuf_init(&header);
+        pbuf_put_i32(&header, idx->num_records);
+        pbuf_put_i32(&header, idx->capacity);
+        pbuf_put_i32(&header, idx->max_len);
+        pbuf_put_i32(&header, idx->max_length_legacy);
+        pbuf_put_i32(&header, idx->max_length_lower);
+        pbuf_put_i64(&header, idx->insert_count);
+        pbuf_put_i64(&header, idx->update_count);
+        pbuf_put_i64(&header, idx->delete_count);
+        pbuf_put_i32(&header, idx->tombstone_count);
+        pbuf_put_i32(&header, idx->num_columns);
 
-    /* ---- tids ---- */
-    wput(&w, idx->tids, idx->num_records * sizeof(ItemPointerData));
-
-    /* ---- tombstones ---- */
-    wput_bitmap(&w, idx->tombstones);
-
-    /* ---- free list ---- */
-    wput_i32(&w, idx->free_count);
-    if (idx->free_count > 0)
-        wput(&w, idx->free_list, idx->free_count * sizeof(uint32_t));
-
-    if (idx->num_columns == 1)
-    {
-        /* single-column (legacy) layout */
-        for (i = 0; i < idx->num_records; i++)
+        if (idx->num_columns > 1)
         {
-            wput_str(&w, idx->data_cache[i]);
-            wput_str(&w, idx->data_cache_lower[i]);
-        }
-
-        for (ch = 0; ch < CHAR_RANGE; ch++)
-        {
-            wput_charindex(&w, &idx->pos_idx_legacy[ch]);
-            wput_charindex(&w, &idx->neg_idx_legacy[ch]);
-            wput_bitmap(&w, idx->char_cache_legacy[ch]);
-
-            wput_charindex(&w, &idx->pos_idx_lower[ch]);
-            wput_charindex(&w, &idx->neg_idx_lower[ch]);
-            wput_bitmap(&w, idx->char_cache_lower[ch]);
-        }
-
-        wput_bitmap_array(&w, idx->length_bitmaps_legacy, idx->max_length_legacy);
-        wput_bitmap_array(&w, idx->length_ge_bitmaps_legacy, idx->max_length_legacy);
-        wput_bitmap_array(&w, idx->length_bitmaps_lower, idx->max_length_lower);
-        wput_bitmap_array(&w, idx->length_ge_bitmaps_lower, idx->max_length_lower);
-    }
-    else
-    {
-        /* multi-column layout */
-        int col;
-
-        for (col = 0; col < idx->num_columns; col++)
-        {
-            wput_u32(&w, idx->column_types[col]);
-            for (i = 0; i < idx->num_records; i++)
+            for (i = 0; i < idx->num_columns; i++)
             {
-                wput_str(&w, idx->column_data_cache[col][i]);
-                wput_str(&w, idx->column_data_cache_lower[col][i]);
+                pbuf_put_u32(&header, idx->column_types[i]);
+                pbuf_put_i32(&header, idx->column_indices[i].max_length);
+                pbuf_put_i32(&header, idx->column_indices[i].max_length_lower);
             }
         }
 
-        for (col = 0; col < idx->num_columns; col++)
-        {
-            ColumnIndex *cidx = &idx->column_indices[col];
+        biscuit_persist_write_raw(index, BISCUIT_DIR_COL_SINGLETON, false,
+                                   BISCUIT_DIR_KIND_HEADER, -1, -1,
+                                   header.data, (uint32) header.len);
+        pfree(header.data);
 
-            wput_i32(&w, cidx->max_length);
-            wput_i32(&w, cidx->max_length_lower);
+        /* ---- tids ---- */
+        biscuit_persist_write_raw(index, BISCUIT_DIR_COL_SINGLETON, false,
+                                   BISCUIT_DIR_KIND_TIDS, -1, -1,
+                                   idx->num_records > 0 ? (const char *) idx->tids : NULL,
+                                   (uint32) (idx->num_records * sizeof(ItemPointerData)));
+
+        /* ---- tombstones ---- */
+        biscuit_persist_write_bitmap(index, BISCUIT_DIR_COL_SINGLETON, false,
+                                      BISCUIT_DIR_KIND_TOMBSTONES, -1, -1,
+                                      idx->tombstones);
+
+        /* ---- free list ---- */
+        biscuit_persist_write_raw(index, BISCUIT_DIR_COL_SINGLETON, false,
+                                   BISCUIT_DIR_KIND_FREELIST, -1, -1,
+                                   idx->free_count > 0 ? (const char *) idx->free_list : NULL,
+                                   (uint32) (idx->free_count * sizeof(uint32_t)));
+
+        if (idx->num_columns == 1)
+        {
+            biscuit_persist_save_strcache(index, BISCUIT_DIR_COL_LEGACY,
+                                           idx->data_cache, idx->data_cache_lower,
+                                           idx->num_records);
 
             for (ch = 0; ch < CHAR_RANGE; ch++)
             {
-                wput_charindex(&w, &cidx->pos_idx[ch]);
-                wput_charindex(&w, &cidx->neg_idx[ch]);
-                wput_bitmap(&w, cidx->char_cache[ch]);
+                biscuit_persist_save_charindex(index, BISCUIT_DIR_COL_LEGACY, false,
+                                                BISCUIT_DIR_KIND_POS, ch, &idx->pos_idx_legacy[ch]);
+                biscuit_persist_save_charindex(index, BISCUIT_DIR_COL_LEGACY, false,
+                                                BISCUIT_DIR_KIND_NEG, ch, &idx->neg_idx_legacy[ch]);
+                biscuit_persist_write_bitmap(index, BISCUIT_DIR_COL_LEGACY, false,
+                                              BISCUIT_DIR_KIND_CACHE, ch, -1,
+                                              idx->char_cache_legacy[ch]);
 
-                wput_charindex(&w, &cidx->pos_idx_lower[ch]);
-                wput_charindex(&w, &cidx->neg_idx_lower[ch]);
-                wput_bitmap(&w, cidx->char_cache_lower[ch]);
+                biscuit_persist_save_charindex(index, BISCUIT_DIR_COL_LEGACY, true,
+                                                BISCUIT_DIR_KIND_POS, ch, &idx->pos_idx_lower[ch]);
+                biscuit_persist_save_charindex(index, BISCUIT_DIR_COL_LEGACY, true,
+                                                BISCUIT_DIR_KIND_NEG, ch, &idx->neg_idx_lower[ch]);
+                biscuit_persist_write_bitmap(index, BISCUIT_DIR_COL_LEGACY, true,
+                                              BISCUIT_DIR_KIND_CACHE, ch, -1,
+                                              idx->char_cache_lower[ch]);
             }
 
-            wput_bitmap_array(&w, cidx->length_bitmaps, cidx->max_length);
-            wput_bitmap_array(&w, cidx->length_ge_bitmaps, cidx->max_length);
-            wput_bitmap_array(&w, cidx->length_bitmaps_lower, cidx->max_length_lower);
-            wput_bitmap_array(&w, cidx->length_ge_bitmaps_lower, cidx->max_length_lower);
+            biscuit_persist_save_length_arrays(index, BISCUIT_DIR_COL_LEGACY, false,
+                                                idx->length_bitmaps_legacy,
+                                                idx->length_ge_bitmaps_legacy,
+                                                idx->max_length_legacy);
+            biscuit_persist_save_length_arrays(index, BISCUIT_DIR_COL_LEGACY, true,
+                                                idx->length_bitmaps_lower,
+                                                idx->length_ge_bitmaps_lower,
+                                                idx->max_length_lower);
+        }
+        else
+        {
+            int col;
+
+            for (col = 0; col < idx->num_columns; col++)
+                biscuit_persist_save_strcache(index, col,
+                                               idx->column_data_cache[col],
+                                               idx->column_data_cache_lower[col],
+                                               idx->num_records);
+
+            for (col = 0; col < idx->num_columns; col++)
+            {
+                ColumnIndex *cidx = &idx->column_indices[col];
+
+                for (ch = 0; ch < CHAR_RANGE; ch++)
+                {
+                    biscuit_persist_save_charindex(index, col, false,
+                                                    BISCUIT_DIR_KIND_POS, ch, &cidx->pos_idx[ch]);
+                    biscuit_persist_save_charindex(index, col, false,
+                                                    BISCUIT_DIR_KIND_NEG, ch, &cidx->neg_idx[ch]);
+                    biscuit_persist_write_bitmap(index, col, false,
+                                                  BISCUIT_DIR_KIND_CACHE, ch, -1,
+                                                  cidx->char_cache[ch]);
+
+                    biscuit_persist_save_charindex(index, col, true,
+                                                    BISCUIT_DIR_KIND_POS, ch, &cidx->pos_idx_lower[ch]);
+                    biscuit_persist_save_charindex(index, col, true,
+                                                    BISCUIT_DIR_KIND_NEG, ch, &cidx->neg_idx_lower[ch]);
+                    biscuit_persist_write_bitmap(index, col, true,
+                                                  BISCUIT_DIR_KIND_CACHE, ch, -1,
+                                                  cidx->char_cache_lower[ch]);
+                }
+
+                biscuit_persist_save_length_arrays(index, col, false,
+                                                    cidx->length_bitmaps, cidx->length_ge_bitmaps,
+                                                    cidx->max_length);
+                biscuit_persist_save_length_arrays(index, col, true,
+                                                    cidx->length_bitmaps_lower, cidx->length_ge_bitmaps_lower,
+                                                    cidx->max_length_lower);
+            }
         }
     }
-
-    /*
-     * ---- trailing checksum ----
-     * Finalize the CRC accumulated over every byte written so far (the
-     * full header + body) and append it as the last 4 bytes of the
-     * file. Finalizing into a local copy rather than w.crc itself means
-     * the wput_u32() call below -- which, like every other write, feeds
-     * back into w.crc -- can't corrupt the value we're about to persist;
-     * we simply never look at w.crc again after this point.
-     */
+    PG_CATCH();
     {
-        pg_crc32c final_crc = w.crc;
+        /*
+         * Best-effort, per this file's header comment: a failure here
+         * must never take down the INSERT/build that triggered it.
+         * Convert to a WARNING and give up on this save attempt --
+         * gen_at_last_snapshot is deliberately left untouched below so
+         * the next save attempt isn't skipped.
+         */
+        ErrorData *edata = CopyErrorData();
 
-        FIN_CRC32C(final_crc);
-        wput_u32(&w, (uint32) final_crc);
-    }
-
-    if (w.error || fflush(w.fp) != 0)
-    {
-        elog(WARNING, "biscuit: error writing snapshot \"%s\", discarding", tmppath);
-        fclose(w.fp);
-        unlink(tmppath);
+        FlushErrorState();
+        relation_close(index, RowExclusiveLock);
+        elog(WARNING, "biscuit: error saving directory-backed structures for index %u: %s",
+             indexoid, edata->message);
+        FreeErrorData(edata);
         return;
     }
+    PG_END_TRY();
 
-    /* fsync the temp file's contents before the atomic rename */
-    if (fsync(fileno(w.fp)) != 0)
-        elog(WARNING, "biscuit: fsync of snapshot \"%s\" failed: %m", tmppath);
+    relation_close(index, RowExclusiveLock);
 
-    fclose(w.fp);
-
-    if (rename(tmppath, finalpath) != 0)
-    {
-        elog(WARNING, "biscuit: could not install snapshot \"%s\": %m", finalpath);
-        unlink(tmppath);
-        return;
-    }
-
-    /*
-     * Only record the snapshot as "up to date" once it has actually
-     * landed on disk under its real name -- any earlier return above
-     * (write error, fsync-visible failure via rename, etc.) leaves
-     * gen_at_last_snapshot untouched so the next save attempt is not
-     * skipped.
-     */
     idx->gen_at_last_snapshot = idx->gen;
 
-    elog(DEBUG1, "biscuit: wrote disk snapshot for index %u (%d records, gen " UINT64_FORMAT ")",
+    elog(DEBUG1, "biscuit: saved directory-backed structures for index %u (%d records, gen " UINT64_FORMAT ")",
          indexoid, idx->num_records, idx->gen);
 }
 
@@ -606,108 +606,229 @@ biscuit_persist_save(Oid indexoid, BiscuitIndex *idx)
  * LOAD
  * ================================================================ */
 
+/* Growable (pos, bitmap) list -- mirrors the old on-disk CharIndex shape,
+ * built up during the directory walk below instead of read as one
+ * contiguous count-prefixed run (the directory doesn't store an explicit
+ * per-character count -- see file header). */
+typedef struct
+{
+    PosEntry *entries;
+    int       count;
+    int       capacity;
+} LoadBucket;
+
+static void
+load_bucket_add(LoadBucket *b, int32 pos, RoaringBitmap *bm)
+{
+    if (b->count >= b->capacity)
+    {
+        int newcap = b->capacity ? b->capacity * 2 : 8;
+
+        b->entries  = b->entries
+            ? (PosEntry *) repalloc(b->entries, newcap * sizeof(PosEntry))
+            : (PosEntry *) palloc(newcap * sizeof(PosEntry));
+        b->capacity = newcap;
+    }
+    b->entries[b->count].pos    = pos;
+    b->entries[b->count].bitmap = bm;
+    b->count++;
+}
+
+/* Per-column walk state shared by biscuit_persist_load_column_walk_cb(). */
+typedef struct
+{
+    Relation        index;
+    LoadBucket      pos[2][CHAR_RANGE];
+    LoadBucket      neg[2][CHAR_RANGE];
+    RoaringBitmap  *cache[2][CHAR_RANGE];
+    RoaringBitmap **len_arr[2];       /* pre-sized to max_length[lower] by caller */
+    RoaringBitmap **len_ge_arr[2];
+    int             max_length[2];
+} LoadColumnState;
+
+static void
+biscuit_persist_load_column_walk_cb(const BiscuitDirEntry *entry, void *vstate)
+{
+    LoadColumnState *st    = (LoadColumnState *) vstate;
+    int              lower = entry->is_lower ? 1 : 0;
+
+    switch (entry->kind)
+    {
+        case BISCUIT_DIR_KIND_POS:
+            load_bucket_add(&st->pos[lower][(unsigned char) entry->ch], entry->position,
+                             biscuit_persist_decode_entry(st->index, entry));
+            break;
+        case BISCUIT_DIR_KIND_NEG:
+            load_bucket_add(&st->neg[lower][(unsigned char) entry->ch], entry->position,
+                             biscuit_persist_decode_entry(st->index, entry));
+            break;
+        case BISCUIT_DIR_KIND_CACHE:
+            st->cache[lower][(unsigned char) entry->ch] = biscuit_persist_decode_entry(st->index, entry);
+            break;
+        case BISCUIT_DIR_KIND_LEN:
+            if (entry->position >= 0 && entry->position < st->max_length[lower])
+                st->len_arr[lower][entry->position] = biscuit_persist_decode_entry(st->index, entry);
+            break;
+        case BISCUIT_DIR_KIND_LEN_GE:
+            if (entry->position >= 0 && entry->position < st->max_length[lower])
+                st->len_ge_arr[lower][entry->position] = biscuit_persist_decode_entry(st->index, entry);
+            break;
+        default:
+            /* HEADER/TIDS/TOMBSTONES/FREELIST/STRCACHE: read separately
+             * via direct biscuit_dir_find() calls, not via this walk. */
+            break;
+    }
+}
+
+/* Copy a LoadBucket's accumulated (pos,bitmap) pairs into a freshly
+ * palloc'd CharIndex, in CacheMemoryContext (matching the old code's
+ * allocation context for every in-memory structure it built). */
+static void
+load_bucket_into_charindex(CharIndex *ci, const LoadBucket *b)
+{
+    ci->count    = b->count;
+    ci->capacity = Max(b->count, 8);
+    ci->entries  = (PosEntry *) palloc(ci->capacity * sizeof(PosEntry));
+    if (b->count > 0)
+        memcpy(ci->entries, b->entries, b->count * sizeof(PosEntry));
+}
+
+/* Read one (col,is_lower) pair's whole string-cache blob back into a
+ * palloc'd char*[num_records] array (NULL entries preserved). */
+static char **
+biscuit_persist_load_strcache(Relation index, int32 col, bool is_lower, int num_records)
+{
+    BiscuitDirEntry entry;
+    char          **arr;
+    char           *data;
+    uint32          len;
+    PCur            cur;
+    int             i;
+
+    arr = (char **) palloc0(Max(num_records, 1) * sizeof(char *));
+
+    if (!biscuit_dir_find(index, col, is_lower, BISCUIT_DIR_KIND_STRCACHE, -1, -1, &entry, NULL))
+        return arr;   /* nothing saved yet -- all-NULL array, matches absent cache */
+
+    if (entry.blob_head == InvalidBlockNumber)
+        return arr;
+
+    biscuit_page_read_blob(index, entry.blob_head, &data, &len);
+    pcur_init(&cur, data, len);
+
+    for (i = 0; i < num_records; i++)
+        arr[i] = pcur_get_str(&cur, CacheMemoryContext);
+
+    if (data)
+        pfree(data);
+
+    if (cur.error)
+        ereport(ERROR,
+                (errmsg("biscuit: truncated string-cache blob for index %u (col=%d is_lower=%d)",
+                        RelationGetRelid(index), col, (int) is_lower)));
+
+    return arr;
+}
+
+static void
+biscuit_persist_load_column(Relation index, int32 col,
+                             int max_length, int max_length_lower,
+                             /* out params, all filled in CacheMemoryContext */
+                             CharIndex *pos_idx, CharIndex *neg_idx, RoaringBitmap **char_cache,
+                             CharIndex *pos_idx_lower, CharIndex *neg_idx_lower, RoaringBitmap **char_cache_lower,
+                             RoaringBitmap ***length_bitmaps, RoaringBitmap ***length_ge_bitmaps,
+                             RoaringBitmap ***length_bitmaps_lower, RoaringBitmap ***length_ge_bitmaps_lower)
+{
+    LoadColumnState st;
+    int             ch;
+
+    memset(&st, 0, sizeof(st));
+    st.index         = index;
+    st.max_length[0] = max_length;
+    st.max_length[1] = max_length_lower;
+
+    *length_bitmaps          = (RoaringBitmap **) palloc0(Max(max_length, 1) * sizeof(RoaringBitmap *));
+    *length_ge_bitmaps       = (RoaringBitmap **) palloc0(Max(max_length, 1) * sizeof(RoaringBitmap *));
+    *length_bitmaps_lower    = (RoaringBitmap **) palloc0(Max(max_length_lower, 1) * sizeof(RoaringBitmap *));
+    *length_ge_bitmaps_lower = (RoaringBitmap **) palloc0(Max(max_length_lower, 1) * sizeof(RoaringBitmap *));
+    st.len_arr[0]       = *length_bitmaps;
+    st.len_ge_arr[0]    = *length_ge_bitmaps;
+    st.len_arr[1]       = *length_bitmaps_lower;
+    st.len_ge_arr[1]    = *length_ge_bitmaps_lower;
+
+    biscuit_dir_foreach_column(index, biscuit_dir_slot_for_col(col),
+                                biscuit_persist_load_column_walk_cb, &st);
+
+    for (ch = 0; ch < CHAR_RANGE; ch++)
+    {
+        load_bucket_into_charindex(&pos_idx[ch], &st.pos[0][ch]);
+        load_bucket_into_charindex(&neg_idx[ch], &st.neg[0][ch]);
+        char_cache[ch] = st.cache[0][ch];
+
+        load_bucket_into_charindex(&pos_idx_lower[ch], &st.pos[1][ch]);
+        load_bucket_into_charindex(&neg_idx_lower[ch], &st.neg[1][ch]);
+        char_cache_lower[ch] = st.cache[1][ch];
+
+        if (st.pos[0][ch].entries) pfree(st.pos[0][ch].entries);
+        if (st.neg[0][ch].entries) pfree(st.neg[0][ch].entries);
+        if (st.pos[1][ch].entries) pfree(st.pos[1][ch].entries);
+        if (st.neg[1][ch].entries) pfree(st.neg[1][ch].entries);
+    }
+}
+
 BiscuitIndex *
 biscuit_persist_load(Relation index)
 {
     Oid            indexoid = RelationGetRelid(index);
-    char           path[MAXPGPATH];
-    RStream        r;
-    BiscuitIndex  *idx = NULL;
+    int            natts    = index->rd_index->indnatts;
+    BiscuitIndex  *idx      = NULL;
     MemoryContext  oldcontext;
-    uint32         magic, version;
-    uint64         snapshot_gen;
-    uint64         live_gen;
-    bool           have_live_gen;
-    int            reserved_slot;
-    int            natts = index->rd_index->indnatts;
-    int            ch, i;
+    BiscuitDirEntry header_entry;
 
-    biscuit_persist_path(indexoid, path, sizeof(path));
-
-    r.fp = fopen(path, "rb");
-    r.error = false;
-    INIT_CRC32C(r.crc);
-    if (!r.fp)
-        return NULL;   /* no snapshot -- normal, caller falls back */
-
-    magic   = rget_u32(&r);
-    version = rget_u32(&r);
-
-    if (r.error || magic != BISCUIT_PERSIST_MAGIC || version != BISCUIT_PERSIST_VERSION)
-    {
-        elog(DEBUG1, "biscuit: snapshot \"%s\" missing/incompatible, ignoring", path);
-        fclose(r.fp);
-        return NULL;
-    }
-
-    snapshot_gen = (uint64) rget_i64(&r);
-    for (reserved_slot = 0; reserved_slot < BISCUIT_PERSIST_HEADER_RESERVED; reserved_slot++)
-        (void) rget_u32(&r);
-
-    if (r.error)
-    {
-        elog(DEBUG1, "biscuit: snapshot \"%s\" truncated header, ignoring", path);
-        fclose(r.fp);
-        return NULL;
-    }
-
-    /*
-     * The metapage's gen is the authoritative "current generation" --
-     * if it differs from the generation this snapshot was taken at,
-     * some insert/vacuum has landed since the snapshot was written and
-     * it must not be loaded, even though its magic/version are fine.
-     *
-     * biscuit_read_metadata_from_disk() unconditionally dereferences its
-     * num_records/num_columns/max_len out-params (only "gen" tolerates
-     * NULL), so we must pass real storage for them even though we only
-     * care about gen here.
-     */
-    {
-        int unused_records, unused_columns, unused_max_len;
-
-        have_live_gen = biscuit_read_metadata_from_disk(index,
-                                                         &unused_records,
-                                                         &unused_columns,
-                                                         &unused_max_len,
-                                                         &live_gen);
-    }
-
-    if (have_live_gen && live_gen != snapshot_gen)
-    {
-        elog(WARNING, "biscuit: snapshot \"%s\" is stale (snapshot gen "
-                       UINT64_FORMAT ", current gen " UINT64_FORMAT "), "
-                       "discarding and falling back to rebuild",
-             path, snapshot_gen, live_gen);
-        fclose(r.fp);
-        return NULL;
-    }
+    if (!biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_HEADER,
+                           -1, -1, &header_entry, NULL))
+        return NULL;   /* nothing saved yet -- normal, caller falls back to a rebuild */
 
     oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
 
     PG_TRY();
     {
-        int32 num_columns   = rget_i32(&r);
-        int32 num_records   = rget_i32(&r);
-        int32 capacity      = rget_i32(&r);
+        PCur    hcur;
+        char   *hdata;
+        uint32  hlen;
+        int32   num_columns;
+        int32   raw_capacity;
+        uint64  live_gen;
+        int     unused_records, unused_columns, unused_max_len;
 
-        if (r.error || num_columns != natts || num_records < 0 || capacity < num_records)
-            ereport(ERROR,
-                    (errmsg("biscuit: snapshot header mismatch for index %u, ignoring",
-                            indexoid)));
+        biscuit_page_read_blob(index, header_entry.blob_head, &hdata, &hlen);
+        pcur_init(&hcur, hdata, hlen);
 
         idx = (BiscuitIndex *) palloc0(sizeof(BiscuitIndex));
-        idx->num_columns = num_columns;
-        idx->num_records = num_records;
-        idx->capacity    = Max(capacity, 1);
+
+        idx->num_records = pcur_get_i32(&hcur);
+        raw_capacity      = pcur_get_i32(&hcur);
+        idx->capacity     = Max(raw_capacity, 1);
+        idx->max_len              = pcur_get_i32(&hcur);
+        idx->max_length_legacy    = pcur_get_i32(&hcur);
+        idx->max_length_lower     = pcur_get_i32(&hcur);
+        idx->insert_count         = pcur_get_i64(&hcur);
+        idx->update_count         = pcur_get_i64(&hcur);
+        idx->delete_count         = pcur_get_i64(&hcur);
+        idx->tombstone_count      = pcur_get_i32(&hcur);
+        num_columns                = pcur_get_i32(&hcur);
+        idx->num_columns           = num_columns;
+
+        if (hcur.error || num_columns != natts || idx->num_records < 0 ||
+            idx->capacity < idx->num_records)
+            ereport(ERROR,
+                    (errmsg("biscuit: directory header mismatch for index %u", indexoid)));
 
         /*
-         * Case-mode gating (BISCUIT_MODE_LIKE / BISCUIT_MODE_ILIKE) is
-         * deliberately NOT part of the on-disk snapshot format -- it is
-         * always recomputed fresh from the live index Relation's opclass
-         * (index->rd_opfamily), so a snapshot taken under one opclass and
-         * then loaded after a REINDEX to a different opclass can never
-         * serve the wrong structure set. See biscuit_get_column_case_mode()
-         * in biscuit_index.c.
+         * Case-mode gating is deliberately NOT part of the persisted
+         * state (design doc) -- always recomputed fresh from the live
+         * Relation's opclass, so a REINDEX under a different opclass can
+         * never serve the wrong structure set from stale data.
          */
         if (num_columns == 1)
         {
@@ -715,209 +836,178 @@ biscuit_persist_load(Relation index)
         }
         else
         {
+            int i;
+
             idx->column_case_mode = (uint8 *) palloc(num_columns * sizeof(uint8));
             for (i = 0; i < num_columns; i++)
                 idx->column_case_mode[i] = biscuit_get_column_case_mode(index, i);
         }
 
-        idx->max_len            = rget_i32(&r);
-        idx->max_length_legacy  = rget_i32(&r);
-        idx->max_length_lower   = rget_i32(&r);
-        idx->insert_count       = rget_i64(&r);
-        idx->update_count       = rget_i64(&r);
-        idx->delete_count       = rget_i64(&r);
-        idx->tombstone_count    = rget_i32(&r);
+        if (num_columns > 1)
+        {
+            int i;
+
+            idx->column_types   = (Oid *) palloc(natts * sizeof(Oid));
+            idx->output_funcs   = (FmgrInfo *) palloc(natts * sizeof(FmgrInfo));
+            idx->column_indices = (ColumnIndex *) palloc0(natts * sizeof(ColumnIndex));
+
+            for (i = 0; i < num_columns; i++)
+            {
+                Oid  typoutput;
+                bool typIsVarlena;
+
+                idx->column_types[i] = pcur_get_u32(&hcur);
+                idx->column_indices[i].max_length       = pcur_get_i32(&hcur);
+                idx->column_indices[i].max_length_lower = pcur_get_i32(&hcur);
+
+                getTypeOutputInfo(idx->column_types[i], &typoutput, &typIsVarlena);
+                fmgr_info(typoutput, &idx->output_funcs[i]);
+            }
+        }
+
+        if (hcur.error)
+            ereport(ERROR, (errmsg("biscuit: truncated directory header for index %u", indexoid)));
+        if (hdata)
+            pfree(hdata);
 
         /* ---- tids ---- */
         idx->tids = (ItemPointerData *) palloc(idx->capacity * sizeof(ItemPointerData));
         if (idx->num_records > 0)
-            rget(&r, idx->tids, idx->num_records * sizeof(ItemPointerData));
+        {
+            BiscuitDirEntry tids_entry;
+            char           *tdata;
+            uint32          tlen;
+
+            if (!biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_TIDS,
+                                   -1, -1, &tids_entry, NULL) ||
+                tids_entry.blob_head == InvalidBlockNumber)
+                ereport(ERROR, (errmsg("biscuit: missing tid array for index %u", indexoid)));
+
+            biscuit_page_read_blob(index, tids_entry.blob_head, &tdata, &tlen);
+            if (tlen != (uint32) (idx->num_records * sizeof(ItemPointerData)))
+                ereport(ERROR, (errmsg("biscuit: tid array size mismatch for index %u", indexoid)));
+            memcpy(idx->tids, tdata, tlen);
+            if (tdata)
+                pfree(tdata);
+        }
 
         /* ---- tombstones ---- */
-        idx->tombstones = rget_bitmap(&r);
-        if (!idx->tombstones)
-            idx->tombstones = biscuit_roaring_create();
+        {
+            BiscuitDirEntry tomb_entry;
+
+            if (biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_TOMBSTONES,
+                                  -1, -1, &tomb_entry, NULL))
+                idx->tombstones = biscuit_persist_decode_entry(index, &tomb_entry);
+            if (!idx->tombstones)
+                idx->tombstones = biscuit_roaring_create();
+        }
 
         /* ---- free list ---- */
-        idx->free_count = rget_i32(&r);
-        idx->free_capacity = Max(idx->free_count, 64);
-        idx->free_list = (uint32_t *) palloc(idx->free_capacity * sizeof(uint32_t));
-        if (idx->free_count > 0)
-            rget(&r, idx->free_list, idx->free_count * sizeof(uint32_t));
-
-        if (r.error)
-            ereport(ERROR, (errmsg("biscuit: truncated snapshot for index %u", indexoid)));
-
-        if (idx->num_columns == 1)
         {
-            idx->data_cache       = (char **) palloc0(idx->capacity * sizeof(char *));
-            idx->data_cache_lower = (char **) palloc0(idx->capacity * sizeof(char *));
+            BiscuitDirEntry fl_entry;
 
-            for (i = 0; i < idx->num_records; i++)
+            idx->free_count = 0;
+            if (biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_FREELIST,
+                                  -1, -1, &fl_entry, NULL) &&
+                fl_entry.blob_head != InvalidBlockNumber)
             {
-                idx->data_cache[i]       = rget_str(&r, CacheMemoryContext);
-                idx->data_cache_lower[i] = rget_str(&r, CacheMemoryContext);
-            }
+                char   *fdata;
+                uint32  flen;
 
-            for (ch = 0; ch < CHAR_RANGE; ch++)
+                biscuit_page_read_blob(index, fl_entry.blob_head, &fdata, &flen);
+                idx->free_count    = (int) (flen / sizeof(uint32_t));
+                idx->free_capacity = Max(idx->free_count, 64);
+                idx->free_list     = (uint32_t *) palloc(idx->free_capacity * sizeof(uint32_t));
+                if (idx->free_count > 0)
+                    memcpy(idx->free_list, fdata, idx->free_count * sizeof(uint32_t));
+                if (fdata)
+                    pfree(fdata);
+            }
+            else
             {
-                idx->pos_idx_legacy[ch].entries  = (PosEntry *) palloc(8 * sizeof(PosEntry));
-                idx->pos_idx_legacy[ch].capacity = 8;
-                idx->neg_idx_legacy[ch].entries  = (PosEntry *) palloc(8 * sizeof(PosEntry));
-                idx->neg_idx_legacy[ch].capacity = 8;
-                idx->pos_idx_lower[ch].entries   = (PosEntry *) palloc(8 * sizeof(PosEntry));
-                idx->pos_idx_lower[ch].capacity  = 8;
-                idx->neg_idx_lower[ch].entries   = (PosEntry *) palloc(8 * sizeof(PosEntry));
-                idx->neg_idx_lower[ch].capacity  = 8;
-
-                rget_charindex(&r, &idx->pos_idx_legacy[ch]);
-                rget_charindex(&r, &idx->neg_idx_legacy[ch]);
-                idx->char_cache_legacy[ch] = rget_bitmap(&r);
-
-                rget_charindex(&r, &idx->pos_idx_lower[ch]);
-                rget_charindex(&r, &idx->neg_idx_lower[ch]);
-                idx->char_cache_lower[ch] = rget_bitmap(&r);
+                idx->free_capacity = 64;
+                idx->free_list     = (uint32_t *) palloc(idx->free_capacity * sizeof(uint32_t));
             }
+        }
 
-            {
-                int n;
-                idx->length_bitmaps_legacy    = rget_bitmap_array(&r, &n, CacheMemoryContext);
-                idx->length_ge_bitmaps_legacy = rget_bitmap_array(&r, &n, CacheMemoryContext);
-                idx->length_bitmaps_lower     = rget_bitmap_array(&r, &n, CacheMemoryContext);
-                idx->length_ge_bitmaps_lower  = rget_bitmap_array(&r, &n, CacheMemoryContext);
-            }
+        if (num_columns == 1)
+        {
+            idx->data_cache       = biscuit_persist_load_strcache(index, BISCUIT_DIR_COL_LEGACY, false, idx->num_records);
+            idx->data_cache_lower = biscuit_persist_load_strcache(index, BISCUIT_DIR_COL_LEGACY, true, idx->num_records);
+
+            biscuit_persist_load_column(index, BISCUIT_DIR_COL_LEGACY,
+                                         idx->max_length_legacy, idx->max_length_lower,
+                                         idx->pos_idx_legacy, idx->neg_idx_legacy, idx->char_cache_legacy,
+                                         idx->pos_idx_lower, idx->neg_idx_lower, idx->char_cache_lower,
+                                         &idx->length_bitmaps_legacy, &idx->length_ge_bitmaps_legacy,
+                                         &idx->length_bitmaps_lower, &idx->length_ge_bitmaps_lower);
         }
         else
         {
             int col;
 
-            idx->column_types            = (Oid *) palloc(natts * sizeof(Oid));
-            idx->output_funcs            = (FmgrInfo *) palloc(natts * sizeof(FmgrInfo));
             idx->column_data_cache       = (char ***) palloc(natts * sizeof(char **));
             idx->column_data_cache_lower = (char ***) palloc(natts * sizeof(char **));
-            idx->column_indices          = (ColumnIndex *) palloc0(natts * sizeof(ColumnIndex));
 
-            for (col = 0; col < natts; col++)
+            for (col = 0; col < num_columns; col++)
             {
-                Oid  typoutput;
-                bool typIsVarlena;
-
-                idx->column_types[col] = rget_u32(&r);
-                getTypeOutputInfo(idx->column_types[col], &typoutput, &typIsVarlena);
-                fmgr_info(typoutput, &idx->output_funcs[col]);
-
-                idx->column_data_cache[col]       = (char **) palloc0(idx->capacity * sizeof(char *));
-                idx->column_data_cache_lower[col] = (char **) palloc0(idx->capacity * sizeof(char *));
-
-                for (i = 0; i < idx->num_records; i++)
-                {
-                    idx->column_data_cache[col][i]       = rget_str(&r, CacheMemoryContext);
-                    idx->column_data_cache_lower[col][i] = rget_str(&r, CacheMemoryContext);
-                }
+                idx->column_data_cache[col] =
+                    biscuit_persist_load_strcache(index, col, false, idx->num_records);
+                idx->column_data_cache_lower[col] =
+                    biscuit_persist_load_strcache(index, col, true, idx->num_records);
             }
 
-            for (col = 0; col < natts; col++)
+            for (col = 0; col < num_columns; col++)
             {
                 ColumnIndex *cidx = &idx->column_indices[col];
-                int n;
 
-                cidx->max_length       = rget_i32(&r);
-                cidx->max_length_lower = rget_i32(&r);
-
-                for (ch = 0; ch < CHAR_RANGE; ch++)
-                {
-                    cidx->pos_idx[ch].entries  = (PosEntry *) palloc(8 * sizeof(PosEntry));
-                    cidx->pos_idx[ch].capacity = 8;
-                    cidx->neg_idx[ch].entries  = (PosEntry *) palloc(8 * sizeof(PosEntry));
-                    cidx->neg_idx[ch].capacity = 8;
-                    cidx->pos_idx_lower[ch].entries  = (PosEntry *) palloc(8 * sizeof(PosEntry));
-                    cidx->pos_idx_lower[ch].capacity = 8;
-                    cidx->neg_idx_lower[ch].entries  = (PosEntry *) palloc(8 * sizeof(PosEntry));
-                    cidx->neg_idx_lower[ch].capacity = 8;
-
-                    rget_charindex(&r, &cidx->pos_idx[ch]);
-                    rget_charindex(&r, &cidx->neg_idx[ch]);
-                    cidx->char_cache[ch] = rget_bitmap(&r);
-
-                    rget_charindex(&r, &cidx->pos_idx_lower[ch]);
-                    rget_charindex(&r, &cidx->neg_idx_lower[ch]);
-                    cidx->char_cache_lower[ch] = rget_bitmap(&r);
-                }
-
-                cidx->length_bitmaps          = rget_bitmap_array(&r, &n, CacheMemoryContext);
-                cidx->length_ge_bitmaps       = rget_bitmap_array(&r, &n, CacheMemoryContext);
-                cidx->length_bitmaps_lower    = rget_bitmap_array(&r, &n, CacheMemoryContext);
-                cidx->length_ge_bitmaps_lower = rget_bitmap_array(&r, &n, CacheMemoryContext);
+                biscuit_persist_load_column(index, col,
+                                             cidx->max_length, cidx->max_length_lower,
+                                             cidx->pos_idx, cidx->neg_idx, cidx->char_cache,
+                                             cidx->pos_idx_lower, cidx->neg_idx_lower, cidx->char_cache_lower,
+                                             &cidx->length_bitmaps, &cidx->length_ge_bitmaps,
+                                             &cidx->length_bitmaps_lower, &cidx->length_ge_bitmaps_lower);
             }
         }
 
-        if (r.error)
-            ereport(ERROR, (errmsg("biscuit: truncated snapshot for index %u", indexoid)));
-
         /*
-         * ---- trailing checksum ----
-         * Snapshot everything the running CRC has accumulated so far
-         * (the full header + body we just streamed through) *before*
-         * reading the 4 trailer bytes themselves -- the trailer is not
-         * part of its own coverage. This is the only "verification"
-         * step: it falls directly out of the single read pass above,
-         * so there is no separate whole-file hashing pass here, no
-         * matter how large the snapshot is.
-         *
-         * A mismatch means the file was truncated/corrupted/tampered
-         * with since it was written; treat it exactly like any other
-         * unreadable snapshot -- discard and let the caller fall back
-         * to a full from-heap rebuild rather than trust the bytes.
+         * gen/gen_at_last_snapshot: no more "is this stale relative to
+         * the metapage" check (see file header) -- what we just read *is*
+         * the live durable state by construction. Still populated from
+         * the metapage's current gen for whatever in-memory bookkeeping
+         * (BISCUIT_SNAPSHOT_GEN_THRESHOLD etc.) still consults these
+         * fields elsewhere in the codebase.
          */
+        if (biscuit_read_metadata_from_disk(index, &unused_records, &unused_columns,
+                                             &unused_max_len, &live_gen))
         {
-            pg_crc32c computed_crc = r.crc;
-            uint32    stored_crc;
-
-            FIN_CRC32C(computed_crc);
-            stored_crc = (uint32) rget_u32(&r);
-
-            if (r.error)
-                ereport(ERROR, (errmsg("biscuit: snapshot for index %u missing checksum trailer",
-                                        indexoid)));
-
-            if (stored_crc != (uint32) computed_crc)
-                ereport(ERROR, (errmsg("biscuit: checksum mismatch in snapshot for index %u, "
-                                        "file may be corrupt or truncated", indexoid)));
+            idx->gen                  = live_gen;
+            idx->gen_at_last_snapshot = live_gen;
         }
-
-        /*
-         * Initialize the in-memory generation counters from the
-         * snapshot we just loaded.  gen mirrors what was live when the
-         * snapshot was taken (already verified above to match the
-         * metapage), and gen_at_last_snapshot is set to match it since
-         * this loaded copy *is* the last snapshot -- it must not be
-         * treated as needing an immediate re-save.
-         */
-        idx->gen                 = snapshot_gen;
-        idx->gen_at_last_snapshot = snapshot_gen;
     }
     PG_CATCH();
     {
         /*
-         * Any failure here means a corrupt/truncated/incompatible
-         * snapshot -- discard everything we allocated (it's all in
-         * CacheMemoryContext, which we don't reset, so explicitly
-         * bail out to NULL and let the caller do a normal rebuild)
-         * rather than propagating the error to the query.
+         * Corrupt/inconsistent directory state -- discard everything
+         * (it's all in CacheMemoryContext, which we don't reset, so just
+         * drop the pointer) and let the caller fall back to a normal
+         * from-heap rebuild rather than propagate the error to the query.
          */
+        ErrorData *edata = CopyErrorData();
+
         FlushErrorState();
         MemoryContextSwitchTo(oldcontext);
-        fclose(r.fp);
-        elog(WARNING, "biscuit: discarding unreadable snapshot for index %u, "
-                       "falling back to full rebuild", indexoid);
+        elog(WARNING, "biscuit: discarding unreadable directory-backed state for index %u (%s), "
+                       "falling back to full rebuild",
+             indexoid, edata->message);
+        FreeErrorData(edata);
         return NULL;
     }
     PG_END_TRY();
 
     MemoryContextSwitchTo(oldcontext);
-    fclose(r.fp);
 
-    elog(DEBUG1, "biscuit: loaded disk snapshot for index %u (%d records, gen " UINT64_FORMAT ")",
+    elog(DEBUG1, "biscuit: loaded directory-backed state for index %u (%d records, gen " UINT64_FORMAT ")",
          indexoid, idx->num_records, idx->gen);
 
     return idx;
@@ -927,12 +1017,58 @@ biscuit_persist_load(Relation index)
  * DROP
  * ================================================================ */
 
+typedef struct
+{
+    Relation index;
+} DropWalkState;
+
+static void
+biscuit_persist_drop_walk_cb(const BiscuitDirEntry *entry, void *vstate)
+{
+    DropWalkState *st = (DropWalkState *) vstate;
+
+    if (entry->blob_head != InvalidBlockNumber)
+        biscuit_page_free_blob(st->index, entry->blob_head);
+    if (entry->pending_head != InvalidBlockNumber)
+        biscuit_page_free_chain(st->index, entry->pending_head);
+}
+
 void
 biscuit_persist_drop(Oid indexoid)
 {
-    char path[MAXPGPATH];
+    Relation index = try_relation_open(indexoid, RowExclusiveLock);
 
-    biscuit_persist_path(indexoid, path, sizeof(path));
-    if (unlink(path) != 0 && errno != ENOENT)
-        elog(WARNING, "biscuit: could not remove snapshot \"%s\": %m", path);
+    if (!index)
+        return;   /* relation already gone -- nothing to drop, matches
+                    * "safe to call even if no snapshot exists" */
+
+    PG_TRY();
+    {
+        int num_slots = biscuit_dir_num_slots(index);
+        int slot;
+
+        for (slot = 0; slot < num_slots; slot++)
+        {
+            DropWalkState st;
+
+            st.index = index;
+            biscuit_dir_foreach_column(index, slot, biscuit_persist_drop_walk_cb, &st);
+        }
+
+        biscuit_dir_drop_all(index);
+    }
+    PG_CATCH();
+    {
+        ErrorData *edata = CopyErrorData();
+
+        FlushErrorState();
+        relation_close(index, RowExclusiveLock);
+        elog(WARNING, "biscuit: error dropping directory-backed state for index %u: %s",
+             indexoid, edata->message);
+        FreeErrorData(edata);
+        return;
+    }
+    PG_END_TRY();
+
+    relation_close(index, RowExclusiveLock);
 }

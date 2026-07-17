@@ -53,7 +53,7 @@
  * where it needs to happen -- assigning an xid is itself not something
  * that can be done inside a critical section.
  */
-static inline void
+void
 biscuit_ensure_synchronous_commit(void)
 {
     (void) GetCurrentTransactionId();
@@ -171,6 +171,12 @@ biscuit_page_free_blob(Relation index, BlockNumber head)
     if (head == InvalidBlockNumber)
         return;
     biscuit_free_chain(index, head, NULL);
+}
+
+void
+biscuit_page_free_chain(Relation index, BlockNumber head)
+{
+    biscuit_page_free_blob(index, head);
 }
 
 /* ==================== COMPACTED-BLOB CHUNK CHAIN ==================== */

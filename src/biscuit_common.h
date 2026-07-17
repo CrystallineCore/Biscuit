@@ -490,6 +490,90 @@ typedef struct BiscuitDirEntry
 #define BISCUIT_DIR_KIND_LEN_GE   5
 
 /*
+ * Additional BISCUIT_DIR_KIND_* values, added for the biscuit_persist.c
+ * rewrite (Phase after the pending-list design doc). The design doc's
+ * directory (§5) only ever specified `(col, is_lower, kind, ch, position)`
+ * for the per-character/per-length RoaringBitmap-shaped structures
+ * (POS/NEG/CACHE/LEN/LEN_GE above) -- it explicitly did not cover the rest
+ * of BiscuitIndex's persistent state (the tid array, the tombstone
+ * bitmap, the free-slot list, the per-record string caches), because
+ * biscuit_blob.c's chunk-chain primitive is bitmap-agnostic ("just bytes
+ * in, bytes out", §1) and works equally well for any of these once they're
+ * serialized to a flat byte buffer -- so the same directory+blob
+ * machinery is reused here rather than inventing a second, parallel
+ * addressing scheme just for non-bitmap state.
+ *
+ *   BISCUIT_DIR_KIND_TIDS        -- idx->tids (ItemPointerData[num_records]),
+ *                                    a flat array dump, no bitmap involved.
+ *   BISCUIT_DIR_KIND_TOMBSTONES  -- idx->tombstones (RoaringBitmap*) --
+ *                                    this one *is* bitmap-shaped, so it
+ *                                    could in principle grow a pending
+ *                                    chain like POS/NEG/CACHE do; not done
+ *                                    in this phase since nothing yet
+ *                                    appends to it incrementally (CRUD
+ *                                    call-site wiring is a later phase).
+ *   BISCUIT_DIR_KIND_FREELIST    -- idx->free_list (uint32_t[free_count]),
+ *                                    a flat array dump.
+ *   BISCUIT_DIR_KIND_STRCACHE    -- one column's data_cache or
+ *                                    data_cache_lower (or, for the legacy
+ *                                    single-column case, idx->data_cache /
+ *                                    idx->data_cache_lower): the whole
+ *                                    per-record C-string array for that
+ *                                    (col, is_lower) pair, length-prefixed
+ *                                    and concatenated into one blob --
+ *                                    ch/position are unused (-1) since
+ *                                    this isn't addressed per-character.
+ *
+ * ch and position are meaningless for all four of these (always -1);
+ * `is_lower` is meaningless for TIDS/TOMBSTONES/FREELIST (always false)
+ * since there's exactly one of each per index, not a case-sensitive/
+ * case-insensitive pair.
+ */
+#define BISCUIT_DIR_KIND_TIDS        6
+#define BISCUIT_DIR_KIND_TOMBSTONES  7
+#define BISCUIT_DIR_KIND_FREELIST    8
+#define BISCUIT_DIR_KIND_STRCACHE    9
+
+/*
+ * BISCUIT_DIR_KIND_HEADER -- one more addition, for biscuit_persist.c's
+ * rewrite: a single raw blob (col=BISCUIT_DIR_COL_SINGLETON) holding the
+ * scalar bookkeeping fields that don't belong to any one structure
+ * (capacity, max_len, max_length_legacy/_lower, insert/update/delete/
+ * tombstone counts, num_columns, and, for multi-column indexes,
+ * column_types[]/per-column max_length/max_length_lower). num_records and
+ * gen are deliberately NOT duplicated here -- they already live in
+ * BiscuitMetaPageData and stay authoritative there (see
+ * biscuit_write_metadata_to_disk()/biscuit_read_metadata_from_disk() in
+ * biscuit_index.c).
+ */
+#define BISCUIT_DIR_KIND_HEADER      10
+
+/*
+ * BiscuitDirEntry.col sentinels, beyond real column indices (0..N-1):
+ *
+ *   BISCUIT_DIR_COL_LEGACY    (-1) -- already used by the design doc for
+ *                                     the single-column (legacy) field
+ *                                     set's POS/NEG/CACHE/LEN/LEN_GE and,
+ *                                     as of this phase, its STRCACHE too.
+ *   BISCUIT_DIR_COL_SINGLETON (-2) -- new in this phase: TIDS/TOMBSTONES/
+ *                                     FREELIST, which exist exactly once
+ *                                     per index regardless of column
+ *                                     count, so they don't belong to any
+ *                                     particular column's chain. Always
+ *                                     stored in the array slot 0 chain
+ *                                     (see biscuit_dir.c's
+ *                                     biscuit_dir_slot_for_col()) alongside
+ *                                     whatever column-0 or legacy entries
+ *                                     also live there -- entries are
+ *                                     disambiguated by their own `col`
+ *                                     tag during lookup, not by which
+ *                                     chain they happen to be linked
+ *                                     into, so sharing a chain is safe.
+ */
+#define BISCUIT_DIR_COL_LEGACY     (-1)
+#define BISCUIT_DIR_COL_SINGLETON  (-2)
+
+/*
  * BiscuitDirPageHeader
  * Header at the start of each page's data area in a per-column
  * directory chain (BISCUIT_PAGE_DIR, one chain per BiscuitMetaPageData
