@@ -237,6 +237,144 @@ biscuit_roaring_to_array(const RoaringBitmap *rb, uint64_t *count)
 
 #endif  /* HAVE_ROARING */
 
+/* ==================== SERIALIZATION ==================== */
+
+#ifdef HAVE_ROARING
+
+uint32_t
+biscuit_roaring_serialized_size(const RoaringBitmap *rb)
+{
+    if (!rb)
+        return 0;
+    return (uint32_t) roaring_bitmap_portable_size_in_bytes(rb);
+}
+
+char *
+biscuit_roaring_serialize(const RoaringBitmap *rb, uint32_t *out_len)
+{
+    size_t  sz;
+    char   *buf;
+
+    if (!rb)
+    {
+        *out_len = 0;
+        return NULL;
+    }
+
+    sz  = roaring_bitmap_portable_size_in_bytes(rb);
+    buf = (char *) palloc(sz);
+    roaring_bitmap_portable_serialize(rb, buf);
+    *out_len = (uint32_t) sz;
+    return buf;
+}
+
+RoaringBitmap *
+biscuit_roaring_deserialize(const char *buf, uint32_t len)
+{
+    RoaringBitmap *rb;
+
+    if (!buf || len == 0)
+        return biscuit_roaring_create();
+
+    rb = roaring_bitmap_portable_deserialize_safe(buf, len);
+    if (!rb)
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("biscuit: corrupt roaring bitmap payload (%u bytes)", len)));
+    return rb;
+}
+
+#else  /* !HAVE_ROARING – fallback bitset */
+
+/*
+ * Fallback wire format (used only when the extension is built without
+ * CRoaring): a little struct-free byte stream, portable across the
+ * fallback bitset's own in-memory layout --
+ *
+ *   uint32  num_blocks
+ *   num_blocks * uint64  blocks[]
+ *
+ * capacity is NOT part of the format -- it's a purely in-memory
+ * over-allocation hint and is reconstructed as exactly num_blocks on
+ * deserialize (biscuit_roaring_add() will grow it again as needed).
+ */
+
+uint32_t
+biscuit_roaring_serialized_size(const RoaringBitmap *rb)
+{
+    if (!rb)
+        return 0;
+    return (uint32_t) (sizeof(uint32_t) + (size_t) rb->num_blocks * sizeof(uint64_t));
+}
+
+char *
+biscuit_roaring_serialize(const RoaringBitmap *rb, uint32_t *out_len)
+{
+    uint32_t  len;
+    char     *buf;
+    uint32_t  nblocks;
+
+    if (!rb)
+    {
+        *out_len = 0;
+        return NULL;
+    }
+
+    len     = biscuit_roaring_serialized_size(rb);
+    buf     = (char *) palloc(len);
+    nblocks = (uint32_t) rb->num_blocks;
+
+    memcpy(buf, &nblocks, sizeof(uint32_t));
+    if (rb->num_blocks > 0)
+        memcpy(buf + sizeof(uint32_t), rb->blocks, (size_t) rb->num_blocks * sizeof(uint64_t));
+
+    *out_len = len;
+    return buf;
+}
+
+RoaringBitmap *
+biscuit_roaring_deserialize(const char *buf, uint32_t len)
+{
+    RoaringBitmap *rb;
+    uint32_t        nblocks;
+
+    if (!buf || len == 0)
+        return biscuit_roaring_create();
+
+    if (len < sizeof(uint32_t))
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("biscuit: truncated bitmap payload (%u bytes)", len)));
+
+    memcpy(&nblocks, buf, sizeof(uint32_t));
+
+    if ((uint64_t) len != (uint64_t) sizeof(uint32_t) + (uint64_t) nblocks * sizeof(uint64_t))
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("biscuit: bitmap payload length mismatch (declared %u blocks, got %u bytes)",
+                        nblocks, len)));
+
+    rb = (RoaringBitmap *) palloc0(sizeof(RoaringBitmap));
+    rb->num_blocks = (int) nblocks;
+    rb->capacity   = (int) nblocks;
+    if (nblocks > 0)
+    {
+        rb->blocks = (uint64_t *) palloc(nblocks * sizeof(uint64_t));
+        memcpy(rb->blocks, buf + sizeof(uint32_t), (size_t) nblocks * sizeof(uint64_t));
+    }
+    else
+    {
+        /* Keep a non-NULL 0-capacity-safe buffer so later appends behave
+         * the same as a freshly-created bitmap (biscuit_roaring_create()
+         * always starts with a real allocation). */
+        rb->capacity = 16;
+        rb->blocks   = (uint64_t *) palloc0(rb->capacity * sizeof(uint64_t));
+    }
+    return rb;
+}
+
+#endif /* HAVE_ROARING */
+
 /* ==================== MEMORY USAGE HELPERS ==================== */
 
 size_t

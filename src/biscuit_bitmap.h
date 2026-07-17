@@ -23,6 +23,23 @@ extern void           biscuit_roaring_or_inplace(RoaringBitmap *a, const Roaring
 extern void           biscuit_roaring_andnot_inplace(RoaringBitmap *a, const RoaringBitmap *b);
 extern uint32_t      *biscuit_roaring_to_array(const RoaringBitmap *rb, uint64_t *count);
 
+/* ==================== SERIALIZATION ====================
+ *
+ * Needed by biscuit_blob.c's compacted-blob chunk chain: the chain itself
+ * is deliberately bitmap-agnostic ("just bytes in, bytes out" -- see the
+ * design doc §1), so the RoaringBitmap<->bytes conversion lives here
+ * alongside the rest of the bitmap wrapper layer, not in biscuit_blob.c.
+ */
+
+/* Bytes biscuit_roaring_serialize() would produce for rb; for pre-sizing. */
+extern uint32_t biscuit_roaring_serialized_size(const RoaringBitmap *rb);
+
+/* Serialize rb into a palloc'd buffer in the current memory context. */
+extern char    *biscuit_roaring_serialize(const RoaringBitmap *rb, uint32_t *out_len);
+
+/* Deserialize len bytes at buf into a freshly palloc'd RoaringBitmap. */
+extern RoaringBitmap *biscuit_roaring_deserialize(const char *buf, uint32_t len);
+
 /* ==================== MEMORY USAGE HELPERS ==================== */
 
 extern size_t biscuit_roaring_memory_usage(const RoaringBitmap *rb);
