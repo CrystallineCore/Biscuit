@@ -1,5 +1,56 @@
 # Biscuit Index Extension – Changelog
 
+## Version 3.0.0
+
+### New Features
+
+* **WAL-logged, crash-safe on-disk storage.** Replaces the external-file snapshot mechanism (temp-file-then-rename, CRC32C checksum) introduced in 2.5.0 with fully in-relation, `GenericXLog`-protected page storage. Every persistent structure — per-character/length bitmaps, the TID array, tombstones, the free-slot list, and per-record string caches — now lives in one of two page-chain types:
+  * a **compacted-blob chunk chain** (`biscuit_blob.c`/`.h`) storing a structure's serialized bytes across as many pages as needed, and
+  * an **append-only pending-delta list chain**, mirroring GIN's pending-list design.
+
+  A new per-column **directory** (`biscuit_dir.c`/`.h`) maps each structure's identity — `(col, is_lower, kind, char, position)` — to its blob-chain and pending-chain heads. Because every mutation goes through ordinary WAL-logged buffer writes, index state now survives a crash and replicates correctly, which the old flat-file snapshot never did.
+
+* **Pending-list write path with opportunistic draining.** Steady-state `INSERT`/`UPDATE`/`DELETE` no longer rewrites a whole snapshot; each touched structure durably appends a small delta record to its own pending chain. Once a structure's pending chain exceeds `pending_list_limit` (default 64 KB, tunable via the metapage), it is opportunistically re-serialized ("drained") into a fresh compacted blob and its old blob/pending chains are retired to a deferred-recycle freelist. `VACUUM` (`biscuit_vacuumcleanup()`) additionally performs an unconditional full drain pass over every structure with outstanding pending records, and records lifetime `total_drains` / `total_pending_bytes` counters in the metapage.
+
+* **Read-time pending-list reconciliation.** Query evaluation (`biscuit_pattern.c`) transparently merges any not-yet-drained pending records into the bitmap it reads, so a backend always sees a consistent view of a structure regardless of whether another backend's mutations have been drained yet — without ever triggering a drain itself.
+
+* **New `biscuit_like_ops` / `biscuit_ilike_ops` operator classes.** In addition to the existing default `biscuit_ops` (which builds both case-sensitive and case-insensitive structures), a column can now be indexed with `biscuit_like_ops` (LIKE / NOT LIKE only) or `biscuit_ilike_ops` (ILIKE / NOT ILIKE only), skipping the build/maintenance cost of the structure set it will never be queried with. The mode is derived from the column's opfamily at build/load time and is never itself persisted, so it can't go stale across a `REINDEX` under a different opclass.
+
+### Bug Fixes
+
+* **Fixed off-by-one boundary reads in multi-column length-bitmap lookups.** Several `<=`-against-`max_length`/`max_length_lower` comparisons could read one `RoaringBitmap*` past the end of a palloc'd array on an ordinary LIKE/ILIKE query whose pattern length equaled the column's maximum indexed length. Tightened to `<` throughout.
+
+* **Fixed `NOT LIKE` / `NOT ILIKE` inversion in multi-column scans.** The "all non-null rows" set used to build the inverted result always consulted the case-sensitive length-≥ bitmap, even for `NOT ILIKE`. It now selects the case-matching (`_lower` vs. non-`_lower`) array, consistent with each column's actual case-mode gating.
+
+* **Fixed wildcard-unaware substring matching in multi-column `%needle%` queries.** Candidate verification used a literal `strstr()`, which treated `_` as an ordinary byte rather than a single-character wildcard. Replaced with the wildcard-aware `biscuit_wildcard_contains()`.
+
+### Internal Changes
+
+* **Removed the background preload worker entirely.** `biscuit_preload.c`/`.h` (skeleton loading, the shared-memory ring buffer, the background worker, and the `strstr`/`strcasestr` fallback scan used during warm-up) have been deleted. `beginscan()` now always resolves the index through the session cache or loads it — fully built, every bitmap included — synchronously from its on-disk directory via `biscuit_persist_load()`. There is no more warm-up window or degraded-scan period after a restart.
+
+* **`biscuit_persist_save()` / `biscuit_persist_load()` / `biscuit_persist_drop()` rewritten** against the directory + blob/pending-chain machinery; the 2.5.0 flat-file-per-index snapshot mechanism is deleted outright, not version-gated. There is no dual-format reader — existing indexes must be `REINDEX`ed after upgrading.
+
+* **Metapage format bumped (`BISCUIT_VERSION` 1 → 3).** Adds per-column directory roots, a deferred-recycle FSM freelist root, and pending-list tuning/observability fields. A new, independently-tracked `page_format_version` covers the binary layout of the individual page structs, separate from the extension-level format version.
+
+* **New monotonic generation counter** (`idx->gen`, mirrored in the metapage) is bumped non-transactionally on every successful `INSERT`/`bulkdelete`, replacing the old `preload_state`-based staleness tracking.
+
+* **`bulkdelete()` and the `UPDATE`-as-delete path now remove records one at a time** through `biscuit_remove_from_all_indices()`, each durably recording its removal via a pending-list append, in place of the old bulk `andnot_inplace()` sweep that depended on an eager whole-index resave for durability.
+
+* **`biscuit_cache.c`'s proc-exit callback simplified.** Every mutation is now durable at the moment it's WAL-logged, so there is nothing left to flush at backend shutdown; the callback just drops the process-local cache. (It can no longer call `biscuit_persist_save()`, since that now requires opening a real `Relation`, which isn't safe this late in shutdown — the proc-exit-flush design itself is slated for removal in a later change.)
+
+* Simplified `biscuit_costestimate()`.
+
+### Testing
+
+* Added `tests/crud.sql`, an end-to-end CRUD maintenance test that compares sequential-scan and Biscuit-index-scan row counts across INSERT, UPDATE, and DELETE phases.
+* Benchmark scripts (`tests/forced_index_usage.sh`, `tests/planner_usage.sh`) now target an explicit PostgreSQL port/cluster instead of the system default, and report index size via `pg_relation_size()`.
+
+### Upgrade Notes
+
+**This is a breaking on-disk format change.** Indexes built under 2.x must be `REINDEX`ed after upgrading — there is no automatic migration or dual-format reader.
+
+---
+
 ## Version 2.5.0
 
 ### New Features
