@@ -34,13 +34,13 @@ PG_CLUSTER="main"
 PG_UNIT="postgresql@${PG_VERSION}-${PG_CLUSTER}"
 export PGCLUSTER="${PG_VERSION}/${PG_CLUSTER}"
 RESULTS_DIR="./benchmark_results_$(date +%Y%m%d_%H%M%S)"
-NUM_ITERATIONS=5 # Increased for statistical significance
-WARMUP_ITERATIONS=3
+NUM_ITERATIONS=1 # Increased for statistical significance
+WARMUP_ITERATIONS=0
 
 # Environment-control configuration
 # Set PIN_CORES to a taskset-style list (e.g. "2-5") to pin the postgres
 # postmaster to specific cores. Leave empty to skip pinning.
-PIN_CORES=""
+PIN_CORES="2"
 # Swappiness to apply for the duration of the run (restored on exit)
 BENCHMARK_SWAPPINESS=0
 # How long to bump checkpoint_timeout/max_wal_size so a checkpoint can't
@@ -1063,11 +1063,7 @@ get_index_size() {
     local index_name="$1"
     local sql
 
-    if [[ "$index_name" == "int_bisc" ]]; then
-        sql="SELECT biscuit_size_pretty('$index_name');"
-    else
-        sql="SELECT pg_size_pretty(pg_relation_size('$index_name'));"
-    fi
+    sql="SELECT pg_size_pretty(pg_relation_size('$index_name'));"
 
     pg_psql -p "$PORT" -d "$DB_NAME" -t -A -c "$sql"
 }

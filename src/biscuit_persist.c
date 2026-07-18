@@ -78,6 +78,7 @@
 #include "biscuit_index.h"   /* for biscuit_get_column_case_mode() /
                                * biscuit_read_metadata_from_disk() */
 #include "access/relation.h"
+#include "portability/instr_time.h"   /* DIAGNOSTIC ONLY -- instr_time */
 
 /* ================================================================
  * Small in-memory growable-buffer (write) / cursor (read) helpers.
@@ -346,6 +347,13 @@ biscuit_persist_merge_pending(Relation index, BlockNumber pending_head, RoaringB
 }
 
 /*
+ * DIAGNOSTIC ONLY -- not part of the fix, just instrumentation to confirm
+ * where biscuit_persist_load()'s cold-load time actually goes. Safe to
+ * remove once confirmed; DEBUG1-gated so it's silent by default.
+ */
+static long biscuit_diag_decode_count = 0;
+
+/*
  * Decode one directory entry's compacted blob, merging in its pending
  * chain if it has one. Returns NULL for a genuinely absent structure
  * (blob_head == InvalidBlockNumber and no pending records either) --
@@ -357,6 +365,8 @@ static RoaringBitmap *
 biscuit_persist_decode_entry(Relation index, const BiscuitDirEntry *entry)
 {
     RoaringBitmap *bm = NULL;
+
+    biscuit_diag_decode_count++;   /* DIAGNOSTIC ONLY */
 
     if (entry->blob_head != InvalidBlockNumber)
     {
@@ -577,20 +587,16 @@ biscuit_persist_save(Oid indexoid, BiscuitIndex *idx)
     PG_CATCH();
     {
         /*
-         * Best-effort, per this file's header comment: a failure here
-         * must never take down the INSERT/build that triggered it.
-         * Convert to a WARNING and give up on this save attempt --
-         * gen_at_last_snapshot is deliberately left untouched below so
-         * the next save attempt isn't skipped.
+         * No longer best-effort: biscuit_load_index() has no from-heap
+         * rebuild fallback (see its comment in biscuit_index.c), so a
+         * silently-swallowed save failure here would leave a cold load
+         * of this index with nothing readable. Close the relation to
+         * avoid leaking the lock, then let the error propagate -- for
+         * the build-time call site (biscuit_build()) that means the
+         * CREATE INDEX itself fails, which is the correct outcome.
          */
-        ErrorData *edata = CopyErrorData();
-
-        FlushErrorState();
         relation_close(index, RowExclusiveLock);
-        elog(WARNING, "biscuit: error saving directory-backed structures for index %u: %s",
-             indexoid, edata->message);
-        FreeErrorData(edata);
-        return;
+        PG_RE_THROW();
     }
     PG_END_TRY();
 
@@ -784,6 +790,10 @@ biscuit_persist_load(Relation index)
     BiscuitIndex  *idx      = NULL;
     MemoryContext  oldcontext;
     BiscuitDirEntry header_entry;
+    instr_time     diag_start;   /* DIAGNOSTIC ONLY */
+
+    biscuit_diag_decode_count = 0;   /* DIAGNOSTIC ONLY */
+    INSTR_TIME_SET_CURRENT(diag_start);
 
     if (!biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_HEADER,
                            -1, -1, &header_entry, NULL))
@@ -970,13 +980,28 @@ biscuit_persist_load(Relation index)
             }
         }
 
+        /* DIAGNOSTIC ONLY */
+        {
+            instr_time diag_now;
+
+            INSTR_TIME_SET_CURRENT(diag_now);
+            INSTR_TIME_SUBTRACT(diag_now, diag_start);
+            elog(DEBUG1,
+                 "biscuit: cold load decoded %ld structure(s) for index %u in %.3f ms",
+                 biscuit_diag_decode_count, indexoid,
+                 INSTR_TIME_GET_MILLISEC(diag_now));
+        }
+
         /*
          * gen/gen_at_last_snapshot: no more "is this stale relative to
          * the metapage" check (see file header) -- what we just read *is*
          * the live durable state by construction. Still populated from
-         * the metapage's current gen for whatever in-memory bookkeeping
-         * (BISCUIT_SNAPSHOT_GEN_THRESHOLD etc.) still consults these
-         * fields elsewhere in the codebase.
+         * the metapage's current gen since idx->gen is the in-memory
+         * generation counter consulted elsewhere (e.g. cache
+         * invalidation bookkeeping); gen_at_last_snapshot is kept in
+         * lockstep with it here purely for field-consistency, not
+         * because anything still compares the two to decide whether to
+         * re-save.
          */
         if (biscuit_read_metadata_from_disk(index, &unused_records, &unused_columns,
                                              &unused_max_len, &live_gen))
@@ -990,15 +1015,16 @@ biscuit_persist_load(Relation index)
         /*
          * Corrupt/inconsistent directory state -- discard everything
          * (it's all in CacheMemoryContext, which we don't reset, so just
-         * drop the pointer) and let the caller fall back to a normal
-         * from-heap rebuild rather than propagate the error to the query.
+         * drop the pointer) and return NULL. biscuit_load_index() treats
+         * a NULL return as "nothing readable" and raises an ERROR with a
+         * REINDEX hint -- there is no from-heap rebuild fallback to defer
+         * to anymore.
          */
         ErrorData *edata = CopyErrorData();
 
         FlushErrorState();
         MemoryContextSwitchTo(oldcontext);
-        elog(WARNING, "biscuit: discarding unreadable directory-backed state for index %u (%s), "
-                       "falling back to full rebuild",
+        elog(WARNING, "biscuit: discarding unreadable directory-backed state for index %u (%s)",
              indexoid, edata->message);
         FreeErrorData(edata);
         return NULL;

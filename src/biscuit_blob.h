@@ -172,6 +172,34 @@ extern void biscuit_page_free_blob(Relation index, BlockNumber head);
  */
 extern void biscuit_page_free_chain(Relation index, BlockNumber head);
 
+/*
+ * biscuit_page_alloc
+ *
+ * Return a fresh, BUFFER_LOCK_EXCLUSIVE-locked buffer for the caller to
+ * PageInit() as page_kind (one of the BISCUIT_PAGE_* tags). First tries
+ * to pop a page off the deferred-recycle freelist that
+ * biscuit_page_free_blob()/biscuit_page_free_chain() push retired pages
+ * onto (BiscuitMetaPageData.fsm_root), reusing it once its
+ * opaque.recycle_xid clears the oldest-still-running-transaction
+ * horizon; falls back to extending the relation (P_NEW) when the
+ * freelist is empty or its head isn't old enough yet.
+ *
+ * This is the counterpart to biscuit_page_free_blob()/_free_chain(): use
+ * it at every allocation site that used to call
+ * ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL) for a
+ * blob chunk, pending-chain, or directory page, EXCEPT where the caller
+ * already holds the metapage buffer lock itself (this function acquires
+ * that lock internally to peek/pop the freelist, so calling it while
+ * already holding that same lock will self-deadlock -- see
+ * biscuit_dir_ensure_root() in biscuit_dir.c for the one such site,
+ * which deliberately keeps plain P_NEW instead).
+ *
+ * Locking: only ever inspects the freelist head (LIFO), never walks
+ * deeper; see biscuit_blob.c for the full target-then-metapage lock
+ * ordering rationale relative to the retirement path.
+ */
+extern Buffer biscuit_page_alloc(Relation index, uint16 page_kind);
+
 /* ==================== PENDING-DELTA LIST CHAIN ==================== */
 
 /*
@@ -246,19 +274,35 @@ typedef struct BiscuitDrainStats
  * one operation: re-serializes `target` (now fully merged) into a brand
  * new compacted-blob chain via biscuit_page_write_blob(), retires the
  * chain previously pointed at by *blob_head via biscuit_page_free_blob(),
- * and updates *blob_head to the new chain's head. If do_blob_rewrite is
- * false, *blob_head is left untouched and the caller is responsible for
- * persisting the merged `target` itself (e.g. a read-time merge-at-scan
- * caller per §4, which never rewrites anything).
- *
- * Either way, the drained pending chain's pages are always retired via
- * biscuit_page_free_blob()-equivalent handling (biscuit_pending_free_chain
- * internally) and *head_inout / *tail_inout (the pending chain's own
- * head/tail, distinct from *blob_head) are reset to InvalidBlockNumber --
- * again, it is the caller's job to persist that into the future
+ * and updates *blob_head to the new chain's head. It also then retires
+ * the drained pending chain's own pages (biscuit_page_free_blob()-
+ * equivalent handling internally) and resets *head_inout* tail_inout to
+ * InvalidBlockNumber -- it is the caller's job to persist that into the
  * directory's pending_head/pending_tail/pending_count/pending_bytes.
  *
- * stats, if non-NULL, is filled in with counts for Phase 5 sizing.
+ * If do_blob_rewrite is false, this call is entirely non-destructive:
+ * *blob_head, *head_inout, and *tail_inout are all left exactly as
+ * passed in, and the pending chain's pages are NOT retired -- only
+ * `target` is mutated (in memory), via the same per-record application
+ * described above. This is the read-time reconciliation path (Phase 1
+ * Contract §3 / biscuit_pattern.c's biscuit_reconcile_pending()): a scan
+ * needs the union of a structure's compacted blob and its pending
+ * records, but must not consume those pending records on some other
+ * backend's behalf, or a later real drain (do_blob_rewrite = true, from
+ * the opportunistic per-structure threshold check or
+ * biscuit_vacuumcleanup()'s unconditional pass) would have nothing left
+ * to fold into the compacted blob even though it was never actually
+ * written there. Concurrent do_blob_rewrite=false readers of the same
+ * pending chain are therefore safe to run arbitrarily many times without
+ * coordinating with each other -- each one independently re-walks the
+ * same still-intact chain.
+ *
+ * stats, if non-NULL, is filled in with counts for Phase 5 sizing. When
+ * do_blob_rewrite is false, stats->pending_pages_freed and
+ * stats->old_blob_pages_freed are both 0 (nothing was retired) and
+ * stats->blob_bytes_written is 0 (nothing was rewritten); only
+ * stats->records_drained reflects real work (how many pending records
+ * were applied to `target`).
  *
  * Crash safety: pending-record application to `target` is a pure
  * in-memory operation (no WAL, nothing durable yet). The durable part is

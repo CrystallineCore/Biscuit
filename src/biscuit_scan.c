@@ -40,10 +40,11 @@
  *  1. Cache hit  – the fully-built BiscuitIndex (TIDs, data caches, and
  *                  every bitmap) is reused immediately.
  *
- *  2. Cache miss – biscuit_load_index() performs a full heap scan and
- *                  builds the complete index (all bitmaps included) in
- *                  one synchronous pass, inserts it into biscuit_cache,
- *                  and returns it for immediate use.
+ *  2. Cache miss – biscuit_load_index() reads the complete index (all
+ *                  bitmaps included) directly from its on-disk page
+ *                  directory (compacted blobs) in one synchronous pass,
+ *                  inserts it into biscuit_cache, and returns it for
+ *                  immediate use.
  *
  * Every scan therefore always has bitmaps available; there is no
  * warm-up window and no separate fallback scan path.
@@ -60,9 +61,9 @@
 /* ================================================================
  * SECTION 1 – beginscan
  *
- * On a cache miss, biscuit_load_index() builds the complete index
- * (heap scan, data caches, all bitmaps) synchronously and inserts it
- * into biscuit_cache.
+ * On a cache miss, biscuit_load_index() reads the complete index
+ * (data caches, all bitmaps) synchronously from its on-disk page
+ * directory and inserts it into biscuit_cache.
  * ================================================================ */
 
 IndexScanDesc
@@ -92,10 +93,10 @@ biscuit_beginscan(Relation index, int nkeys, int norderbys)
     if (!so->index)
     {
         /*
-         * Cache miss: build the complete index (heap scan, data caches,
-         * all bitmaps) synchronously.  biscuit_load_index() inserts the
-         * result into biscuit_cache itself, so we just look it up again
-         * via its return value.
+         * Cache miss: read the complete index (data caches, all bitmaps)
+         * synchronously from its on-disk page directory.
+         * biscuit_load_index() inserts the result into biscuit_cache
+         * itself, so we just look it up again via its return value.
          */
         so->index = biscuit_load_index(index);
 
@@ -176,8 +177,8 @@ biscuit_rescan_multicolumn(IndexScanDesc scan,
             continue;
 
         col_result = pred_is_ilike
-            ? biscuit_query_column_pattern_ilike(so->index, pred->column_index, pred->pattern)
-            : biscuit_query_column_pattern(so->index, pred->column_index, pred->pattern);
+            ? biscuit_query_column_pattern_ilike(scan->indexRelation, so->index, pred->column_index, pred->pattern)
+            : biscuit_query_column_pattern(scan->indexRelation, so->index, pred->column_index, pred->pattern);
 
         if (!col_result)
             col_result = biscuit_roaring_create();
@@ -330,16 +331,16 @@ biscuit_rescan(IndexScanDesc scan,
                 switch (key->sk_strategy)
                 {
                     case BISCUIT_LIKE_STRATEGY:
-                        key_result = biscuit_query_pattern(so->index, pattern);
+                        key_result = biscuit_query_pattern(scan->indexRelation, so->index, pattern);
                         break;
                     case BISCUIT_NOT_LIKE_STRATEGY:
-                        key_result = biscuit_query_pattern(so->index, pattern);
+                        key_result = biscuit_query_pattern(scan->indexRelation, so->index, pattern);
                         break;
                     case BISCUIT_ILIKE_STRATEGY:
-                        key_result = biscuit_query_pattern_ilike(so->index, pattern);
+                        key_result = biscuit_query_pattern_ilike(scan->indexRelation, so->index, pattern);
                         break;
                     case BISCUIT_NOT_ILIKE_STRATEGY:
-                        key_result = biscuit_query_pattern_ilike(so->index, pattern);
+                        key_result = biscuit_query_pattern_ilike(scan->indexRelation, so->index, pattern);
                         break;
 
                     default:

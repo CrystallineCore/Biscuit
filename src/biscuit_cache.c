@@ -3,14 +3,14 @@
  * Session-scoped cache for BiscuitIndex objects.
  *
  * Each index is kept in CacheMemoryContext so it survives across
- * transactions.  A relcache callback and a proc-exit hook ensure
- * stale entries are evicted when relations are dropped or the
- * backend exits.
+ * transactions.  A relcache callback evicts entries when relations are
+ * dropped; a proc-exit hook just drops the process-local cache on
+ * backend shutdown (there is nothing left to flush -- every mutation is
+ * already durable the moment it happens, see biscuit_persist.c).
  */
 
 #include "biscuit_common.h"
 #include "biscuit_cache.h"
-#include "biscuit_persist.h"
 
 /* ==================== CACHE STATE ==================== */
 
@@ -131,50 +131,30 @@ biscuit_relcache_callback(Datum arg, Oid relid)
 {
     (void) arg;
     biscuit_cache_remove(relid);
-    elog(DEBUG1, "Biscuit: Invalidated cache for relation %u", relid);
+    //elog(DEBUG1, "Biscuit: Invalidated cache for relation %u", relid);
 }
 
 static void
 biscuit_module_unload_callback(int code, unsigned long datum)
 {
-    BiscuitIndexCacheEntry *entry;
-
     (void) code;
     (void) datum;
 
     /*
-     * Flush any index whose in-memory generation has moved past what's
-     * on disk before we drop the cache.
-     *
-     * This is the missing half of the eager-resave story: bulkdelete
-     * and vacuumcleanup always get an unconditional flush for free
-     * because a VACUUM always ends by calling biscuit_vacuumcleanup(),
-     * which force-saves whenever gen != gen_at_last_snapshot. Plain
-     * INSERTs have no equivalent guaranteed call site -- they only get
-     * persisted eagerly once BISCUIT_SNAPSHOT_GEN_THRESHOLD generations
-     * have piled up (see biscuit_insert() in biscuit_index.c). A
-     * session that inserts fewer rows than that threshold and then
-     * disconnects was leaving those rows' bitmap state unsaved forever,
-     * even though the tuples themselves are safely committed in the
-     * heap -- the next cold load would silently fall back to a full
-     * from-heap rebuild instead of finding a stale-but-recoverable
-     * snapshot, which defeats the point of snapshotting at all.
-     *
-     * biscuit_persist_save() only needs the indexoid (not a live
-     * Relation), which is exactly what we have in the cache entry, so
-     * this is safe to call this late in backend shutdown -- no catalog
-     * access required.
+     * Nothing to flush here: every insert/delete already durably appends
+     * to its structures' pending lists (biscuit_pending_mutate_structure())
+     * the moment it happens, and VACUUM's biscuit_vacuumcleanup() drains
+     * those pending lists into compacted blobs directly against the
+     * on-disk directory, with no in-memory BiscuitIndex involved. There is
+     * no "unsaved snapshot" concept left to reconcile at proc-exit: the
+     * old flush that used to live here compared idx->gen against
+     * idx->gen_at_last_snapshot and called biscuit_persist_save() to catch
+     * up, but biscuit_persist_save() now requires relation_open() (a real
+     * Relation, not just an Oid) to reach the buffer manager, and
+     * relation_open() is not safe to call this late in backend shutdown --
+     * see biscuit_persist.c's file header for the full history. This
+     * callback now exists solely to drop the process-local cache.
      */
-    for (entry = biscuit_cache_head; entry != NULL; entry = entry->next)
-    {
-        if (entry->index != NULL && entry->index->gen != entry->index->gen_at_last_snapshot)
-        {
-            elog(DEBUG1, "Biscuit: Flushing unsaved snapshot for index %u at proc-exit",
-                 entry->indexoid);
-            biscuit_persist_save(entry->indexoid, entry->index);
-        }
-    }
-
     elog(DEBUG1, "Biscuit: Module unload - clearing all cache entries");
     biscuit_cache_head          = NULL;
     biscuit_callback_registered = false;

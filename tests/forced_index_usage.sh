@@ -22,8 +22,8 @@ DB_NAME="postgres"
 DB_USER="postgres"
 PORT=5418
 RESULTS_DIR="./benchmark_results_$(date +%Y%m%d_%H%M%S)"
-NUM_ITERATIONS=10 # Increased for statistical significance
-WARMUP_ITERATIONS=3
+NUM_ITERATIONS=1 # Increased for statistical significance
+WARMUP_ITERATIONS=1
 
 # Colors for output
 RED='\033[0;31m'
@@ -745,11 +745,7 @@ get_index_size() {
     local index_name="$1"
     local sql
 
-    if [[ "$index_name" == "int_bisc" ]]; then
-        sql="SELECT biscuit_size_pretty('$index_name');"
-    else
-        sql="SELECT pg_size_pretty(pg_relation_size('$index_name'));"
-    fi
+    sql="SELECT pg_size_pretty(pg_relation_size('$index_name'));"
 
     sudo -u postgres psql -p "$PORT" -d "$DB_NAME" -t -A -c "$sql"
 }

@@ -25,6 +25,9 @@
 #include "biscuit_bitmap.h"
 #include "biscuit_blob.h"
 #include "storage/bufpage.h"
+#include "storage/procarray.h"   /* GetOldestNonRemovableTransactionId(), used
+                                   * by biscuit_page_alloc()'s recycle_xid
+                                   * horizon check below */
 
 /*
  * biscuit_ensure_synchronous_commit
@@ -131,6 +134,135 @@ biscuit_retire_page_locked(Relation index, Buffer target_buf)
 }
 
 /*
+ * biscuit_page_alloc
+ *
+ * Return a fresh, BUFFER_LOCK_EXCLUSIVE-locked buffer for the caller to
+ * PageInit() and populate as page_kind (BISCUIT_PAGE_BLOB/_PENDING/_DIR).
+ * First tries to pop a page off BiscuitMetaPageData.fsm_root -- the
+ * deferred-recycle freelist biscuit_retire_page_locked() pushes onto --
+ * and only falls back to extending the relation (P_NEW) when the
+ * freelist is empty or its head isn't old enough yet to be safely
+ * reused.
+ *
+ * Only the *head* of the freelist is ever considered. The list is a
+ * LIFO stack (retirement pushes at the head), so the head is always the
+ * most-recently-retired page and thus the one *least* likely to have
+ * cleared the recycle_xid horizon; older, already-safe pages can be
+ * sitting deeper in the chain. This is a deliberate simplicity
+ * trade-off, not an oversight: walking/splicing an arbitrary interior
+ * node would need a prev-pointer walk under the metapage lock, and
+ * since retirement and consumption roughly balance out over time (every
+ * drain retires pages, every subsequent allocation tries to reclaim
+ * one), the freelist stays bounded rather than growing unboundedly the
+ * way it does today, even without picking the globally-oldest
+ * candidate. A future pass could walk deeper if the head is still too
+ * new.
+ *
+ * Locking: never holds the metapage lock and a candidate page's lock at
+ * the same time in the metapage-then-target order, to avoid deadlocking
+ * against biscuit_retire_page_locked()'s target-then-metapage order.
+ * Instead: peek the head under a short metapage lock, drop it, lock the
+ * candidate page on its own (target-first), then re-acquire the
+ * metapage lock (now target-then-metapage, consistent with retire) and
+ * re-validate that the candidate is still the head before splicing it
+ * out. Loses the race and falls through to P_NEW on any mismatch or
+ * horizon miss, rather than looping/spinning.
+ */
+Buffer
+biscuit_page_alloc(Relation index, uint16 page_kind)
+{
+    Buffer       mbuf;
+    Page         mpage;
+    BiscuitMetaPageData *meta;
+    BlockNumber  candidate;
+    Buffer       cbuf;
+    Page         cpage;
+    BiscuitPageOpaque copaque;
+    TransactionId horizon;
+    BlockNumber  saved_next;
+
+    /* 1. Peek the freelist head. */
+    mbuf = ReadBuffer(index, BISCUIT_METAPAGE_BLKNO);
+    LockBuffer(mbuf, BUFFER_LOCK_SHARE);
+    mpage = BufferGetPage(mbuf);
+    meta  = (BiscuitMetaPageData *) PageGetSpecialPointer(mpage);
+    candidate = meta->fsm_root;
+    UnlockReleaseBuffer(mbuf);
+
+    if (candidate == InvalidBlockNumber)
+        goto extend;
+
+    /* 2. Lock the candidate on its own (target-first, no metapage held). */
+    cbuf = ReadBuffer(index, candidate);
+    LockBuffer(cbuf, BUFFER_LOCK_EXCLUSIVE);
+    cpage   = BufferGetPage(cbuf);
+    copaque = (BiscuitPageOpaque) PageGetSpecialPointer(cpage);
+
+    /* Is it old enough that no concurrent scan could still be on it? */
+    horizon = GetOldestNonRemovableTransactionId(NULL);
+    if (!TransactionIdIsValid(copaque->recycle_xid) ||
+        !TransactionIdPrecedes(copaque->recycle_xid, horizon))
+    {
+        UnlockReleaseBuffer(cbuf);
+        goto extend;
+    }
+    saved_next = copaque->next;   /* the freelist link, captured before we
+                                    * touch anything under the metapage
+                                    * lock below */
+
+    /* 3. Re-lock the metapage (target-then-metapage) and re-validate. */
+    mbuf = ReadBuffer(index, BISCUIT_METAPAGE_BLKNO);
+    LockBuffer(mbuf, BUFFER_LOCK_EXCLUSIVE);
+    mpage = BufferGetPage(mbuf);
+    meta  = (BiscuitMetaPageData *) PageGetSpecialPointer(mpage);
+
+    if (meta->fsm_root != candidate)
+    {
+        /* Lost the race to another allocator; give up and extend. */
+        UnlockReleaseBuffer(mbuf);
+        UnlockReleaseBuffer(cbuf);
+        goto extend;
+    }
+
+    {
+        GenericXLogState *state;
+
+        biscuit_ensure_synchronous_commit();
+        state = GenericXLogStart(index);
+        mpage = GenericXLogRegisterBuffer(state, mbuf, 0);
+        cpage = GenericXLogRegisterBuffer(state, cbuf, GENERIC_XLOG_FULL_IMAGE);
+
+        meta = (BiscuitMetaPageData *) PageGetSpecialPointer(mpage);
+        meta->fsm_root = saved_next;
+        meta->fsm_page_count--;
+
+        /*
+         * Neutral placeholder state; the caller PageInit()s this page
+         * (in its own subsequent GenericXLog transaction) before writing
+         * real content, so this only matters if something inspects the
+         * page in between -- keep it looking like a normal, non-dead
+         * page of the requested kind rather than a half-retired one.
+         */
+        copaque              = (BiscuitPageOpaque) PageGetSpecialPointer(cpage);
+        copaque->recycle_xid = InvalidTransactionId;
+        copaque->next        = InvalidBlockNumber;
+        copaque->page_kind   = page_kind;
+        copaque->flags       = 0;
+
+        GenericXLogFinish(state);
+        UnlockReleaseBuffer(mbuf);
+    }
+
+    /* Caller gets cbuf back still EXCLUSIVE-locked, ready for PageInit(). */
+    return cbuf;
+
+extend:
+    cbuf = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
+    LockBuffer(cbuf, BUFFER_LOCK_EXCLUSIVE);
+    return cbuf;
+}
+
+/*
  * Walk a chain (blob or pending -- the retirement logic doesn't care
  * which) from head to its end via the *original* opaque.next links,
  * retiring every page. Increments *pages_freed (if non-NULL) by the
@@ -215,8 +347,7 @@ biscuit_page_write_blob(Relation index, const char *data, uint32 len,
         uint32                   offset    = i * maxpayload;
         uint32                   chunk_len = Min(maxpayload, len - offset);
 
-        buf = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
-        LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+        buf = biscuit_page_alloc(index, BISCUIT_PAGE_BLOB);
 
         state = GenericXLogStart(index);
         page  = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
@@ -409,8 +540,7 @@ biscuit_pending_append(Relation index, BlockNumber *head, BlockNumber *tail,
         BiscuitPendingRecord *rec;
         BiscuitPageOpaque     opaque;
 
-        buf = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
-        LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+        buf = biscuit_page_alloc(index, BISCUIT_PAGE_PENDING);
 
         state = GenericXLogStart(index);
         page  = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
@@ -500,8 +630,7 @@ biscuit_pending_append(Relation index, BlockNumber *head, BlockNumber *tail,
         BiscuitPageOpaque      newopaque;
         BiscuitPageOpaque      oldopaque;
 
-        newbuf = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
-        LockBuffer(newbuf, BUFFER_LOCK_EXCLUSIVE);
+        newbuf = biscuit_page_alloc(index, BISCUIT_PAGE_PENDING);
 
         state   = GenericXLogStart(index);
         page    = GenericXLogRegisterBuffer(state, buf, 0);
@@ -616,15 +745,33 @@ biscuit_pending_drain(Relation index,
         cur = next;
     }
 
-    /* §3 step 4: truncate the pending chain. */
-    biscuit_free_chain(index, pending_head, &pending_freed);
-    *head_inout = InvalidBlockNumber;
-    *tail_inout = InvalidBlockNumber;
-
+    /*
+     * §3 step 4: truncate the pending chain -- but only on a real drain
+     * (do_blob_rewrite = true). A read-time reconciliation call
+     * (do_blob_rewrite = false, see biscuit_pattern.c's
+     * biscuit_reconcile_pending() / "Biscuit WAL-Logged Storage: Phase 1
+     * Contract" §3) must leave both the pending chain and the compacted
+     * blob completely untouched -- it only applies pending records to
+     * the in-memory `target` bitmap so a query sees a consistent result,
+     * without doing any of the durable bookkeeping (chain truncation,
+     * blob rewrite, directory update) that a real drain performs. The
+     * caller is responsible for NOT persisting *head_inout* tail_inout
+     * back to the directory in that case -- biscuit_reconcile_pending()
+     * doesn't call biscuit_dir_update() at all, so the untouched
+     * pending_head/pending_tail this function leaves in entry.pending_head/
+     * entry.pending_tail (unchanged from what the caller passed in) are
+     * simply discarded along with the rest of that stack-local
+     * BiscuitDirEntry copy.
+     */
     if (do_blob_rewrite)
     {
+        biscuit_free_chain(index, pending_head, &pending_freed);
+        *head_inout = InvalidBlockNumber;
+        *tail_inout = InvalidBlockNumber;
+
         /* §3 steps 3 & 5: re-encode once, write the new compacted chain,
          * retire the old one, and hand back the new head. */
+        {
         BlockNumber old_blob_head = *blob_head;
         char       *serialized;
         uint32      serialized_len = 0;
@@ -646,6 +793,7 @@ biscuit_pending_drain(Relation index,
         {
             stats->blob_bytes_written   = blob_bytes;
             stats->old_blob_pages_freed = old_freed;
+        }
         }
     }
     else if (stats)

@@ -10,6 +10,71 @@
 #include "biscuit_bitmap.h"
 #include "biscuit_utf8.h"
 #include "biscuit_pattern.h"
+#include "biscuit_blob.h"   /* biscuit_pending_drain -- read-time reconciliation,
+                              * see "Biscuit WAL-Logged Storage: Phase 1 Contract" §3 */
+#include "biscuit_dir.h"    /* biscuit_dir_find, BiscuitDirEntry */
+
+/* ================================================================
+ * SECTION 0 – Read-time pending-list reconciliation
+ * ================================================================
+ *
+ * Chosen strategy (Phase 1 Contract §3): in-memory merge at scan time,
+ * not a forced pre-scan drain. Every bitmap-fetch helper below
+ * (biscuit_get_pos_bitmap et al.) routes its result through
+ * biscuit_reconcile_pending() before returning, so callers throughout
+ * this file (biscuit_match_part_at_pos, biscuit_recursive_windowed_match,
+ * their multi-column/ILIKE counterparts, and biscuit_query_pattern*
+ * biscuit_query_column_pattern*) see an already-reconciled bitmap and
+ * need no reconciliation logic of their own -- they only had to start
+ * passing the scan's Relation down to the fetch helpers.
+ *
+ * Ownership contract callers can rely on: the returned pointer is either
+ * (a) the same live, borrowed pointer the caller would have gotten
+ * before this phase (structure has no undrained pending records --
+ * cheap common case, one directory lookup, zero copies), or (b) a fresh,
+ * context-scoped RoaringBitmap the caller does not need to explicitly
+ * free (matches this file's existing convention for biscuit_get_length_ge()
+ * et al., which have always returned a fresh copy reclaimed by ordinary
+ * memory-context cleanup rather than an explicit pfree at every call
+ * site). Either way, callers never need to know which case occurred.
+ */
+static RoaringBitmap *
+biscuit_reconcile_pending(Relation index, RoaringBitmap *cached,
+                           int32 col, bool is_lower, uint8 kind,
+                           int32 ch, int32 position)
+{
+    BiscuitDirEntry     entry;
+    BiscuitDirEntryRef  ref;
+    RoaringBitmap      *merged;
+
+    if (index == NULL)
+        return cached;   /* no backing Relation available -- tolerate
+                           * defensively rather than crash; every real
+                           * query-path caller has one (biscuit_scan.c
+                           * always has scan->indexRelation) */
+
+    if (!biscuit_dir_find(index, col, is_lower, kind, ch, position, &entry, &ref))
+        return cached;   /* nothing durable beyond what's already cached */
+
+    if (entry.pending_count == 0)
+        return cached;   /* already reconciled -- the common case */
+
+    merged = cached ? biscuit_roaring_copy(cached) : biscuit_roaring_create();
+
+    /*
+     * do_blob_rewrite = false: apply pending records to `merged` only.
+     * Leaves both the pending chain and the compacted blob untouched --
+     * this is a read, not a drain (see biscuit_blob.c's biscuit_pending_drain()
+     * header comment and Phase 1 Contract §3 for why the non-destructive
+     * behavior is required here specifically).
+     */
+    biscuit_pending_drain(index, entry.pending_head,
+                           &entry.pending_head, &entry.pending_tail,
+                           &entry.blob_head, /* do_blob_rewrite = */ false,
+                           merged, /* stats = */ NULL);
+
+    return merged;
+}
 
 /* ================================================================
  * SECTION 1 – CharIndex bitmap accessor helpers
@@ -22,31 +87,35 @@
 /* ---------- single-column (legacy) case-sensitive ---------- */
 
 RoaringBitmap *
-biscuit_get_pos_bitmap(BiscuitIndex *idx, unsigned char ch, int pos)
+biscuit_get_pos_bitmap(Relation index, BiscuitIndex *idx, unsigned char ch, int pos)
 {
-    CharIndex *cidx  = &idx->pos_idx_legacy[ch];
-    int        left  = 0, right = cidx->count - 1;
+    CharIndex     *cidx   = &idx->pos_idx_legacy[ch];
+    RoaringBitmap *cached = NULL;
+    int            left   = 0, right = cidx->count - 1;
     while (left <= right) {
         int mid = (left + right) >> 1;
-        if (cidx->entries[mid].pos == pos) return cidx->entries[mid].bitmap;
+        if (cidx->entries[mid].pos == pos) { cached = cidx->entries[mid].bitmap; break; }
         else if (cidx->entries[mid].pos < pos) left  = mid + 1;
         else                                    right = mid - 1;
     }
-    return NULL;
+    return biscuit_reconcile_pending(index, cached, -1, false,
+                                      BISCUIT_DIR_KIND_POS, ch, pos);
 }
 
 RoaringBitmap *
-biscuit_get_neg_bitmap(BiscuitIndex *idx, unsigned char ch, int neg_offset)
+biscuit_get_neg_bitmap(Relation index, BiscuitIndex *idx, unsigned char ch, int neg_offset)
 {
-    CharIndex *cidx  = &idx->neg_idx_legacy[ch];
-    int        left  = 0, right = cidx->count - 1;
+    CharIndex     *cidx   = &idx->neg_idx_legacy[ch];
+    RoaringBitmap *cached = NULL;
+    int            left   = 0, right = cidx->count - 1;
     while (left <= right) {
         int mid = (left + right) >> 1;
-        if (cidx->entries[mid].pos == neg_offset) return cidx->entries[mid].bitmap;
+        if (cidx->entries[mid].pos == neg_offset) { cached = cidx->entries[mid].bitmap; break; }
         else if (cidx->entries[mid].pos < neg_offset) left  = mid + 1;
         else                                           right = mid - 1;
     }
-    return NULL;
+    return biscuit_reconcile_pending(index, cached, -1, false,
+                                      BISCUIT_DIR_KIND_NEG, ch, neg_offset);
 }
 
 void
@@ -116,31 +185,35 @@ biscuit_set_neg_bitmap(BiscuitIndex *idx, unsigned char ch, int neg_offset, Roar
 /* ---------- single-column case-insensitive (lower) ---------- */
 
 RoaringBitmap *
-biscuit_get_pos_bitmap_lower(BiscuitIndex *idx, unsigned char ch, int pos)
+biscuit_get_pos_bitmap_lower(Relation index, BiscuitIndex *idx, unsigned char ch, int pos)
 {
-    CharIndex *cidx  = &idx->pos_idx_lower[ch];
-    int        left  = 0, right = cidx->count - 1;
+    CharIndex     *cidx   = &idx->pos_idx_lower[ch];
+    RoaringBitmap *cached = NULL;
+    int            left   = 0, right = cidx->count - 1;
     while (left <= right) {
         int mid = (left + right) >> 1;
-        if (cidx->entries[mid].pos == pos) return cidx->entries[mid].bitmap;
+        if (cidx->entries[mid].pos == pos) { cached = cidx->entries[mid].bitmap; break; }
         else if (cidx->entries[mid].pos < pos) left  = mid + 1;
         else                                    right = mid - 1;
     }
-    return NULL;
+    return biscuit_reconcile_pending(index, cached, -1, true,
+                                      BISCUIT_DIR_KIND_POS, ch, pos);
 }
 
 RoaringBitmap *
-biscuit_get_neg_bitmap_lower(BiscuitIndex *idx, unsigned char ch, int neg_offset)
+biscuit_get_neg_bitmap_lower(Relation index, BiscuitIndex *idx, unsigned char ch, int neg_offset)
 {
-    CharIndex *cidx  = &idx->neg_idx_lower[ch];
-    int        left  = 0, right = cidx->count - 1;
+    CharIndex     *cidx   = &idx->neg_idx_lower[ch];
+    RoaringBitmap *cached = NULL;
+    int            left   = 0, right = cidx->count - 1;
     while (left <= right) {
         int mid = (left + right) >> 1;
-        if (cidx->entries[mid].pos == neg_offset) return cidx->entries[mid].bitmap;
+        if (cidx->entries[mid].pos == neg_offset) { cached = cidx->entries[mid].bitmap; break; }
         else if (cidx->entries[mid].pos < neg_offset) left  = mid + 1;
         else                                           right = mid - 1;
     }
-    return NULL;
+    return biscuit_reconcile_pending(index, cached, -1, true,
+                                      BISCUIT_DIR_KIND_NEG, ch, neg_offset);
 }
 
 void
@@ -210,59 +283,71 @@ biscuit_set_neg_bitmap_lower(BiscuitIndex *idx, unsigned char ch, int neg_offset
 /* ---------- multi-column accessors ---------- */
 
 RoaringBitmap *
-biscuit_get_col_pos_bitmap(ColumnIndex *col, unsigned char ch, int pos)
+biscuit_get_col_pos_bitmap(Relation index, ColumnIndex *col, int col_idx,
+                            unsigned char ch, int pos)
 {
-    CharIndex *cidx  = &col->pos_idx[ch];
-    int        left  = 0, right = cidx->count - 1;
+    CharIndex     *cidx   = &col->pos_idx[ch];
+    RoaringBitmap *cached = NULL;
+    int            left   = 0, right = cidx->count - 1;
     while (left <= right) {
         int mid = (left + right) >> 1;
-        if (cidx->entries[mid].pos == pos) return cidx->entries[mid].bitmap;
+        if (cidx->entries[mid].pos == pos) { cached = cidx->entries[mid].bitmap; break; }
         else if (cidx->entries[mid].pos < pos) left  = mid + 1;
         else                                    right = mid - 1;
     }
-    return NULL;
+    return biscuit_reconcile_pending(index, cached, col_idx, false,
+                                      BISCUIT_DIR_KIND_POS, ch, pos);
 }
 
 RoaringBitmap *
-biscuit_get_col_neg_bitmap(ColumnIndex *col, unsigned char ch, int neg_offset)
+biscuit_get_col_neg_bitmap(Relation index, ColumnIndex *col, int col_idx,
+                            unsigned char ch, int neg_offset)
 {
-    CharIndex *cidx  = &col->neg_idx[ch];
-    int        left  = 0, right = cidx->count - 1;
+    CharIndex     *cidx   = &col->neg_idx[ch];
+    RoaringBitmap *cached = NULL;
+    int            left   = 0, right = cidx->count - 1;
     while (left <= right) {
         int mid = (left + right) >> 1;
-        if (cidx->entries[mid].pos == neg_offset) return cidx->entries[mid].bitmap;
+        if (cidx->entries[mid].pos == neg_offset) { cached = cidx->entries[mid].bitmap; break; }
         else if (cidx->entries[mid].pos < neg_offset) left  = mid + 1;
         else                                           right = mid - 1;
     }
-    return NULL;
+    return biscuit_reconcile_pending(index, cached, col_idx, false,
+                                      BISCUIT_DIR_KIND_NEG, ch, neg_offset);
 }
 
 RoaringBitmap *
-biscuit_get_col_pos_bitmap_lower(ColumnIndex *col, unsigned char ch, int pos)
+biscuit_get_col_pos_bitmap_lower(Relation index, ColumnIndex *col, int col_idx,
+                                  unsigned char ch, int pos)
 {
-    CharIndex *cidx  = &col->pos_idx_lower[ch];
-    int        left  = 0, right = cidx->count - 1;
+    CharIndex     *cidx   = &col->pos_idx_lower[ch];
+    RoaringBitmap *cached = NULL;
+    int            left   = 0, right = cidx->count - 1;
     while (left <= right) {
         int mid = (left + right) >> 1;
-        if (cidx->entries[mid].pos == pos) return cidx->entries[mid].bitmap;
+        if (cidx->entries[mid].pos == pos) { cached = cidx->entries[mid].bitmap; break; }
         else if (cidx->entries[mid].pos < pos) left  = mid + 1;
         else                                    right = mid - 1;
     }
-    return NULL;
+    return biscuit_reconcile_pending(index, cached, col_idx, true,
+                                      BISCUIT_DIR_KIND_POS, ch, pos);
 }
 
 RoaringBitmap *
-biscuit_get_col_neg_bitmap_lower(ColumnIndex *col, unsigned char ch, int neg_offset)
+biscuit_get_col_neg_bitmap_lower(Relation index, ColumnIndex *col, int col_idx,
+                                  unsigned char ch, int neg_offset)
 {
-    CharIndex *cidx  = &col->neg_idx_lower[ch];
-    int        left  = 0, right = cidx->count - 1;
+    CharIndex     *cidx   = &col->neg_idx_lower[ch];
+    RoaringBitmap *cached = NULL;
+    int            left   = 0, right = cidx->count - 1;
     while (left <= right) {
         int mid = (left + right) >> 1;
-        if (cidx->entries[mid].pos == neg_offset) return cidx->entries[mid].bitmap;
+        if (cidx->entries[mid].pos == neg_offset) { cached = cidx->entries[mid].bitmap; break; }
         else if (cidx->entries[mid].pos < neg_offset) left  = mid + 1;
         else                                           right = mid - 1;
     }
-    return NULL;
+    return biscuit_reconcile_pending(index, cached, col_idx, true,
+                                      BISCUIT_DIR_KIND_NEG, ch, neg_offset);
 }
 
 void
@@ -398,47 +483,100 @@ biscuit_set_col_neg_bitmap_lower(ColumnIndex *col, unsigned char ch, int neg_off
  * ================================================================ */
 
 static RoaringBitmap *
-biscuit_get_length_ge(BiscuitIndex *idx, int min_len)
+biscuit_get_length_ge(Relation index, BiscuitIndex *idx, int min_len)
 {
+    RoaringBitmap *cached = NULL;
+    int            position = (min_len <= 0) ? 0 : min_len;
+
     if (min_len <= 0 && idx->length_ge_bitmaps_legacy && idx->length_ge_bitmaps_legacy[0])
-        return biscuit_roaring_copy(idx->length_ge_bitmaps_legacy[0]);
-    if (min_len < idx->max_length_legacy && idx->length_ge_bitmaps_legacy &&
-        idx->length_ge_bitmaps_legacy[min_len])
-        return biscuit_roaring_copy(idx->length_ge_bitmaps_legacy[min_len]);
-    return biscuit_roaring_create();
+        cached = idx->length_ge_bitmaps_legacy[0];
+    else if (min_len < idx->max_length_legacy && idx->length_ge_bitmaps_legacy &&
+             idx->length_ge_bitmaps_legacy[min_len])
+        cached = idx->length_ge_bitmaps_legacy[min_len];
+
+    /*
+     * biscuit_reconcile_pending() returns either `cached` unchanged (a
+     * live, borrowed pointer -- must NOT be freed here) or a fresh,
+     * context-scoped bitmap. The pre-existing contract for this function
+     * is "always hand the caller an owned copy it may mutate/free" --
+     * preserve that by copying only in the unchanged-cached case; the
+     * pending-merge case already returned a fresh object that's safe to
+     * hand back directly.
+     */
+    {
+        RoaringBitmap *reconciled = biscuit_reconcile_pending(index, cached, -1, false,
+                                                                BISCUIT_DIR_KIND_LEN_GE,
+                                                                -1, position);
+        if (reconciled == cached)
+            return cached ? biscuit_roaring_copy(cached) : biscuit_roaring_create();
+        return reconciled;
+    }
 }
 
 static RoaringBitmap *
-biscuit_get_length_ge_lower(BiscuitIndex *idx, int min_len)
+biscuit_get_length_ge_lower(Relation index, BiscuitIndex *idx, int min_len)
 {
+    RoaringBitmap *cached = NULL;
+    int            position = (min_len <= 0) ? 0 : min_len;
+
     if (min_len <= 0 && idx->length_ge_bitmaps_lower && idx->length_ge_bitmaps_lower[0])
-        return biscuit_roaring_copy(idx->length_ge_bitmaps_lower[0]);
-    if (min_len < idx->max_length_lower && idx->length_ge_bitmaps_lower &&
-        idx->length_ge_bitmaps_lower[min_len])
-        return biscuit_roaring_copy(idx->length_ge_bitmaps_lower[min_len]);
-    return biscuit_roaring_create();
+        cached = idx->length_ge_bitmaps_lower[0];
+    else if (min_len < idx->max_length_lower && idx->length_ge_bitmaps_lower &&
+             idx->length_ge_bitmaps_lower[min_len])
+        cached = idx->length_ge_bitmaps_lower[min_len];
+
+    {
+        RoaringBitmap *reconciled = biscuit_reconcile_pending(index, cached, -1, true,
+                                                                BISCUIT_DIR_KIND_LEN_GE,
+                                                                -1, position);
+        if (reconciled == cached)
+            return cached ? biscuit_roaring_copy(cached) : biscuit_roaring_create();
+        return reconciled;
+    }
 }
 
 static RoaringBitmap *
-biscuit_get_col_length_ge(ColumnIndex *col, int min_len)
+biscuit_get_col_length_ge(Relation index, ColumnIndex *col, int col_idx, int min_len)
 {
+    RoaringBitmap *cached = NULL;
+    int            position = (min_len <= 0) ? 0 : min_len;
+
     if (min_len <= 0 && col->length_ge_bitmaps && col->length_ge_bitmaps[0])
-        return biscuit_roaring_copy(col->length_ge_bitmaps[0]);
-    if (min_len < col->max_length && col->length_ge_bitmaps &&
-        col->length_ge_bitmaps[min_len])
-        return biscuit_roaring_copy(col->length_ge_bitmaps[min_len]);
-    return biscuit_roaring_create();
+        cached = col->length_ge_bitmaps[0];
+    else if (min_len < col->max_length && col->length_ge_bitmaps &&
+             col->length_ge_bitmaps[min_len])
+        cached = col->length_ge_bitmaps[min_len];
+
+    {
+        RoaringBitmap *reconciled = biscuit_reconcile_pending(index, cached, col_idx, false,
+                                                                BISCUIT_DIR_KIND_LEN_GE,
+                                                                -1, position);
+        if (reconciled == cached)
+            return cached ? biscuit_roaring_copy(cached) : biscuit_roaring_create();
+        return reconciled;
+    }
 }
 
 static RoaringBitmap *
-biscuit_get_col_length_ge_lower(ColumnIndex *col, int min_len)
+biscuit_get_col_length_ge_lower(Relation index, ColumnIndex *col, int col_idx, int min_len)
 {
+    RoaringBitmap *cached = NULL;
+    int            position = (min_len <= 0) ? 0 : min_len;
+
     if (min_len <= 0 && col->length_ge_bitmaps_lower && col->length_ge_bitmaps_lower[0])
-        return biscuit_roaring_copy(col->length_ge_bitmaps_lower[0]);
-    if (min_len < col->max_length_lower && col->length_ge_bitmaps_lower &&
-        col->length_ge_bitmaps_lower[min_len])
-        return biscuit_roaring_copy(col->length_ge_bitmaps_lower[min_len]);
-    return biscuit_roaring_create();
+        cached = col->length_ge_bitmaps_lower[0];
+    else if (min_len < col->max_length_lower && col->length_ge_bitmaps_lower &&
+             col->length_ge_bitmaps_lower[min_len])
+        cached = col->length_ge_bitmaps_lower[min_len];
+
+    {
+        RoaringBitmap *reconciled = biscuit_reconcile_pending(index, cached, col_idx, true,
+                                                                BISCUIT_DIR_KIND_LEN_GE,
+                                                                -1, position);
+        if (reconciled == cached)
+            return cached ? biscuit_roaring_copy(cached) : biscuit_roaring_create();
+        return reconciled;
+    }
 }
 
 /* ================================================================
@@ -807,7 +945,7 @@ biscuit_free_parsed_pattern(ParsedPattern *parsed)
  * Handles underscore (_) wildcards and multi-byte UTF-8 sequences.
  */
 static RoaringBitmap *
-biscuit_match_part_at_pos(BiscuitIndex *idx, const char *part,
+biscuit_match_part_at_pos(Relation index, BiscuitIndex *idx, const char *part,
                           int part_byte_len, int start_pos)
 {
     RoaringBitmap *result = NULL;
@@ -831,7 +969,7 @@ biscuit_match_part_at_pos(BiscuitIndex *idx, const char *part,
             if (part_byte_pos + 1 >= part_byte_len) { part_byte_pos++; continue; }
             literal_byte = (unsigned char) part[part_byte_pos + 1];
             concrete_chars++;
-            char_bm = biscuit_get_pos_bitmap(idx, literal_byte, char_pos);
+            char_bm = biscuit_get_pos_bitmap(index, idx, literal_byte, char_pos);
             if (!char_bm) { if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
             if (first_char) { result = biscuit_roaring_copy(char_bm); first_char = false; }
             else { biscuit_roaring_and_inplace(result, char_bm); if (biscuit_roaring_is_empty(result)) return result; }
@@ -851,7 +989,7 @@ biscuit_match_part_at_pos(BiscuitIndex *idx, const char *part,
 
         if (char_len == 1)
         {
-            RoaringBitmap *char_bm = biscuit_get_pos_bitmap(idx, first_byte, char_pos);
+            RoaringBitmap *char_bm = biscuit_get_pos_bitmap(index, idx, first_byte, char_pos);
             if (!char_bm) { if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
             if (first_char) { result = biscuit_roaring_copy(char_bm); first_char = false; }
             else { biscuit_roaring_and_inplace(result, char_bm); if (biscuit_roaring_is_empty(result)) return result; }
@@ -863,7 +1001,7 @@ biscuit_match_part_at_pos(BiscuitIndex *idx, const char *part,
             for (b = 0; b < char_len; b++)
             {
                 unsigned char bv = (unsigned char) part[part_byte_pos + b];
-                RoaringBitmap *byte_bm = biscuit_get_pos_bitmap(idx, bv, char_pos);
+                RoaringBitmap *byte_bm = biscuit_get_pos_bitmap(index, idx, bv, char_pos);
                 if (!byte_bm) {
                     if (multibyte) biscuit_roaring_free(multibyte);
                     if (result)   biscuit_roaring_free(result);
@@ -885,9 +1023,9 @@ biscuit_match_part_at_pos(BiscuitIndex *idx, const char *part,
         int pattern_char_count = biscuit_part_char_count(part, part_byte_len);
         if (concrete_chars == 0) {
             if (result) biscuit_roaring_free(result);
-            result = biscuit_get_length_ge(idx, start_pos + pattern_char_count);
+            result = biscuit_get_length_ge(index, idx, start_pos + pattern_char_count);
         } else {
-            len_filter = biscuit_get_length_ge(idx, start_pos + pattern_char_count);
+            len_filter = biscuit_get_length_ge(index, idx, start_pos + pattern_char_count);
             if (len_filter) {
                 if (result) biscuit_roaring_and_inplace(result, len_filter);
                 else        { result = len_filter; len_filter = NULL; }
@@ -901,7 +1039,7 @@ biscuit_match_part_at_pos(BiscuitIndex *idx, const char *part,
 
 /* Match part anchored at the end of string – case-sensitive. */
 static RoaringBitmap *
-biscuit_match_part_at_end(BiscuitIndex *idx, const char *part, int part_byte_len)
+biscuit_match_part_at_end(Relation index, BiscuitIndex *idx, const char *part, int part_byte_len)
 {
     RoaringBitmap *result = NULL;
     RoaringBitmap *len_filter;
@@ -924,7 +1062,7 @@ biscuit_match_part_at_end(BiscuitIndex *idx, const char *part, int part_byte_len
             literal_byte = (unsigned char) part[part_byte_pos + 1];
             concrete_chars++;
             neg_pos = -(pattern_char_count - char_offset_from_end);
-            char_bm = biscuit_get_neg_bitmap(idx, literal_byte, neg_pos);
+            char_bm = biscuit_get_neg_bitmap(index, idx, literal_byte, neg_pos);
             if (!char_bm) { if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
             if (first_char) { result = biscuit_roaring_copy(char_bm); first_char = false; }
             else { biscuit_roaring_and_inplace(result, char_bm); if (biscuit_roaring_is_empty(result)) return result; }
@@ -946,7 +1084,7 @@ biscuit_match_part_at_end(BiscuitIndex *idx, const char *part, int part_byte_len
 
         if (char_len == 1)
         {
-            RoaringBitmap *char_bm = biscuit_get_neg_bitmap(idx, first_byte, neg_pos);
+            RoaringBitmap *char_bm = biscuit_get_neg_bitmap(index, idx, first_byte, neg_pos);
             if (!char_bm) { if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
             if (first_char) { result = biscuit_roaring_copy(char_bm); first_char = false; }
             else { biscuit_roaring_and_inplace(result, char_bm); if (biscuit_roaring_is_empty(result)) return result; }
@@ -958,7 +1096,7 @@ biscuit_match_part_at_end(BiscuitIndex *idx, const char *part, int part_byte_len
             for (b = 0; b < char_len; b++)
             {
                 unsigned char bv = (unsigned char) part[part_byte_pos + b];
-                RoaringBitmap *byte_bm = biscuit_get_neg_bitmap(idx, bv, neg_pos);
+                RoaringBitmap *byte_bm = biscuit_get_neg_bitmap(index, idx, bv, neg_pos);
                 if (!byte_bm) { if (multibyte) biscuit_roaring_free(multibyte); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
                 if (b == 0) multibyte = biscuit_roaring_copy(byte_bm);
                 else { biscuit_roaring_and_inplace(multibyte, byte_bm); if (biscuit_roaring_is_empty(multibyte)) { biscuit_roaring_free(multibyte); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } }
@@ -974,9 +1112,9 @@ biscuit_match_part_at_end(BiscuitIndex *idx, const char *part, int part_byte_len
 
     if (concrete_chars == 0) {
         if (result) biscuit_roaring_free(result);
-        result = biscuit_get_length_ge(idx, pattern_char_count);
+        result = biscuit_get_length_ge(index, idx, pattern_char_count);
     } else {
-        len_filter = biscuit_get_length_ge(idx, pattern_char_count);
+        len_filter = biscuit_get_length_ge(index, idx, pattern_char_count);
         if (len_filter) { if (result) biscuit_roaring_and_inplace(result, len_filter); else { result = len_filter; len_filter = NULL; } if (len_filter) biscuit_roaring_free(len_filter); }
     }
 
@@ -985,7 +1123,7 @@ biscuit_match_part_at_end(BiscuitIndex *idx, const char *part, int part_byte_len
 
 /* Case-insensitive variants reuse the same logic via _lower accessors */
 static RoaringBitmap *
-biscuit_match_part_at_pos_ilike(BiscuitIndex *idx, const char *part,
+biscuit_match_part_at_pos_ilike(Relation index, BiscuitIndex *idx, const char *part,
                                 int part_byte_len, int start_pos)
 {
     RoaringBitmap *result = NULL;
@@ -1005,7 +1143,7 @@ biscuit_match_part_at_pos_ilike(BiscuitIndex *idx, const char *part,
             if (part_byte_pos + 1 >= part_byte_len) { part_byte_pos++; continue; }
             literal_byte = (unsigned char) part[part_byte_pos + 1];
             concrete_chars++;
-            char_bm = biscuit_get_pos_bitmap_lower(idx, literal_byte, char_pos);
+            char_bm = biscuit_get_pos_bitmap_lower(index, idx, literal_byte, char_pos);
             if (!char_bm) { if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
             if (first_char) { result = biscuit_roaring_copy(char_bm); first_char = false; }
             else { biscuit_roaring_and_inplace(result, char_bm); if (biscuit_roaring_is_empty(result)) return result; }
@@ -1023,7 +1161,7 @@ biscuit_match_part_at_pos_ilike(BiscuitIndex *idx, const char *part,
 
         if (char_len == 1)
         {
-            RoaringBitmap *char_bm = biscuit_get_pos_bitmap_lower(idx, first_byte, char_pos);
+            RoaringBitmap *char_bm = biscuit_get_pos_bitmap_lower(index, idx, first_byte, char_pos);
             if (!char_bm) { if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
             if (first_char) { result = biscuit_roaring_copy(char_bm); first_char = false; }
             else { biscuit_roaring_and_inplace(result, char_bm); if (biscuit_roaring_is_empty(result)) return result; }
@@ -1033,7 +1171,7 @@ biscuit_match_part_at_pos_ilike(BiscuitIndex *idx, const char *part,
             RoaringBitmap *multibyte = NULL; int b;
             for (b = 0; b < char_len; b++) {
                 unsigned char bv = (unsigned char) part[part_byte_pos + b];
-                RoaringBitmap *byte_bm = biscuit_get_pos_bitmap_lower(idx, bv, char_pos);
+                RoaringBitmap *byte_bm = biscuit_get_pos_bitmap_lower(index, idx, bv, char_pos);
                 if (!byte_bm) { if (multibyte) biscuit_roaring_free(multibyte); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
                 if (b == 0) multibyte = biscuit_roaring_copy(byte_bm);
                 else { biscuit_roaring_and_inplace(multibyte, byte_bm); if (biscuit_roaring_is_empty(multibyte)) { biscuit_roaring_free(multibyte); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } }
@@ -1048,15 +1186,15 @@ biscuit_match_part_at_pos_ilike(BiscuitIndex *idx, const char *part,
 
     {
         int pattern_char_count = biscuit_part_char_count(part, part_byte_len);
-        if (concrete_chars == 0) { if (result) biscuit_roaring_free(result); result = biscuit_get_length_ge_lower(idx, start_pos + pattern_char_count); }
-        else { len_filter = biscuit_get_length_ge_lower(idx, start_pos + pattern_char_count); if (len_filter) { if (result) biscuit_roaring_and_inplace(result, len_filter); else { result = len_filter; len_filter = NULL; } if (len_filter) biscuit_roaring_free(len_filter); } }
+        if (concrete_chars == 0) { if (result) biscuit_roaring_free(result); result = biscuit_get_length_ge_lower(index, idx, start_pos + pattern_char_count); }
+        else { len_filter = biscuit_get_length_ge_lower(index, idx, start_pos + pattern_char_count); if (len_filter) { if (result) biscuit_roaring_and_inplace(result, len_filter); else { result = len_filter; len_filter = NULL; } if (len_filter) biscuit_roaring_free(len_filter); } }
     }
 
     return result ? result : biscuit_roaring_create();
 }
 
 static RoaringBitmap *
-biscuit_match_part_at_end_ilike(BiscuitIndex *idx, const char *part, int part_byte_len)
+biscuit_match_part_at_end_ilike(Relation index, BiscuitIndex *idx, const char *part, int part_byte_len)
 {
     RoaringBitmap *result = NULL;
     RoaringBitmap *len_filter;
@@ -1078,7 +1216,7 @@ biscuit_match_part_at_end_ilike(BiscuitIndex *idx, const char *part, int part_by
             literal_byte = (unsigned char) part[part_byte_pos + 1];
             concrete_chars++;
             neg_pos = -(pattern_char_count - char_offset_from_end);
-            char_bm = biscuit_get_neg_bitmap_lower(idx, literal_byte, neg_pos);
+            char_bm = biscuit_get_neg_bitmap_lower(index, idx, literal_byte, neg_pos);
             if (!char_bm) { if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
             if (first_char) { result = biscuit_roaring_copy(char_bm); first_char = false; }
             else { biscuit_roaring_and_inplace(result, char_bm); if (biscuit_roaring_is_empty(result)) return result; }
@@ -1094,13 +1232,13 @@ biscuit_match_part_at_end_ilike(BiscuitIndex *idx, const char *part, int part_by
         concrete_chars++;
         neg_pos = -(pattern_char_count - char_offset_from_end);
         if (char_len == 1) {
-            RoaringBitmap *char_bm = biscuit_get_neg_bitmap_lower(idx, first_byte, neg_pos);
+            RoaringBitmap *char_bm = biscuit_get_neg_bitmap_lower(index, idx, first_byte, neg_pos);
             if (!char_bm) { if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
             if (first_char) { result = biscuit_roaring_copy(char_bm); first_char = false; }
             else { biscuit_roaring_and_inplace(result, char_bm); if (biscuit_roaring_is_empty(result)) return result; }
         } else {
             RoaringBitmap *multibyte = NULL; int b;
-            for (b = 0; b < char_len; b++) { unsigned char bv = (unsigned char) part[part_byte_pos + b]; RoaringBitmap *byte_bm = biscuit_get_neg_bitmap_lower(idx, bv, neg_pos); if (!byte_bm) { if (multibyte) biscuit_roaring_free(multibyte); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } if (b == 0) multibyte = biscuit_roaring_copy(byte_bm); else { biscuit_roaring_and_inplace(multibyte, byte_bm); if (biscuit_roaring_is_empty(multibyte)) { biscuit_roaring_free(multibyte); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } } }
+            for (b = 0; b < char_len; b++) { unsigned char bv = (unsigned char) part[part_byte_pos + b]; RoaringBitmap *byte_bm = biscuit_get_neg_bitmap_lower(index, idx, bv, neg_pos); if (!byte_bm) { if (multibyte) biscuit_roaring_free(multibyte); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } if (b == 0) multibyte = biscuit_roaring_copy(byte_bm); else { biscuit_roaring_and_inplace(multibyte, byte_bm); if (biscuit_roaring_is_empty(multibyte)) { biscuit_roaring_free(multibyte); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } } }
             if (first_char) { result = multibyte; first_char = false; }
             else { biscuit_roaring_and_inplace(result, multibyte); biscuit_roaring_free(multibyte); if (biscuit_roaring_is_empty(result)) return result; }
         }
@@ -1109,8 +1247,8 @@ biscuit_match_part_at_end_ilike(BiscuitIndex *idx, const char *part, int part_by
         } /* end char_len block */
     }
 
-    if (concrete_chars == 0) { if (result) biscuit_roaring_free(result); result = biscuit_get_length_ge_lower(idx, pattern_char_count); }
-    else { len_filter = biscuit_get_length_ge_lower(idx, pattern_char_count); if (len_filter) { if (result) biscuit_roaring_and_inplace(result, len_filter); else { result = len_filter; len_filter = NULL; } if (len_filter) biscuit_roaring_free(len_filter); } }
+    if (concrete_chars == 0) { if (result) biscuit_roaring_free(result); result = biscuit_get_length_ge_lower(index, idx, pattern_char_count); }
+    else { len_filter = biscuit_get_length_ge_lower(index, idx, pattern_char_count); if (len_filter) { if (result) biscuit_roaring_and_inplace(result, len_filter); else { result = len_filter; len_filter = NULL; } if (len_filter) biscuit_roaring_free(len_filter); } }
 
     return result ? result : biscuit_roaring_create();
 }
@@ -1140,7 +1278,7 @@ typedef struct WMFrame {
 
 static void
 biscuit_recursive_windowed_match(
-    RoaringBitmap *result, BiscuitIndex *idx,
+    Relation index, RoaringBitmap *result, BiscuitIndex *idx,
     const char **parts, int *part_lens, int part_count,
     bool ends_percent, int part_idx, int min_pos,
     RoaringBitmap *current_candidates, int max_len)
@@ -1187,14 +1325,14 @@ biscuit_recursive_windowed_match(
 
         if (pidx == part_count - 1 && !ends_percent)
         {
-            RoaringBitmap *em = biscuit_match_part_at_end(idx, parts[pidx], part_lens[pidx]);
+            RoaringBitmap *em = biscuit_match_part_at_end(index, idx, parts[pidx], part_lens[pidx]);
             if (em)
             {
                 int mrl;
                 RoaringBitmap *lc;
                 biscuit_roaring_and_inplace(em, cands);
                 mrl = mpos + part_cl;
-                lc = biscuit_get_length_ge(idx, mrl);
+                lc = biscuit_get_length_ge(index, idx, mrl);
                 if (lc) { biscuit_roaring_and_inplace(em, lc); biscuit_roaring_free(lc); }
                 if (!biscuit_roaring_is_empty(em))
                     biscuit_roaring_or_inplace(result, em);
@@ -1212,7 +1350,7 @@ biscuit_recursive_windowed_match(
             RoaringBitmap *pm;
             RoaringBitmap *nc;
             pos = i;
-            pm = biscuit_match_part_at_pos(idx, parts[pidx],
+            pm = biscuit_match_part_at_pos(index, idx, parts[pidx],
                                            part_lens[pidx], pos);
             if (!pm)
                 continue;
@@ -1245,7 +1383,7 @@ biscuit_recursive_windowed_match(
 
 static void
 biscuit_recursive_windowed_match_ilike(
-    RoaringBitmap *result, BiscuitIndex *idx,
+    Relation index, RoaringBitmap *result, BiscuitIndex *idx,
     const char **parts, int *part_lens, int part_count,
     bool ends_percent, int part_idx, int min_pos,
     RoaringBitmap *current_candidates, int max_len)
@@ -1292,14 +1430,14 @@ biscuit_recursive_windowed_match_ilike(
 
         if (pidx == part_count - 1 && !ends_percent)
         {
-            RoaringBitmap *em = biscuit_match_part_at_end_ilike(idx, parts[pidx], part_lens[pidx]);
+            RoaringBitmap *em = biscuit_match_part_at_end_ilike(index, idx, parts[pidx], part_lens[pidx]);
             if (em)
             {
                 int mrl;
                 RoaringBitmap *lc;
                 biscuit_roaring_and_inplace(em, cands);
                 mrl = mpos + part_cl;
-                lc = biscuit_get_length_ge_lower(idx, mrl);
+                lc = biscuit_get_length_ge_lower(index, idx, mrl);
                 if (lc) { biscuit_roaring_and_inplace(em, lc); biscuit_roaring_free(lc); }
                 if (!biscuit_roaring_is_empty(em))
                     biscuit_roaring_or_inplace(result, em);
@@ -1317,7 +1455,7 @@ biscuit_recursive_windowed_match_ilike(
             RoaringBitmap *pm;
             RoaringBitmap *nc;
             pos = i;
-            pm = biscuit_match_part_at_pos_ilike(idx, parts[pidx], part_lens[pidx], pos);
+            pm = biscuit_match_part_at_pos_ilike(index, idx, parts[pidx], part_lens[pidx], pos);
             if (!pm) continue;
             nc = biscuit_roaring_copy(cands);
             biscuit_roaring_and_inplace(nc, pm);
@@ -1347,7 +1485,8 @@ biscuit_recursive_windowed_match_ilike(
  * ================================================================ */
 
 static RoaringBitmap *
-biscuit_match_col_part_at_pos(ColumnIndex *col, const char *part,
+biscuit_match_col_part_at_pos(Relation index, ColumnIndex *col, int col_idx,
+                              const char *part,
                               int part_byte_len, int start_pos)
 {
     RoaringBitmap *result = NULL;
@@ -1362,7 +1501,7 @@ biscuit_match_col_part_at_pos(ColumnIndex *col, const char *part,
             if (part_byte_pos + 1 >= part_byte_len) { part_byte_pos++; continue; }
             lb = (unsigned char) part[part_byte_pos + 1];
             concrete_chars++;
-            bm = biscuit_get_col_pos_bitmap(col, lb, char_pos);
+            bm = biscuit_get_col_pos_bitmap(index, col, col_idx, lb, char_pos);
             if (!bm) { if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
             if (first_char) { result = biscuit_roaring_copy(bm); first_char = false; }
             else { biscuit_roaring_and_inplace(result, bm); if (biscuit_roaring_is_empty(result)) return result; }
@@ -1374,13 +1513,13 @@ biscuit_match_col_part_at_pos(ColumnIndex *col, const char *part,
         if (part_byte_pos + cl > part_byte_len) cl = part_byte_len - part_byte_pos;
         concrete_chars++;
         if (cl == 1) {
-            RoaringBitmap *bm = biscuit_get_col_pos_bitmap(col, fb, char_pos);
+            RoaringBitmap *bm = biscuit_get_col_pos_bitmap(index, col, col_idx, fb, char_pos);
             if (!bm) { if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
             if (first_char) { result = biscuit_roaring_copy(bm); first_char = false; }
             else { biscuit_roaring_and_inplace(result, bm); if (biscuit_roaring_is_empty(result)) return result; }
         } else {
             RoaringBitmap *mb = NULL; int b;
-            for (b = 0; b < cl; b++) { unsigned char bv = (unsigned char) part[part_byte_pos + b]; RoaringBitmap *bm = biscuit_get_col_pos_bitmap(col, bv, char_pos); if (!bm) { if (mb) biscuit_roaring_free(mb); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } if (b == 0) mb = biscuit_roaring_copy(bm); else { biscuit_roaring_and_inplace(mb, bm); if (biscuit_roaring_is_empty(mb)) { biscuit_roaring_free(mb); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } } }
+            for (b = 0; b < cl; b++) { unsigned char bv = (unsigned char) part[part_byte_pos + b]; RoaringBitmap *bm = biscuit_get_col_pos_bitmap(index, col, col_idx, bv, char_pos); if (!bm) { if (mb) biscuit_roaring_free(mb); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } if (b == 0) mb = biscuit_roaring_copy(bm); else { biscuit_roaring_and_inplace(mb, bm); if (biscuit_roaring_is_empty(mb)) { biscuit_roaring_free(mb); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } } }
             if (first_char) { result = mb; first_char = false; } else { biscuit_roaring_and_inplace(result, mb); biscuit_roaring_free(mb); if (biscuit_roaring_is_empty(result)) return result; }
         }
         part_byte_pos += cl; char_pos++;
@@ -1388,13 +1527,14 @@ biscuit_match_col_part_at_pos(ColumnIndex *col, const char *part,
     }
 
     { int pcc = biscuit_part_char_count(part, part_byte_len);
-      if (concrete_chars == 0) { if (result) biscuit_roaring_free(result); result = biscuit_get_col_length_ge(col, start_pos + pcc); }
-      else { len_filter = biscuit_get_col_length_ge(col, start_pos + pcc); if (len_filter) { if (result) biscuit_roaring_and_inplace(result, len_filter); else { result = len_filter; len_filter = NULL; } if (len_filter) biscuit_roaring_free(len_filter); } } }
+      if (concrete_chars == 0) { if (result) biscuit_roaring_free(result); result = biscuit_get_col_length_ge(index, col, col_idx, start_pos + pcc); }
+      else { len_filter = biscuit_get_col_length_ge(index, col, col_idx, start_pos + pcc); if (len_filter) { if (result) biscuit_roaring_and_inplace(result, len_filter); else { result = len_filter; len_filter = NULL; } if (len_filter) biscuit_roaring_free(len_filter); } } }
     return result ? result : biscuit_roaring_create();
 }
 
 static RoaringBitmap *
-biscuit_match_col_part_at_end(ColumnIndex *col, const char *part, int part_byte_len)
+biscuit_match_col_part_at_end(Relation index, ColumnIndex *col, int col_idx,
+                              const char *part, int part_byte_len)
 {
     RoaringBitmap *result = NULL;
     RoaringBitmap *len_filter;
@@ -1410,7 +1550,7 @@ biscuit_match_col_part_at_end(ColumnIndex *col, const char *part, int part_byte_
             lb = (unsigned char) part[part_byte_pos + 1];
             concrete_chars++;
             neg = -(pcc - cfe);
-            bm = biscuit_get_col_neg_bitmap(col, lb, neg);
+            bm = biscuit_get_col_neg_bitmap(index, col, col_idx, lb, neg);
             if (!bm) { if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
             if (first_char) { result = biscuit_roaring_copy(bm); first_char = false; }
             else { biscuit_roaring_and_inplace(result, bm); if (biscuit_roaring_is_empty(result)) return result; }
@@ -1424,27 +1564,28 @@ biscuit_match_col_part_at_end(ColumnIndex *col, const char *part, int part_byte_
         concrete_chars++;
         neg = -(pcc - cfe);
         if (cl == 1) {
-            RoaringBitmap *bm = biscuit_get_col_neg_bitmap(col, fb, neg);
+            RoaringBitmap *bm = biscuit_get_col_neg_bitmap(index, col, col_idx, fb, neg);
             if (!bm) { if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
             if (first_char) { result = biscuit_roaring_copy(bm); first_char = false; }
             else { biscuit_roaring_and_inplace(result, bm); if (biscuit_roaring_is_empty(result)) return result; }
         } else {
             RoaringBitmap *mb = NULL; int b;
-            for (b = 0; b < cl; b++) { unsigned char bv = (unsigned char) part[part_byte_pos + b]; RoaringBitmap *bm = biscuit_get_col_neg_bitmap(col, bv, neg); if (!bm) { if (mb) biscuit_roaring_free(mb); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } if (b == 0) mb = biscuit_roaring_copy(bm); else { biscuit_roaring_and_inplace(mb, bm); if (biscuit_roaring_is_empty(mb)) { biscuit_roaring_free(mb); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } } }
+            for (b = 0; b < cl; b++) { unsigned char bv = (unsigned char) part[part_byte_pos + b]; RoaringBitmap *bm = biscuit_get_col_neg_bitmap(index, col, col_idx, bv, neg); if (!bm) { if (mb) biscuit_roaring_free(mb); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } if (b == 0) mb = biscuit_roaring_copy(bm); else { biscuit_roaring_and_inplace(mb, bm); if (biscuit_roaring_is_empty(mb)) { biscuit_roaring_free(mb); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } } }
             if (first_char) { result = mb; first_char = false; } else { biscuit_roaring_and_inplace(result, mb); biscuit_roaring_free(mb); if (biscuit_roaring_is_empty(result)) return result; }
         }
         part_byte_pos += cl; cfe++;
         } /* end cl block */
     }
 
-    if (concrete_chars == 0) { if (result) biscuit_roaring_free(result); result = biscuit_get_col_length_ge(col, pcc); }
-    else { len_filter = biscuit_get_col_length_ge(col, pcc); if (len_filter) { if (result) biscuit_roaring_and_inplace(result, len_filter); else { result = len_filter; len_filter = NULL; } if (len_filter) biscuit_roaring_free(len_filter); } }
+    if (concrete_chars == 0) { if (result) biscuit_roaring_free(result); result = biscuit_get_col_length_ge(index, col, col_idx, pcc); }
+    else { len_filter = biscuit_get_col_length_ge(index, col, col_idx, pcc); if (len_filter) { if (result) biscuit_roaring_and_inplace(result, len_filter); else { result = len_filter; len_filter = NULL; } if (len_filter) biscuit_roaring_free(len_filter); } }
     return result ? result : biscuit_roaring_create();
 }
 
 /* Case-insensitive multi-column variants */
 static RoaringBitmap *
-biscuit_match_col_part_at_pos_ilike(ColumnIndex *col, const char *part,
+biscuit_match_col_part_at_pos_ilike(Relation index, ColumnIndex *col, int col_idx,
+                                    const char *part,
                                     int part_byte_len, int start_pos)
 {
     /* Identical to biscuit_match_col_part_at_pos but uses _lower accessors */
@@ -1460,7 +1601,7 @@ biscuit_match_col_part_at_pos_ilike(ColumnIndex *col, const char *part,
             if (part_byte_pos + 1 >= part_byte_len) { part_byte_pos++; continue; }
             lb = (unsigned char) part[part_byte_pos + 1];
             concrete_chars++;
-            bm = biscuit_get_col_pos_bitmap_lower(col, lb, char_pos);
+            bm = biscuit_get_col_pos_bitmap_lower(index, col, col_idx, lb, char_pos);
             if (!bm) { if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
             if (first_char) { result = biscuit_roaring_copy(bm); first_char = false; }
             else { biscuit_roaring_and_inplace(result, bm); if (biscuit_roaring_is_empty(result)) return result; }
@@ -1472,13 +1613,13 @@ biscuit_match_col_part_at_pos_ilike(ColumnIndex *col, const char *part,
         if (part_byte_pos + cl > part_byte_len) cl = part_byte_len - part_byte_pos;
         concrete_chars++;
         if (cl == 1) {
-            RoaringBitmap *bm = biscuit_get_col_pos_bitmap_lower(col, fb, char_pos);
+            RoaringBitmap *bm = biscuit_get_col_pos_bitmap_lower(index, col, col_idx, fb, char_pos);
             if (!bm) { if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
             if (first_char) { result = biscuit_roaring_copy(bm); first_char = false; }
             else { biscuit_roaring_and_inplace(result, bm); if (biscuit_roaring_is_empty(result)) return result; }
         } else {
             RoaringBitmap *mb = NULL; int b;
-            for (b = 0; b < cl; b++) { unsigned char bv = (unsigned char) part[part_byte_pos + b]; RoaringBitmap *bm = biscuit_get_col_pos_bitmap_lower(col, bv, char_pos); if (!bm) { if (mb) biscuit_roaring_free(mb); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } if (b == 0) mb = biscuit_roaring_copy(bm); else { biscuit_roaring_and_inplace(mb, bm); if (biscuit_roaring_is_empty(mb)) { biscuit_roaring_free(mb); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } } }
+            for (b = 0; b < cl; b++) { unsigned char bv = (unsigned char) part[part_byte_pos + b]; RoaringBitmap *bm = biscuit_get_col_pos_bitmap_lower(index, col, col_idx, bv, char_pos); if (!bm) { if (mb) biscuit_roaring_free(mb); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } if (b == 0) mb = biscuit_roaring_copy(bm); else { biscuit_roaring_and_inplace(mb, bm); if (biscuit_roaring_is_empty(mb)) { biscuit_roaring_free(mb); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } } }
             if (first_char) { result = mb; first_char = false; } else { biscuit_roaring_and_inplace(result, mb); biscuit_roaring_free(mb); if (biscuit_roaring_is_empty(result)) return result; }
         }
         part_byte_pos += cl; char_pos++;
@@ -1486,13 +1627,14 @@ biscuit_match_col_part_at_pos_ilike(ColumnIndex *col, const char *part,
     }
 
     { int pcc = biscuit_part_char_count(part, part_byte_len);
-      if (concrete_chars == 0) { if (result) biscuit_roaring_free(result); result = biscuit_get_col_length_ge_lower(col, start_pos + pcc); }
-      else { len_filter = biscuit_get_col_length_ge_lower(col, start_pos + pcc); if (len_filter) { if (result) biscuit_roaring_and_inplace(result, len_filter); else { result = len_filter; len_filter = NULL; } if (len_filter) biscuit_roaring_free(len_filter); } } }
+      if (concrete_chars == 0) { if (result) biscuit_roaring_free(result); result = biscuit_get_col_length_ge_lower(index, col, col_idx, start_pos + pcc); }
+      else { len_filter = biscuit_get_col_length_ge_lower(index, col, col_idx, start_pos + pcc); if (len_filter) { if (result) biscuit_roaring_and_inplace(result, len_filter); else { result = len_filter; len_filter = NULL; } if (len_filter) biscuit_roaring_free(len_filter); } } }
     return result ? result : biscuit_roaring_create();
 }
 
 static RoaringBitmap *
-biscuit_match_col_part_at_end_ilike(ColumnIndex *col, const char *part, int part_byte_len)
+biscuit_match_col_part_at_end_ilike(Relation index, ColumnIndex *col, int col_idx,
+                                    const char *part, int part_byte_len)
 {
     RoaringBitmap *result = NULL;
     RoaringBitmap *len_filter;
@@ -1508,7 +1650,7 @@ biscuit_match_col_part_at_end_ilike(ColumnIndex *col, const char *part, int part
             lb = (unsigned char) part[part_byte_pos + 1];
             concrete_chars++;
             neg = -(pcc - cfe);
-            bm = biscuit_get_col_neg_bitmap_lower(col, lb, neg);
+            bm = biscuit_get_col_neg_bitmap_lower(index, col, col_idx, lb, neg);
             if (!bm) { if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
             if (first_char) { result = biscuit_roaring_copy(bm); first_char = false; }
             else { biscuit_roaring_and_inplace(result, bm); if (biscuit_roaring_is_empty(result)) return result; }
@@ -1522,21 +1664,21 @@ biscuit_match_col_part_at_end_ilike(ColumnIndex *col, const char *part, int part
         concrete_chars++;
         neg = -(pcc - cfe);
         if (cl == 1) {
-            RoaringBitmap *bm = biscuit_get_col_neg_bitmap_lower(col, fb, neg);
+            RoaringBitmap *bm = biscuit_get_col_neg_bitmap_lower(index, col, col_idx, fb, neg);
             if (!bm) { if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); }
             if (first_char) { result = biscuit_roaring_copy(bm); first_char = false; }
             else { biscuit_roaring_and_inplace(result, bm); if (biscuit_roaring_is_empty(result)) return result; }
         } else {
             RoaringBitmap *mb = NULL; int b;
-            for (b = 0; b < cl; b++) { unsigned char bv = (unsigned char) part[part_byte_pos + b]; RoaringBitmap *bm = biscuit_get_col_neg_bitmap_lower(col, bv, neg); if (!bm) { if (mb) biscuit_roaring_free(mb); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } if (b == 0) mb = biscuit_roaring_copy(bm); else { biscuit_roaring_and_inplace(mb, bm); if (biscuit_roaring_is_empty(mb)) { biscuit_roaring_free(mb); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } } }
+            for (b = 0; b < cl; b++) { unsigned char bv = (unsigned char) part[part_byte_pos + b]; RoaringBitmap *bm = biscuit_get_col_neg_bitmap_lower(index, col, col_idx, bv, neg); if (!bm) { if (mb) biscuit_roaring_free(mb); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } if (b == 0) mb = biscuit_roaring_copy(bm); else { biscuit_roaring_and_inplace(mb, bm); if (biscuit_roaring_is_empty(mb)) { biscuit_roaring_free(mb); if (result) biscuit_roaring_free(result); return biscuit_roaring_create(); } } }
             if (first_char) { result = mb; first_char = false; } else { biscuit_roaring_and_inplace(result, mb); biscuit_roaring_free(mb); if (biscuit_roaring_is_empty(result)) return result; }
         }
         part_byte_pos += cl; cfe++;
         } /* end cl block */
     }
 
-    if (concrete_chars == 0) { if (result) biscuit_roaring_free(result); result = biscuit_get_col_length_ge_lower(col, pcc); }
-    else { len_filter = biscuit_get_col_length_ge_lower(col, pcc); if (len_filter) { if (result) biscuit_roaring_and_inplace(result, len_filter); else { result = len_filter; len_filter = NULL; } if (len_filter) biscuit_roaring_free(len_filter); } }
+    if (concrete_chars == 0) { if (result) biscuit_roaring_free(result); result = biscuit_get_col_length_ge_lower(index, col, col_idx, pcc); }
+    else { len_filter = biscuit_get_col_length_ge_lower(index, col, col_idx, pcc); if (len_filter) { if (result) biscuit_roaring_and_inplace(result, len_filter); else { result = len_filter; len_filter = NULL; } if (len_filter) biscuit_roaring_free(len_filter); } }
     return result ? result : biscuit_roaring_create();
 }
 
@@ -1550,7 +1692,7 @@ biscuit_match_col_part_at_end_ilike(ColumnIndex *col, const char *part, int part
 
 static void
 biscuit_recursive_windowed_match_col(
-    RoaringBitmap *result, ColumnIndex *col,
+    Relation index, RoaringBitmap *result, ColumnIndex *col, int col_idx,
     const char **parts, int *part_byte_lens, int part_count,
     bool ends_percent, int part_idx, int min_char_pos,
     RoaringBitmap *current_candidates, int max_char_len)
@@ -1597,14 +1739,14 @@ biscuit_recursive_windowed_match_col(
 
         if (pidx == part_count - 1 && !ends_percent)
         {
-            RoaringBitmap *em = biscuit_match_col_part_at_end(col, parts[pidx], part_byte_lens[pidx]);
+            RoaringBitmap *em = biscuit_match_col_part_at_end(index, col, col_idx, parts[pidx], part_byte_lens[pidx]);
             if (em)
             {
                 int mrl;
                 RoaringBitmap *lc;
                 biscuit_roaring_and_inplace(em, cands);
                 mrl = mpos + part_cl;
-                lc = biscuit_get_col_length_ge(col, mrl);
+                lc = biscuit_get_col_length_ge(index, col, col_idx, mrl);
                 if (lc) { biscuit_roaring_and_inplace(em, lc); biscuit_roaring_free(lc); }
                 if (!biscuit_roaring_is_empty(em))
                     biscuit_roaring_or_inplace(result, em);
@@ -1622,7 +1764,7 @@ biscuit_recursive_windowed_match_col(
             RoaringBitmap *pm;
             RoaringBitmap *nc;
             pos = i;
-            pm = biscuit_match_col_part_at_pos(col, parts[pidx], part_byte_lens[pidx], pos);
+            pm = biscuit_match_col_part_at_pos(index, col, col_idx, parts[pidx], part_byte_lens[pidx], pos);
             if (!pm) continue;
             nc = biscuit_roaring_copy(cands);
             biscuit_roaring_and_inplace(nc, pm);
@@ -1649,7 +1791,7 @@ biscuit_recursive_windowed_match_col(
 
 static void
 biscuit_recursive_windowed_match_col_ilike(
-    RoaringBitmap *result, ColumnIndex *col,
+    Relation index, RoaringBitmap *result, ColumnIndex *col, int col_idx,
     const char **parts, int *part_byte_lens, int part_count,
     bool ends_percent, int part_idx, int min_char_pos,
     RoaringBitmap *current_candidates, int max_char_len)
@@ -1696,14 +1838,14 @@ biscuit_recursive_windowed_match_col_ilike(
 
         if (pidx == part_count - 1 && !ends_percent)
         {
-            RoaringBitmap *em = biscuit_match_col_part_at_end_ilike(col, parts[pidx], part_byte_lens[pidx]);
+            RoaringBitmap *em = biscuit_match_col_part_at_end_ilike(index, col, col_idx, parts[pidx], part_byte_lens[pidx]);
             if (em)
             {
                 int mrl;
                 RoaringBitmap *lc;
                 biscuit_roaring_and_inplace(em, cands);
                 mrl = mpos + part_cl;
-                lc = biscuit_get_col_length_ge_lower(col, mrl);
+                lc = biscuit_get_col_length_ge_lower(index, col, col_idx, mrl);
                 if (lc) { biscuit_roaring_and_inplace(em, lc); biscuit_roaring_free(lc); }
                 if (!biscuit_roaring_is_empty(em))
                     biscuit_roaring_or_inplace(result, em);
@@ -1721,7 +1863,7 @@ biscuit_recursive_windowed_match_col_ilike(
             RoaringBitmap *pm;
             RoaringBitmap *nc;
             pos = i;
-            pm = biscuit_match_col_part_at_pos_ilike(col, parts[pidx], part_byte_lens[pidx], pos);
+            pm = biscuit_match_col_part_at_pos_ilike(index, col, col_idx, parts[pidx], part_byte_lens[pidx], pos);
             if (!pm) continue;
             nc = biscuit_roaring_copy(cands);
             biscuit_roaring_and_inplace(nc, pm);
@@ -1751,7 +1893,7 @@ biscuit_recursive_windowed_match_col_ilike(
  * ================================================================ */
 
 RoaringBitmap *
-biscuit_query_pattern(BiscuitIndex *idx, const char *pattern)
+biscuit_query_pattern(Relation index, BiscuitIndex *idx, const char *pattern)
 {
     int            plen = strlen(pattern);
     ParsedPattern *parsed = NULL;
@@ -1776,15 +1918,21 @@ biscuit_query_pattern(BiscuitIndex *idx, const char *pattern)
 
     if (plen == 0) {
         /* Empty pattern '' matches only records with an empty string value */
-        if (idx->length_bitmaps_legacy && idx->length_bitmaps_legacy[0])
-            return biscuit_roaring_copy(idx->length_bitmaps_legacy[0]);
-        return biscuit_roaring_create();
+        RoaringBitmap *lb = (idx->length_bitmaps_legacy)
+            ? biscuit_reconcile_pending(index, idx->length_bitmaps_legacy[0], -1, false,
+                                          BISCUIT_DIR_KIND_LEN, -1, 0)
+            : NULL;
+        return lb ? biscuit_roaring_copy(lb) : biscuit_roaring_create();
     }
 
     if (plen == 1 && pattern[0] == '%') {
         /* '%' matches every non-tombstoned, non-NULL record */
-        if (idx->length_ge_bitmaps_legacy && idx->length_ge_bitmaps_legacy[0])
-            result = biscuit_roaring_copy(idx->length_ge_bitmaps_legacy[0]);
+        RoaringBitmap *lgb = (idx->length_ge_bitmaps_legacy)
+            ? biscuit_reconcile_pending(index, idx->length_ge_bitmaps_legacy[0], -1, false,
+                                          BISCUIT_DIR_KIND_LEN_GE, -1, 0)
+            : NULL;
+        if (lgb)
+            result = biscuit_roaring_copy(lgb);
         else {
             result = biscuit_roaring_create();
             for (i = 0; i < idx->num_records; i++) {
@@ -1807,9 +1955,13 @@ biscuit_query_pattern(BiscuitIndex *idx, const char *pattern)
     }
 
     if (only_wildcards) {
-        if (percent_count > 0) return biscuit_get_length_ge(idx, wildcard_count);
+        if (percent_count > 0) return biscuit_get_length_ge(index, idx, wildcard_count);
         if (wildcard_count < idx->max_length_legacy && idx->length_bitmaps_legacy[wildcard_count])
-            return biscuit_roaring_copy(idx->length_bitmaps_legacy[wildcard_count]);
+        {
+            RoaringBitmap *lb = biscuit_reconcile_pending(index, idx->length_bitmaps_legacy[wildcard_count],
+                                                            -1, false, BISCUIT_DIR_KIND_LEN, -1, wildcard_count);
+            return lb ? biscuit_roaring_copy(lb) : biscuit_roaring_create();
+        }
         return biscuit_roaring_create();
     }
 
@@ -1839,15 +1991,19 @@ biscuit_query_pattern(BiscuitIndex *idx, const char *pattern)
 
         if (parsed->part_count == 1) {
             if (!parsed->starts_percent && !parsed->ends_percent) {
-                result = biscuit_match_part_at_pos(idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
+                result = biscuit_match_part_at_pos(index, idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
                 if (result && min_len < idx->max_length_legacy && idx->length_bitmaps_legacy[min_len])
-                    biscuit_roaring_and_inplace(result, idx->length_bitmaps_legacy[min_len]);
+                {
+                    RoaringBitmap *lb = biscuit_reconcile_pending(index, idx->length_bitmaps_legacy[min_len],
+                                                                    -1, false, BISCUIT_DIR_KIND_LEN, -1, min_len);
+                    biscuit_roaring_and_inplace(result, lb);
+                }
                 else if (!result || min_len >= idx->max_length_legacy) { if (result) biscuit_roaring_free(result); result = biscuit_roaring_create(); }
             } else if (!parsed->starts_percent) {
-                result = biscuit_match_part_at_pos(idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
+                result = biscuit_match_part_at_pos(index, idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
                 if (!result) result = biscuit_roaring_create();
             } else if (!parsed->ends_percent) {
-                result = biscuit_match_part_at_end(idx, parsed->parts[0], parsed->part_byte_lens[0]);
+                result = biscuit_match_part_at_end(index, idx, parsed->parts[0], parsed->part_byte_lens[0]);
                 if (!result) result = biscuit_roaring_create();
             } else {
                 /* '%abc%' – substring via char-cache and brute verification */
@@ -1856,11 +2012,14 @@ biscuit_query_pattern(BiscuitIndex *idx, const char *pattern)
                     unsigned char first_byte = biscuit_part_seed_byte(
                         parsed->parts[0], parsed->part_byte_lens[0]);
                     if (first_byte != 0) {
-                        RoaringBitmap *candidates = idx->char_cache_legacy[first_byte]
-                            ? biscuit_roaring_copy(idx->char_cache_legacy[first_byte])
+                        RoaringBitmap *cc = biscuit_reconcile_pending(index, idx->char_cache_legacy[first_byte],
+                                                                        -1, false, BISCUIT_DIR_KIND_CACHE,
+                                                                        first_byte, -1);
+                        RoaringBitmap *candidates = cc
+                            ? biscuit_roaring_copy(cc)
                             : biscuit_roaring_create();
                         int part_char_len = parsed->part_lens[0];
-                        RoaringBitmap *lf = biscuit_get_length_ge(idx, part_char_len);
+                        RoaringBitmap *lf = biscuit_get_length_ge(index, idx, part_char_len);
                         if (lf) { biscuit_roaring_and_inplace(candidates, lf); biscuit_roaring_free(lf); }
 
                         #ifdef HAVE_ROARING
@@ -1915,27 +2074,27 @@ biscuit_query_pattern(BiscuitIndex *idx, const char *pattern)
                 }
             }
         } else if (parsed->part_count == 2 && !parsed->starts_percent && !parsed->ends_percent) {
-            RoaringBitmap *prefix = biscuit_match_part_at_pos(idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
-            RoaringBitmap *suffix = biscuit_match_part_at_end(idx, parsed->parts[1], parsed->part_byte_lens[1]);
+            RoaringBitmap *prefix = biscuit_match_part_at_pos(index, idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
+            RoaringBitmap *suffix = biscuit_match_part_at_end(index, idx, parsed->parts[1], parsed->part_byte_lens[1]);
             if (!prefix || !suffix) { if (prefix) biscuit_roaring_free(prefix); if (suffix) biscuit_roaring_free(suffix); result = biscuit_roaring_create(); }
             else {
                 RoaringBitmap *lf;
                 biscuit_roaring_and_inplace(prefix, suffix); biscuit_roaring_free(suffix);
-                lf = biscuit_get_length_ge(idx, min_len);
+                lf = biscuit_get_length_ge(index, idx, min_len);
                 if (lf) { biscuit_roaring_and_inplace(prefix, lf); biscuit_roaring_free(lf); }
                 result = prefix;
             }
         } else {
             RoaringBitmap *candidates;
             result = biscuit_roaring_create();
-            candidates = biscuit_get_length_ge(idx, min_len);
+            candidates = biscuit_get_length_ge(index, idx, min_len);
             if (candidates && !biscuit_roaring_is_empty(candidates)) {
                 if (!parsed->starts_percent) {
-                    RoaringBitmap *first = biscuit_match_part_at_pos(idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
+                    RoaringBitmap *first = biscuit_match_part_at_pos(index, idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
                     if (first) { biscuit_roaring_and_inplace(first, candidates); biscuit_roaring_free(candidates); candidates = first; }
                 }
                 if (!biscuit_roaring_is_empty(candidates)) {
-                    biscuit_recursive_windowed_match(result, idx,
+                    biscuit_recursive_windowed_match(index, result, idx,
                         (const char **) parsed->parts, parsed->part_byte_lens, parsed->part_count,
                         parsed->ends_percent, 0, 0, candidates, idx->max_len);
                 }
@@ -1958,8 +2117,9 @@ biscuit_query_pattern(BiscuitIndex *idx, const char *pattern)
 }
 
 /* ILIKE single-column: lower-case the pattern first, then reuse logic */
+
 RoaringBitmap *
-biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern)
+biscuit_query_pattern_ilike(Relation index, BiscuitIndex *idx, const char *pattern)
 {
     int            plen = strlen(pattern);
     char          *pl;
@@ -2002,16 +2162,22 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern)
          * through the _lower structures is the correct, mode-consistent
          * choice for an ILIKE entry point.
          */
-        if (idx->length_bitmaps_lower && idx->length_bitmaps_lower[0])
-            result = biscuit_roaring_copy(idx->length_bitmaps_lower[0]);
-        else result = biscuit_roaring_create();
+        RoaringBitmap *lb = (idx->length_bitmaps_lower)
+            ? biscuit_reconcile_pending(index, idx->length_bitmaps_lower[0], -1, true,
+                                          BISCUIT_DIR_KIND_LEN, -1, 0)
+            : NULL;
+        result = lb ? biscuit_roaring_copy(lb) : biscuit_roaring_create();
         pfree(pl); return result;
     }
 
     if (plen == 1 && pl[0] == '%') {
         /* '%' matches every non-tombstoned, non-NULL record */
-        if (idx->length_ge_bitmaps_lower && idx->length_ge_bitmaps_lower[0])
-            result = biscuit_roaring_copy(idx->length_ge_bitmaps_lower[0]);
+        RoaringBitmap *lgb = (idx->length_ge_bitmaps_lower)
+            ? biscuit_reconcile_pending(index, idx->length_ge_bitmaps_lower[0], -1, true,
+                                          BISCUIT_DIR_KIND_LEN_GE, -1, 0)
+            : NULL;
+        if (lgb)
+            result = biscuit_roaring_copy(lgb);
         else {
             result = biscuit_roaring_create();
             for (i = 0; i < idx->num_records; i++) {
@@ -2034,9 +2200,13 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern)
     }
 
     if (only_wildcards) {
-        if (percent_count > 0) result = biscuit_get_length_ge_lower(idx, wildcard_count);
+        if (percent_count > 0) result = biscuit_get_length_ge_lower(index, idx, wildcard_count);
         else if (wildcard_count < idx->max_length_lower && idx->length_bitmaps_lower && idx->length_bitmaps_lower[wildcard_count])
-            result = biscuit_roaring_copy(idx->length_bitmaps_lower[wildcard_count]);
+        {
+            RoaringBitmap *lb = biscuit_reconcile_pending(index, idx->length_bitmaps_lower[wildcard_count],
+                                                            -1, true, BISCUIT_DIR_KIND_LEN, -1, wildcard_count);
+            result = lb ? biscuit_roaring_copy(lb) : biscuit_roaring_create();
+        }
         else result = biscuit_roaring_create();
         pfree(pl); return result;
     }
@@ -2062,15 +2232,19 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern)
 
         if (parsed->part_count == 1) {
             if (!parsed->starts_percent && !parsed->ends_percent) {
-                result = biscuit_match_part_at_pos_ilike(idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
+                result = biscuit_match_part_at_pos_ilike(index, idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
                 if (result && min_len < idx->max_length_lower && idx->length_bitmaps_lower && idx->length_bitmaps_lower[min_len])
-                    biscuit_roaring_and_inplace(result, idx->length_bitmaps_lower[min_len]);
+                {
+                    RoaringBitmap *lb = biscuit_reconcile_pending(index, idx->length_bitmaps_lower[min_len],
+                                                                    -1, true, BISCUIT_DIR_KIND_LEN, -1, min_len);
+                    biscuit_roaring_and_inplace(result, lb);
+                }
                 else if (!result || min_len >= idx->max_length_lower) { if (result) biscuit_roaring_free(result); result = biscuit_roaring_create(); }
             } else if (!parsed->starts_percent) {
-                result = biscuit_match_part_at_pos_ilike(idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
+                result = biscuit_match_part_at_pos_ilike(index, idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
                 if (!result) result = biscuit_roaring_create();
             } else if (!parsed->ends_percent) {
-                result = biscuit_match_part_at_end_ilike(idx, parsed->parts[0], parsed->part_byte_lens[0]);
+                result = biscuit_match_part_at_end_ilike(index, idx, parsed->parts[0], parsed->part_byte_lens[0]);
                 if (!result) result = biscuit_roaring_create();
             } else {
                 result = biscuit_roaring_create();
@@ -2078,11 +2252,15 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern)
                 if (parsed->part_byte_lens[0] > 0) {
                     unsigned char first_byte = biscuit_part_seed_byte(
                         parsed->parts[0], parsed->part_byte_lens[0]);
-                    RoaringBitmap *candidates = (first_byte != 0 && idx->char_cache_lower[first_byte])
-                        ? biscuit_roaring_copy(idx->char_cache_lower[first_byte])
+                    RoaringBitmap *cc = (first_byte != 0)
+                        ? biscuit_reconcile_pending(index, idx->char_cache_lower[first_byte], -1, true,
+                                                      BISCUIT_DIR_KIND_CACHE, first_byte, -1)
+                        : NULL;
+                    RoaringBitmap *candidates = cc
+                        ? biscuit_roaring_copy(cc)
                         : biscuit_roaring_create();
                     int pcl = parsed->part_lens[0];
-                    RoaringBitmap *lf = biscuit_get_length_ge_lower(idx, pcl);
+                    RoaringBitmap *lf = biscuit_get_length_ge_lower(index, idx, pcl);
                     if (lf) { biscuit_roaring_and_inplace(candidates, lf); biscuit_roaring_free(lf); }
                     #ifdef HAVE_ROARING
                     { roaring_uint32_iterator_t *iter = roaring_iterator_create(candidates);
@@ -2121,22 +2299,22 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern)
                 }
             }
         } else if (parsed->part_count == 2 && !parsed->starts_percent && !parsed->ends_percent) {
-            RoaringBitmap *prefix = biscuit_match_part_at_pos_ilike(idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
-            RoaringBitmap *suffix = biscuit_match_part_at_end_ilike(idx, parsed->parts[1], parsed->part_byte_lens[1]);
+            RoaringBitmap *prefix = biscuit_match_part_at_pos_ilike(index, idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
+            RoaringBitmap *suffix = biscuit_match_part_at_end_ilike(index, idx, parsed->parts[1], parsed->part_byte_lens[1]);
             if (!prefix || !suffix) { if (prefix) biscuit_roaring_free(prefix); if (suffix) biscuit_roaring_free(suffix); result = biscuit_roaring_create(); }
             else { RoaringBitmap *lf;
                    biscuit_roaring_and_inplace(prefix, suffix); biscuit_roaring_free(suffix);
-                   lf = biscuit_get_length_ge_lower(idx, min_len);
+                   lf = biscuit_get_length_ge_lower(index, idx, min_len);
                    if (lf) { biscuit_roaring_and_inplace(prefix, lf); biscuit_roaring_free(lf); }
                    result = prefix; }
         } else {
             RoaringBitmap *candidates;
             result = biscuit_roaring_create();
-            candidates = biscuit_get_length_ge_lower(idx, min_len);
+            candidates = biscuit_get_length_ge_lower(index, idx, min_len);
             if (candidates && !biscuit_roaring_is_empty(candidates)) {
-                if (!parsed->starts_percent) { RoaringBitmap *first = biscuit_match_part_at_pos_ilike(idx, parsed->parts[0], parsed->part_byte_lens[0], 0); if (first) { biscuit_roaring_and_inplace(first, candidates); biscuit_roaring_free(candidates); candidates = first; } }
+                if (!parsed->starts_percent) { RoaringBitmap *first = biscuit_match_part_at_pos_ilike(index, idx, parsed->parts[0], parsed->part_byte_lens[0], 0); if (first) { biscuit_roaring_and_inplace(first, candidates); biscuit_roaring_free(candidates); candidates = first; } }
                 if (!biscuit_roaring_is_empty(candidates))
-                    biscuit_recursive_windowed_match_ilike(result, idx, (const char **) parsed->parts, parsed->part_byte_lens, parsed->part_count, parsed->ends_percent, 0, 0, candidates, idx->max_length_lower);
+                    biscuit_recursive_windowed_match_ilike(index, result, idx, (const char **) parsed->parts, parsed->part_byte_lens, parsed->part_count, parsed->ends_percent, 0, 0, candidates, idx->max_length_lower);
                 biscuit_roaring_free(candidates);
             } else if (candidates) biscuit_roaring_free(candidates);
         }
@@ -2162,7 +2340,7 @@ biscuit_query_pattern_ilike(BiscuitIndex *idx, const char *pattern)
  * ================================================================ */
 
 RoaringBitmap *
-biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern)
+biscuit_query_column_pattern(Relation index, BiscuitIndex *idx, int col_idx, const char *pattern)
 {
     ColumnIndex   *col;
     int            plen = strlen(pattern);
@@ -2195,12 +2373,14 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
         return biscuit_roaring_create();
 
     if (plen == 0) {
-        if (col->length_bitmaps[0]) return biscuit_roaring_copy(col->length_bitmaps[0]);
-        return biscuit_roaring_create();
+        RoaringBitmap *lb = biscuit_reconcile_pending(index, col->length_bitmaps[0],
+                                                        col_idx, false, BISCUIT_DIR_KIND_LEN, -1, 0);
+        return lb ? biscuit_roaring_copy(lb) : biscuit_roaring_create();
     }
     if (plen == 1 && pattern[0] == '%') {
-        if (col->length_ge_bitmaps[0]) return biscuit_roaring_copy(col->length_ge_bitmaps[0]);
-        return biscuit_roaring_create();
+        RoaringBitmap *lgb = biscuit_reconcile_pending(index, col->length_ge_bitmaps[0],
+                                                         col_idx, false, BISCUIT_DIR_KIND_LEN_GE, -1, 0);
+        return lgb ? biscuit_roaring_copy(lgb) : biscuit_roaring_create();
     }
 
     for (i = 0; i < plen; i++) {
@@ -2219,9 +2399,19 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
          * pattern length equals the column's max indexed length.
          */
         if (percent_count > 0 && wildcard_count < col->max_length && col->length_ge_bitmaps[wildcard_count])
-            return biscuit_roaring_copy(col->length_ge_bitmaps[wildcard_count]);
+        {
+            RoaringBitmap *lgb = biscuit_reconcile_pending(index, col->length_ge_bitmaps[wildcard_count],
+                                                             col_idx, false, BISCUIT_DIR_KIND_LEN_GE,
+                                                             -1, wildcard_count);
+            return lgb ? biscuit_roaring_copy(lgb) : biscuit_roaring_create();
+        }
         if (!percent_count && wildcard_count < col->max_length && col->length_bitmaps[wildcard_count])
-            return biscuit_roaring_copy(col->length_bitmaps[wildcard_count]);
+        {
+            RoaringBitmap *lb = biscuit_reconcile_pending(index, col->length_bitmaps[wildcard_count],
+                                                            col_idx, false, BISCUIT_DIR_KIND_LEN,
+                                                            -1, wildcard_count);
+            return lb ? biscuit_roaring_copy(lb) : biscuit_roaring_create();
+        }
         return biscuit_roaring_create();
     }
 
@@ -2229,7 +2419,9 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
     {
         parsed = biscuit_parse_pattern(pattern);
         if (parsed->part_count == 0) {
-            result = col->length_ge_bitmaps[0] ? biscuit_roaring_copy(col->length_ge_bitmaps[0]) : biscuit_roaring_create();
+            RoaringBitmap *lgb = biscuit_reconcile_pending(index, col->length_ge_bitmaps[0],
+                                                             col_idx, false, BISCUIT_DIR_KIND_LEN_GE, -1, 0);
+            result = lgb ? biscuit_roaring_copy(lgb) : biscuit_roaring_create();
             biscuit_free_parsed_pattern(parsed); parsed = NULL; /* FIX 5 */ return result;
         }
         min_len = 0;
@@ -2237,16 +2429,22 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
 
         if (parsed->part_count == 1) {
             if (!parsed->starts_percent && !parsed->ends_percent) {
-                result = biscuit_match_col_part_at_pos(col, parsed->parts[0], parsed->part_byte_lens[0], 0);
+                result = biscuit_match_col_part_at_pos(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
                 /* col->max_length is the array size (valid indices 0..max_length-1); "<=" read one past the end */
-                if (result && min_len < col->max_length && col->length_bitmaps[min_len]) biscuit_roaring_and_inplace(result, col->length_bitmaps[min_len]);
+                if (result && min_len < col->max_length && col->length_bitmaps[min_len])
+                {
+                    RoaringBitmap *lb = biscuit_reconcile_pending(index, col->length_bitmaps[min_len],
+                                                                    col_idx, false, BISCUIT_DIR_KIND_LEN,
+                                                                    -1, min_len);
+                    biscuit_roaring_and_inplace(result, lb);
+                }
                 else if (result) { biscuit_roaring_free(result); result = biscuit_roaring_create(); }
                 else result = biscuit_roaring_create();
             } else if (!parsed->starts_percent) {
-                result = biscuit_match_col_part_at_pos(col, parsed->parts[0], parsed->part_byte_lens[0], 0);
+                result = biscuit_match_col_part_at_pos(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
                 if (!result) result = biscuit_roaring_create();
             } else if (!parsed->ends_percent) {
-                result = biscuit_match_col_part_at_end(col, parsed->parts[0], parsed->part_byte_lens[0]);
+                result = biscuit_match_col_part_at_end(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0]);
                 if (!result) result = biscuit_roaring_create();
             } else {
                 /*
@@ -2262,15 +2460,21 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
                 if (parsed->part_byte_lens[0] > 0)
                 {
                     unsigned char  fb    = biscuit_part_seed_byte(parsed->parts[0], parsed->part_byte_lens[0]);
-                    RoaringBitmap *cands = (fb != 0 && col->char_cache[fb])
-                                          ? biscuit_roaring_copy(col->char_cache[fb])
+                    RoaringBitmap *cc    = fb != 0
+                                          ? biscuit_reconcile_pending(index, col->char_cache[fb], col_idx,
+                                                                       false, BISCUIT_DIR_KIND_CACHE, fb, -1)
+                                          : NULL;
+                    RoaringBitmap *lgb0  = biscuit_reconcile_pending(index, col->length_ge_bitmaps[0], col_idx,
+                                                                       false, BISCUIT_DIR_KIND_LEN_GE, -1, 0);
+                    RoaringBitmap *cands = (fb != 0 && cc)
+                                          ? biscuit_roaring_copy(cc)
                                           : (fb != 0
                                              ? biscuit_roaring_create()
-                                             : (col->length_ge_bitmaps[0]
-                                                ? biscuit_roaring_copy(col->length_ge_bitmaps[0])
+                                             : (lgb0
+                                                ? biscuit_roaring_copy(lgb0)
                                                 : biscuit_roaring_create()));
                     int            pcl   = parsed->part_lens[0];
-                    RoaringBitmap *lf    = biscuit_get_col_length_ge(col, pcl);
+                    RoaringBitmap *lf    = biscuit_get_col_length_ge(index, col, col_idx, pcl);
 
                     if (lf) { biscuit_roaring_and_inplace(cands, lf); biscuit_roaring_free(lf); }
 
@@ -2325,22 +2529,22 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
                 }
             }
         } else if (parsed->part_count == 2 && !parsed->starts_percent && !parsed->ends_percent) {
-            RoaringBitmap *prefix = biscuit_match_col_part_at_pos(col, parsed->parts[0], parsed->part_byte_lens[0], 0);
-            RoaringBitmap *suffix = biscuit_match_col_part_at_end(col, parsed->parts[1], parsed->part_byte_lens[1]);
+            RoaringBitmap *prefix = biscuit_match_col_part_at_pos(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
+            RoaringBitmap *suffix = biscuit_match_col_part_at_end(index, col, col_idx, parsed->parts[1], parsed->part_byte_lens[1]);
             if (!prefix || !suffix) { if (prefix) biscuit_roaring_free(prefix); if (suffix) biscuit_roaring_free(suffix); result = biscuit_roaring_create(); }
             else { RoaringBitmap *lf;
                    biscuit_roaring_and_inplace(prefix, suffix); biscuit_roaring_free(suffix);
-                   lf = biscuit_get_col_length_ge(col, min_len);
+                   lf = biscuit_get_col_length_ge(index, col, col_idx, min_len);
                    if (lf) { biscuit_roaring_and_inplace(prefix, lf); biscuit_roaring_free(lf); }
                    result = prefix; }
         } else {
             RoaringBitmap *cands;
             result = biscuit_roaring_create();
-            cands = biscuit_get_col_length_ge(col, min_len);
+            cands = biscuit_get_col_length_ge(index, col, col_idx, min_len);
             if (cands && !biscuit_roaring_is_empty(cands)) {
-                if (!parsed->starts_percent) { RoaringBitmap *first = biscuit_match_col_part_at_pos(col, parsed->parts[0], parsed->part_byte_lens[0], 0); if (first) { biscuit_roaring_and_inplace(first, cands); biscuit_roaring_free(cands); cands = first; } }
+                if (!parsed->starts_percent) { RoaringBitmap *first = biscuit_match_col_part_at_pos(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0); if (first) { biscuit_roaring_and_inplace(first, cands); biscuit_roaring_free(cands); cands = first; } }
                 if (!biscuit_roaring_is_empty(cands))
-                    biscuit_recursive_windowed_match_col(result, col, (const char **) parsed->parts, parsed->part_byte_lens, parsed->part_count, parsed->ends_percent, 0, 0, cands, col->max_length);
+                    biscuit_recursive_windowed_match_col(index, result, col, col_idx, (const char **) parsed->parts, parsed->part_byte_lens, parsed->part_count, parsed->ends_percent, 0, 0, cands, col->max_length);
                 biscuit_roaring_free(cands);
             } else if (cands) biscuit_roaring_free(cands);
         }
@@ -2360,7 +2564,7 @@ biscuit_query_column_pattern(BiscuitIndex *idx, int col_idx, const char *pattern
 
 /* ILIKE variant for multi-column: lowercase pattern first */
 RoaringBitmap *
-biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *pattern)
+biscuit_query_column_pattern_ilike(Relation index, BiscuitIndex *idx, int col_idx, const char *pattern)
 {
     char          *pl;
     RoaringBitmap *result;
@@ -2397,14 +2601,33 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
     plen = strlen(pl);
     result = NULL;
 
-    if (plen == 0) { result = (col->length_bitmaps_lower && col->length_bitmaps_lower[0]) ? biscuit_roaring_copy(col->length_bitmaps_lower[0]) : biscuit_roaring_create(); pfree(pl); return result; }
-    if (plen == 1 && pl[0] == '%') { result = (col->length_ge_bitmaps_lower && col->length_ge_bitmaps_lower[0]) ? biscuit_roaring_copy(col->length_ge_bitmaps_lower[0]) : biscuit_roaring_create(); pfree(pl); return result; }
+    if (plen == 0) {
+        RoaringBitmap *lb = (col->length_bitmaps_lower)
+            ? biscuit_reconcile_pending(index, col->length_bitmaps_lower[0], col_idx, true,
+                                          BISCUIT_DIR_KIND_LEN, -1, 0)
+            : NULL;
+        result = lb ? biscuit_roaring_copy(lb) : biscuit_roaring_create();
+        pfree(pl); return result;
+    }
+    if (plen == 1 && pl[0] == '%') {
+        RoaringBitmap *lgb = (col->length_ge_bitmaps_lower)
+            ? biscuit_reconcile_pending(index, col->length_ge_bitmaps_lower[0], col_idx, true,
+                                          BISCUIT_DIR_KIND_LEN_GE, -1, 0)
+            : NULL;
+        result = lgb ? biscuit_roaring_copy(lgb) : biscuit_roaring_create();
+        pfree(pl); return result;
+    }
 
     for (i = 0; i < plen; i++) { if (pl[i] == '%') pc++; else if (pl[i] == '_') wc++; else { ow = false; break; } }
     if (ow) {
-        if (pc > 0) result = biscuit_get_col_length_ge_lower(col, wc);
+        if (pc > 0) result = biscuit_get_col_length_ge_lower(index, col, col_idx, wc);
         /* col->max_length_lower is the array size (valid indices 0..max_length_lower-1); "<=" read one past the end */
-        else if (wc < col->max_length_lower && col->length_bitmaps_lower && col->length_bitmaps_lower[wc]) result = biscuit_roaring_copy(col->length_bitmaps_lower[wc]);
+        else if (wc < col->max_length_lower && col->length_bitmaps_lower && col->length_bitmaps_lower[wc])
+        {
+            RoaringBitmap *lb = biscuit_reconcile_pending(index, col->length_bitmaps_lower[wc], col_idx, true,
+                                                            BISCUIT_DIR_KIND_LEN, -1, wc);
+            result = lb ? biscuit_roaring_copy(lb) : biscuit_roaring_create();
+        }
         else result = biscuit_roaring_create();
         pfree(pl); return result;
     }
@@ -2412,22 +2635,34 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
     PG_TRY();
     {
         parsed = biscuit_parse_pattern(pl);
-        if (parsed->part_count == 0) { result = (col->length_ge_bitmaps_lower && col->length_ge_bitmaps_lower[0]) ? biscuit_roaring_copy(col->length_ge_bitmaps_lower[0]) : biscuit_roaring_create(); biscuit_free_parsed_pattern(parsed); parsed = NULL; /* FIX 5 */ pfree(pl); return result; }
+        if (parsed->part_count == 0) {
+            RoaringBitmap *lgb = (col->length_ge_bitmaps_lower)
+                ? biscuit_reconcile_pending(index, col->length_ge_bitmaps_lower[0], col_idx, true,
+                                              BISCUIT_DIR_KIND_LEN_GE, -1, 0)
+                : NULL;
+            result = lgb ? biscuit_roaring_copy(lgb) : biscuit_roaring_create();
+            biscuit_free_parsed_pattern(parsed); parsed = NULL; /* FIX 5 */ pfree(pl); return result;
+        }
         min_len = 0;
         for (i = 0; i < parsed->part_count; i++) min_len += parsed->part_lens[i];
 
         if (parsed->part_count == 1) {
             if (!parsed->starts_percent && !parsed->ends_percent) {
-                result = biscuit_match_col_part_at_pos_ilike(col, parsed->parts[0], parsed->part_byte_lens[0], 0);
+                result = biscuit_match_col_part_at_pos_ilike(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
                 /* col->max_length_lower is the array size (valid indices 0..max_length_lower-1); "<=" read one past the end */
-                if (result && min_len < col->max_length_lower && col->length_bitmaps_lower && col->length_bitmaps_lower[min_len]) biscuit_roaring_and_inplace(result, col->length_bitmaps_lower[min_len]);
+                if (result && min_len < col->max_length_lower && col->length_bitmaps_lower && col->length_bitmaps_lower[min_len])
+                {
+                    RoaringBitmap *lb = biscuit_reconcile_pending(index, col->length_bitmaps_lower[min_len], col_idx,
+                                                                    true, BISCUIT_DIR_KIND_LEN, -1, min_len);
+                    biscuit_roaring_and_inplace(result, lb);
+                }
                 else if (result) { biscuit_roaring_free(result); result = biscuit_roaring_create(); }
                 else result = biscuit_roaring_create();
             } else if (!parsed->starts_percent) {
-                result = biscuit_match_col_part_at_pos_ilike(col, parsed->parts[0], parsed->part_byte_lens[0], 0);
+                result = biscuit_match_col_part_at_pos_ilike(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
                 if (!result) result = biscuit_roaring_create();
             } else if (!parsed->ends_percent) {
-                result = biscuit_match_col_part_at_end_ilike(col, parsed->parts[0], parsed->part_byte_lens[0]);
+                result = biscuit_match_col_part_at_end_ilike(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0]);
                 if (!result) result = biscuit_roaring_create();
             } else {
                 /*
@@ -2444,16 +2679,24 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
                 result = biscuit_roaring_create();
                 if (parsed->part_byte_lens[0] > 0)
                 {
-                    unsigned char  fb    = biscuit_part_seed_byte(parsed->parts[0], parsed->part_byte_lens[0]); /* lowercase first concrete byte */
-                    RoaringBitmap *cands = (fb != 0 && col->char_cache_lower[fb])
-                                          ? biscuit_roaring_copy(col->char_cache_lower[fb])
+                    unsigned char  fb   = biscuit_part_seed_byte(parsed->parts[0], parsed->part_byte_lens[0]); /* lowercase first concrete byte */
+                    RoaringBitmap *cc   = fb != 0
+                                        ? biscuit_reconcile_pending(index, col->char_cache_lower[fb], col_idx,
+                                                                     true, BISCUIT_DIR_KIND_CACHE, fb, -1)
+                                        : NULL;
+                    RoaringBitmap *lgb0 = col->length_ge_bitmaps_lower
+                                        ? biscuit_reconcile_pending(index, col->length_ge_bitmaps_lower[0], col_idx,
+                                                                     true, BISCUIT_DIR_KIND_LEN_GE, -1, 0)
+                                        : NULL;
+                    RoaringBitmap *cands = (fb != 0 && cc)
+                                          ? biscuit_roaring_copy(cc)
                                           : (fb != 0
                                              ? biscuit_roaring_create()
-                                             : (col->length_ge_bitmaps_lower && col->length_ge_bitmaps_lower[0]
-                                                ? biscuit_roaring_copy(col->length_ge_bitmaps_lower[0])
+                                             : (lgb0
+                                                ? biscuit_roaring_copy(lgb0)
                                                 : biscuit_roaring_create()));
                     int            pcl   = parsed->part_lens[0];
-                    RoaringBitmap *lf    = biscuit_get_col_length_ge_lower(col, pcl);
+                    RoaringBitmap *lf    = biscuit_get_col_length_ge_lower(index, col, col_idx, pcl);
 
                     if (lf) { biscuit_roaring_and_inplace(cands, lf); biscuit_roaring_free(lf); }
 
@@ -2517,18 +2760,18 @@ biscuit_query_column_pattern_ilike(BiscuitIndex *idx, int col_idx, const char *p
                 }
             }
         } else if (parsed->part_count == 2 && !parsed->starts_percent && !parsed->ends_percent) {
-            RoaringBitmap *prefix = biscuit_match_col_part_at_pos_ilike(col, parsed->parts[0], parsed->part_byte_lens[0], 0);
-            RoaringBitmap *suffix = biscuit_match_col_part_at_end_ilike(col, parsed->parts[1], parsed->part_byte_lens[1]);
+            RoaringBitmap *prefix = biscuit_match_col_part_at_pos_ilike(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
+            RoaringBitmap *suffix = biscuit_match_col_part_at_end_ilike(index, col, col_idx, parsed->parts[1], parsed->part_byte_lens[1]);
             if (!prefix || !suffix) { if (prefix) biscuit_roaring_free(prefix); if (suffix) biscuit_roaring_free(suffix); result = biscuit_roaring_create(); }
-            else { RoaringBitmap *lf; biscuit_roaring_and_inplace(prefix, suffix); biscuit_roaring_free(suffix); lf = biscuit_get_col_length_ge_lower(col, min_len); if (lf) { biscuit_roaring_and_inplace(prefix, lf); biscuit_roaring_free(lf); } result = prefix; }
+            else { RoaringBitmap *lf; biscuit_roaring_and_inplace(prefix, suffix); biscuit_roaring_free(suffix); lf = biscuit_get_col_length_ge_lower(index, col, col_idx, min_len); if (lf) { biscuit_roaring_and_inplace(prefix, lf); biscuit_roaring_free(lf); } result = prefix; }
         } else {
             RoaringBitmap *cands;
             result = biscuit_roaring_create();
-            cands = biscuit_get_col_length_ge_lower(col, min_len);
+            cands = biscuit_get_col_length_ge_lower(index, col, col_idx, min_len);
             if (cands && !biscuit_roaring_is_empty(cands)) {
-                if (!parsed->starts_percent) { RoaringBitmap *first = biscuit_match_col_part_at_pos_ilike(col, parsed->parts[0], parsed->part_byte_lens[0], 0); if (first) { biscuit_roaring_and_inplace(first, cands); biscuit_roaring_free(cands); cands = first; } }
+                if (!parsed->starts_percent) { RoaringBitmap *first = biscuit_match_col_part_at_pos_ilike(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0); if (first) { biscuit_roaring_and_inplace(first, cands); biscuit_roaring_free(cands); cands = first; } }
                 if (!biscuit_roaring_is_empty(cands))
-                    biscuit_recursive_windowed_match_col_ilike(result, col, (const char **) parsed->parts, parsed->part_byte_lens, parsed->part_count, parsed->ends_percent, 0, 0, cands, col->max_length_lower);
+                    biscuit_recursive_windowed_match_col_ilike(index, result, col, col_idx, (const char **) parsed->parts, parsed->part_byte_lens, parsed->part_count, parsed->ends_percent, 0, 0, cands, col->max_length_lower);
                 biscuit_roaring_free(cands);
             } else if (cands) biscuit_roaring_free(cands);
         }

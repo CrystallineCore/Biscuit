@@ -32,6 +32,23 @@ extern bool biscuit_read_metadata_from_disk(Relation index,
                                             int *max_len,
                                             uint64 *gen);
 
+/*
+ * biscuit_read_pending_stats
+ * Share-locked read of the metapage's pending-list observability fields:
+ * the configured per-structure drain threshold, the last-known total
+ * undrained bytes across every structure's pending chain (refreshed once
+ * per VACUUM, see BiscuitMetaPageData.total_pending_bytes's field
+ * comment), and the lifetime count of drains performed. Returns false
+ * (with all three out-params set to safe defaults/zero) if the relation
+ * has no usable metapage yet. Used by biscuit_index_stats() and
+ * biscuit_pending_list_stats() (biscuit.c) for operational visibility
+ * into unmerged write volume.
+ */
+extern bool biscuit_read_pending_stats(Relation index,
+                                       uint32 *pending_list_limit,
+                                       uint64 *total_pending_bytes,
+                                       uint64 *total_drains);
+
 /* ==================== INDEX BUILD & LOAD ==================== */
 
 extern IndexBuildResult *biscuit_build(Relation heap,
@@ -48,9 +65,22 @@ extern bool biscuit_pop_free_slot(BiscuitIndex *idx, uint32_t *slot);
 
 /*
  * Remove a single record from every character/length bitmap in the index.
- * Used by bulkdelete and update paths.
+ * Used by bulkdelete and update (UPDATE-as-delete-then-insert) paths.
+ *
+ * index / pending_list_limit: per the mutation contract ("Biscuit
+ * WAL-Logged Storage: Phase 1 Contract" §1), every steady-state removal
+ * durably records itself via a pending-list append against each touched
+ * structure's directory entry, in addition to the existing in-memory
+ * biscuit_roaring_remove(). Both are always required now -- there is no
+ * build-mode/NULL-index case for this function (contrast
+ * biscuit_index_single_record()/biscuit_index_column_record(), which are
+ * shared between the one-time build path and steady-state insert and so
+ * do have one). pending_list_limit is the statement-cached
+ * BiscuitMetaPageData.pending_list_limit (biscuit_read_pending_list_limit()),
+ * read once per statement by the caller.
  */
-extern void biscuit_remove_from_all_indices(BiscuitIndex *idx, uint32_t rec_idx);
+extern void biscuit_remove_from_all_indices(Relation index, BiscuitIndex *idx,
+                                             uint32_t rec_idx, uint32 pending_list_limit);
 
 /* ==================== AM CALLBACKS ==================== */
 

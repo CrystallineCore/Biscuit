@@ -88,6 +88,17 @@ biscuit_dir_ensure_root(Relation index, int slot)
 
         biscuit_ensure_synchronous_commit();
 
+        /*
+         * Deliberately plain P_NEW here, NOT biscuit_page_alloc(): this
+         * whole function runs with mbuf (the metapage) already held
+         * BUFFER_LOCK_EXCLUSIVE (see above), and biscuit_page_alloc()
+         * always acquires that same metapage lock itself as part of
+         * popping the fsm_root freelist -- calling it here would be a
+         * self-deadlock (re-acquiring a buffer lock this backend already
+         * holds). A first-ever directory root for a column is also a
+         * one-time event per column, not a per-row/per-drain hot path,
+         * so skipping freelist reuse here costs nothing measurable.
+         */
         newbuf = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
         LockBuffer(newbuf, BUFFER_LOCK_EXCLUSIVE);
 
@@ -311,8 +322,7 @@ biscuit_dir_insert(Relation index, const BiscuitDirEntry *entry, BiscuitDirEntry
         BiscuitPageOpaque      newopaque;
         BiscuitPageOpaque      oldopaque;
 
-        newbuf = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
-        LockBuffer(newbuf, BUFFER_LOCK_EXCLUSIVE);
+        newbuf = biscuit_page_alloc(index, BISCUIT_PAGE_DIR);
 
         state   = GenericXLogStart(index);
         page    = GenericXLogRegisterBuffer(state, buf, 0);

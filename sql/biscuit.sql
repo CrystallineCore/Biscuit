@@ -1,4 +1,4 @@
--- biscuit--2.5.0.sql
+-- biscuit--3.0.0.sql
 -- SQL installation script for Biscuit Index Access Method
 -- PostgreSQL 15+ compatible with full CRUD support and multi-column indexes
 --
@@ -13,11 +13,17 @@
 -- - Full VACUUM integration
 -- - Multi-column index support
 -- - Mixed data type support
+-- - WAL-logged directory + compacted-blob + pending-list on-disk storage
+--   (BISCUIT_VERSION 3): the old external-file snapshot mechanism and its
+--   best-effort/proc-exit-flush machinery are gone. Persistence failures
+--   now propagate as errors instead of being silently swallowed.
 --
--- NOTE: this is a fresh-install script. A biscuit--2.4.0--2.5.0.sql
--- upgrade script (ALTER EXTENSION path) still needs to be written
--- separately -- existing 2.4.0 installs have a biscuit_text_ops opclass
--- on disk that this script does not know how to migrate in place.
+-- NOTE: this is a fresh-install script for new databases. Upgrading an
+-- existing 2.5.0 (or earlier) installation MUST go through
+-- biscuit--2.5.0--3.0.0.sql via ALTER EXTENSION biscuit UPDATE, which
+-- requires REINDEXing every existing Biscuit index -- there is no
+-- in-place, no-REINDEX upgrade path for this cutover (see that script's
+-- header for why).
 
 -- Complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION biscuit" to load this file. \quit
@@ -114,8 +120,23 @@ AS 'MODULE_PATHNAME', 'biscuit_index_stats'
 LANGUAGE C STRICT;
 
 COMMENT ON FUNCTION biscuit_index_stats(oid) IS
-'Returns detailed statistics for a Biscuit index including CRUD counts, tombstones, and memory usage.
+'Returns detailed statistics for a Biscuit index including CRUD counts, tombstones, pending-list (unmerged write volume), and memory usage.
 Usage: SELECT biscuit_index_stats(''index_name''::regclass::oid);';
+
+-- Function to get pending-list (unmerged write volume) stats as columns,
+-- for use in views/ORDER BY rather than biscuit_index_stats()'s free text.
+CREATE FUNCTION biscuit_pending_list_stats(
+    index_oid oid,
+    OUT pending_list_limit  int,
+    OUT total_pending_bytes bigint,
+    OUT total_drains        bigint
+)
+AS 'MODULE_PATHNAME', 'biscuit_pending_list_stats'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION biscuit_pending_list_stats(oid) IS
+'Returns the configured per-structure drain threshold and the (VACUUM-refreshed, so up to one VACUUM cycle stale) total undrained pending-list bytes and lifetime drain count for a Biscuit index -- "how much unmerged write volume is sitting in this index right now".
+Usage: SELECT * FROM biscuit_pending_list_stats(''index_name''::regclass::oid);';
 
 -- ==================== OPERATOR CLASSES ====================
 --
@@ -355,6 +376,38 @@ WHERE am.amname = 'biscuit' AND c.relkind = 'i';
 COMMENT ON VIEW biscuit_status IS
 'Shows current Biscuit extension status including build configuration and index statistics';
 
+-- Operational visibility: how much unmerged write volume (pending-list
+-- bytes not yet drained into a compacted blob) is sitting in each Biscuit
+-- index right now. total_pending_bytes/total_drains are only refreshed by
+-- VACUUM (see biscuit_pending_list_stats()'s comment), so this can lag
+-- live state by up to one VACUUM cycle -- treat it as a tuning/monitoring
+-- signal, not a transactionally-consistent count.
+CREATE VIEW biscuit_pending_list_usage AS
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS index_name,
+    t.relname AS table_name,
+    s.pending_list_limit,
+    s.total_pending_bytes,
+    pg_size_pretty(s.total_pending_bytes) AS total_pending_pretty,
+    s.total_drains,
+    c.oid AS index_oid
+FROM
+    pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_am am ON am.oid = c.relam
+    JOIN pg_index i ON i.indexrelid = c.oid
+    JOIN pg_class t ON t.oid = i.indrelid
+    CROSS JOIN LATERAL biscuit_pending_list_stats(c.oid) s
+WHERE
+    am.amname = 'biscuit'
+    AND c.relkind = 'i'
+ORDER BY
+    s.total_pending_bytes DESC;
+
+COMMENT ON VIEW biscuit_pending_list_usage IS
+'Shows unmerged write volume (pending-list bytes not yet drained into a compacted blob) per Biscuit index, refreshed once per VACUUM. A large total_pending_bytes relative to index_size, or a low total_drains under heavy write load, suggests biscuit.pending_list_limit may be set too high for this workload.';
+
 -- ==================== HELPER FUNCTIONS ====================
 
 -- Create the memory size function (takes OID)
@@ -414,13 +467,19 @@ SELECT
     i.indexname,
     biscuit_index_memory_size(c.oid) AS bytes,
     pg_size_pretty(biscuit_index_memory_size(c.oid)) AS human_readable,
-    pg_size_pretty(pg_relation_size(c.oid)) AS disk_size
+    pg_size_pretty(pg_relation_size(c.oid)) AS disk_size,
+    s.total_pending_bytes AS pending_bytes,
+    pg_size_pretty(s.total_pending_bytes) AS pending_pretty
 FROM pg_indexes i
 JOIN pg_class c ON c.relname = i.indexname
 JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = i.schemaname
 JOIN pg_am am ON am.oid = c.relam
+CROSS JOIN LATERAL biscuit_pending_list_stats(c.oid) s
 WHERE am.amname = 'biscuit'
 ORDER BY biscuit_index_memory_size(c.oid) DESC;
+
+COMMENT ON VIEW biscuit_memory_usage IS
+'In-memory size, on-disk size, and unmerged pending-list bytes (see biscuit_pending_list_usage for more detail) per Biscuit index.';
 
 -- Diagnostic function to check configuration
 CREATE OR REPLACE FUNCTION biscuit_check_config()
@@ -481,7 +540,9 @@ INSERT INTO biscuit_version_table (version, description) VALUES
 
 ('2.4.0', 'Added expression index support and improved parallel scan and datatype compatibility'),
 
-('2.5.0', 'Split biscuit_text_ops into biscuit_ops (default, LIKE+ILIKE), biscuit_like_ops (LIKE-only), and biscuit_ilike_ops (ILIKE-only) so LIKE-only or ILIKE-only indexes no longer build the unused case-sensitivity structures');
+('2.5.0', 'Split biscuit_text_ops into biscuit_ops (default, LIKE+ILIKE), biscuit_like_ops (LIKE-only), and biscuit_ilike_ops (ILIKE-only) so LIKE-only or ILIKE-only indexes no longer build the unused case-sensitivity structures'),
+
+('3.0.0', 'On-disk format cutover to WAL-logged directory + compacted-blob + pending-list storage (BISCUIT_VERSION 3). Removes the old external-file snapshot mechanism entirely, along with its best-effort save/proc-exit-flush machinery -- persistence failures now propagate as errors. Adds biscuit_pending_list_stats()/biscuit_pending_list_usage for pending-list (unmerged write volume) observability. REQUIRES REINDEX of every existing Biscuit index; there is no in-place upgrade for the on-disk format.');
 
 
 COMMENT ON TABLE biscuit_version_table IS
@@ -495,11 +556,13 @@ GRANT EXECUTE ON FUNCTION biscuit_build_info_json() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION biscuit_roaring_version() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION biscuit_version() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION biscuit_index_stats(oid) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION biscuit_pending_list_stats(oid) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION biscuit_check_config() TO PUBLIC;
 GRANT SELECT ON biscuit_indexes TO PUBLIC;
 GRANT SELECT ON biscuit_indexes_detailed TO PUBLIC;
 GRANT SELECT ON biscuit_operators TO PUBLIC;
 GRANT SELECT ON biscuit_status TO PUBLIC;
+GRANT SELECT ON biscuit_pending_list_usage TO PUBLIC;
 
 -- ==================== USAGE EXAMPLES (DOCUMENTATION) ====================
 

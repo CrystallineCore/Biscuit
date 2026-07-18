@@ -44,15 +44,17 @@
  *
  * Biscuit has no shared-memory state or background workers: every
  * BiscuitIndex is built (or rebuilt) synchronously and kept in the
- * session-scoped cache (biscuit_cache.c). The one thing we *do* need
- * to register here is an object_access_hook: biscuit_persist.c writes
- * a companion snapshot file per index under $PGDATA/pg_biscuit/, and
- * nothing in the core AM callback table (ambuild/aminsert/ambulkdelete/
+ * session-scoped cache (biscuit_cache.c). All durable state now lives
+ * in the index relation's own pages (directory + compacted-blob +
+ * pending-list, see biscuit_persist.c), so it is normally cleaned up
+ * for free whenever the relation's storage is dropped. The one thing
+ * we still register an object_access_hook for is proactively freeing
+ * those pages' chains (biscuit_persist_drop()) and evicting the
+ * process-local cache entry before that happens, since nothing in the
+ * core AM callback table (ambuild/aminsert/ambulkdelete/
  * amvacuumcleanup) is invoked on DROP INDEX or on the "drop the old
- * index" step of REINDEX CONCURRENTLY. Without a hook here those
- * on-disk files are orphaned forever -- the relcache callback in
- * biscuit_cache.c evicts the in-memory entry, but never touches the
- * file on disk. See biscuit_object_access_hook() below.
+ * index" step of REINDEX CONCURRENTLY. See biscuit_object_access_hook()
+ * below.
  * ================================================================ */
 
 /*
@@ -91,10 +93,11 @@ static object_access_hook_type prev_object_access_hook = NULL;
  * This covers both DROP INDEX (direct call with the dropped index's
  * OID) and REINDEX CONCURRENTLY (which builds a new index under a new
  * OID, swaps relfilenodes, then drops the old index under its
- * original OID -- so the old snapshot file is cleaned up here too).
- * Plain REINDEX keeps the same index OID and goes back through
- * biscuit_build(), which naturally overwrites the existing snapshot
- * file in place, so there's nothing extra to do for that case.
+ * original OID -- so the old index's directory/blob/pending-list
+ * pages are cleaned up here too). Plain REINDEX keeps the same index
+ * OID and goes back through biscuit_build(), which naturally
+ * overwrites the existing directory entries in place, so there's
+ * nothing extra to do for that case.
  */
 static void
 biscuit_object_access_hook(ObjectAccessType access, Oid classId,
@@ -120,7 +123,7 @@ biscuit_object_access_hook(ObjectAccessType access, Oid classId,
             {
                 biscuit_cache_remove(objectId);
                 biscuit_persist_drop(objectId);
-                elog(DEBUG1, "Biscuit: Removed orphaned snapshot for dropped index %u",
+                elog(DEBUG1, "Biscuit: Freed directory/blob/pending-list pages for dropped index %u",
                      objectId);
             }
         }
@@ -372,11 +375,18 @@ biscuit_index_stats(PG_FUNCTION_ARGS)
     StringInfoData buf;
     int            active_records = 0;
     int            i;
+    uint32         pending_list_limit;
+    uint64         total_pending_bytes;
+    uint64         total_drains;
+    bool           have_pending_stats;
 
     index = index_open(indexoid, AccessShareLock);
 
     idx = (BiscuitIndex *) index->rd_amcache;
     if (!idx) { idx = biscuit_load_index(index); index->rd_amcache = idx; }
+
+    have_pending_stats = biscuit_read_pending_stats(index, &pending_list_limit,
+                                                     &total_pending_bytes, &total_drains);
 
     for (i = 0; i < idx->num_records; i++)
     {
@@ -410,6 +420,20 @@ biscuit_index_stats(PG_FUNCTION_ARGS)
     appendStringInfo(&buf, "  Inserts: %lld\n",  (long long) idx->insert_count);
     appendStringInfo(&buf, "  Updates: %lld\n",  (long long) idx->update_count);
     appendStringInfo(&buf, "  Deletes: %lld\n",  (long long) idx->delete_count);
+    appendStringInfo(&buf, "------------------------\n");
+    appendStringInfo(&buf, "Pending-List Statistics (unmerged write volume):\n");
+    if (have_pending_stats)
+    {
+        appendStringInfo(&buf, "  Drain threshold (bytes/structure): %u\n", pending_list_limit);
+        appendStringInfo(&buf, "  Total pending bytes (approx, as of last VACUUM): %llu\n",
+                          (unsigned long long) total_pending_bytes);
+        appendStringInfo(&buf, "  Lifetime drains performed: %llu\n",
+                          (unsigned long long) total_drains);
+    }
+    else
+    {
+        appendStringInfo(&buf, "  (metapage unavailable -- no pending-list stats)\n");
+    }
     appendStringInfo(&buf, "------------------------\n");
     appendStringInfo(&buf, "Active Optimizations:\n");
     appendStringInfo(&buf, "  \u2713 1. Skip wildcard intersections\n");
@@ -533,4 +557,59 @@ biscuit_index_memory_size(PG_FUNCTION_ARGS)
 
     index_close(index, AccessShareLock);
     PG_RETURN_INT64((int64) total_bytes);
+}
+
+/* ================================================================
+ * PENDING-LIST STATISTICS (biscuit_pending_list_stats)
+ *
+ * SQL-callable composite-returning wrapper around
+ * biscuit_read_pending_stats() (biscuit_index.c) -- "how much unmerged
+ * write volume is sitting in this index right now", broken out into
+ * columns rather than biscuit_index_stats()'s free-text report, so it's
+ * usable directly in a view/ORDER BY (see biscuit_pending_list_usage in
+ * biscuit--2.5.0--3.0.0.sql). total_pending_bytes is refreshed once per
+ * VACUUM, not on every mutation (see the field comment on
+ * BiscuitMetaPageData.total_pending_bytes), so it can be stale by up to
+ * one VACUUM cycle.
+ * ================================================================ */
+
+PG_FUNCTION_INFO_V1(biscuit_pending_list_stats);
+Datum
+biscuit_pending_list_stats(PG_FUNCTION_ARGS)
+{
+    Oid            indexoid = PG_GETARG_OID(0);
+    Relation       index;
+    TupleDesc      tupdesc;
+    Datum          values[3];
+    bool           nulls[3] = {false, false, false};
+    uint32         pending_list_limit;
+    uint64         total_pending_bytes;
+    uint64         total_drains;
+
+    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("function returning record called in context that cannot accept type record")));
+    tupdesc = BlessTupleDesc(tupdesc);
+
+    index = index_open(indexoid, AccessShareLock);
+
+    if (!biscuit_read_pending_stats(index, &pending_list_limit,
+                                     &total_pending_bytes, &total_drains))
+    {
+        /* No usable metapage (e.g. brand-new/empty relation): report zeros
+         * rather than erroring, matching biscuit_index_memory_size()'s
+         * "no index built yet" behavior. */
+        pending_list_limit  = BISCUIT_DEFAULT_PENDING_LIST_LIMIT;
+        total_pending_bytes = 0;
+        total_drains        = 0;
+    }
+
+    index_close(index, AccessShareLock);
+
+    values[0] = UInt32GetDatum(pending_list_limit);
+    values[1] = UInt64GetDatum(total_pending_bytes);
+    values[2] = UInt64GetDatum(total_drains);
+
+    PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
