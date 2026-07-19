@@ -700,9 +700,23 @@ load_bucket_into_charindex(CharIndex *ci, const LoadBucket *b)
 }
 
 /* Read one (col,is_lower) pair's whole string-cache blob back into a
- * palloc'd char*[num_records] array (NULL entries preserved). */
+ * palloc'd char*[capacity] array (NULL entries preserved).
+ *
+ * The array is allocated to the full `capacity` -- the same width as
+ * idx->tids -- even though only the first `num_records` entries are read
+ * back from the blob (the rest stay NULL from palloc0). This is load-
+ * bearing: the steady-state insert path (biscuit_insert() in
+ * biscuit_index.c) grows tids / data_cache / data_cache_lower together and
+ * only when `num_records >= capacity`, so it assumes all three arrays are
+ * always exactly `capacity` long. Sizing this cache to `num_records`
+ * instead (as this function used to) left the gap [num_records, capacity)
+ * unallocated: after a cold reload, the very next insert would write
+ * data_cache[num_records] past the end of a too-small allocation, smashing
+ * an adjacent palloc chunk header and later tripping repalloc()/pfree()
+ * with an "invalid pointer" error. */
 static char **
-biscuit_persist_load_strcache(Relation index, int32 col, bool is_lower, int num_records)
+biscuit_persist_load_strcache(Relation index, int32 col, bool is_lower,
+                              int num_records, int capacity)
 {
     BiscuitDirEntry entry;
     char          **arr;
@@ -711,7 +725,10 @@ biscuit_persist_load_strcache(Relation index, int32 col, bool is_lower, int num_
     PCur            cur;
     int             i;
 
-    arr = (char **) palloc0(Max(num_records, 1) * sizeof(char *));
+    /* Width follows capacity (>= num_records, enforced by the header
+     * validation in biscuit_persist_load); Max(...,1) keeps a 0-capacity
+     * edge case from producing a zero-byte allocation. */
+    arr = (char **) palloc0(Max(capacity, 1) * sizeof(char *));
 
     if (!biscuit_dir_find(index, col, is_lower, BISCUIT_DIR_KIND_STRCACHE, -1, -1, &entry, NULL))
         return arr;   /* nothing saved yet -- all-NULL array, matches absent cache */
@@ -942,8 +959,8 @@ biscuit_persist_load(Relation index)
 
         if (num_columns == 1)
         {
-            idx->data_cache       = biscuit_persist_load_strcache(index, BISCUIT_DIR_COL_LEGACY, false, idx->num_records);
-            idx->data_cache_lower = biscuit_persist_load_strcache(index, BISCUIT_DIR_COL_LEGACY, true, idx->num_records);
+            idx->data_cache       = biscuit_persist_load_strcache(index, BISCUIT_DIR_COL_LEGACY, false, idx->num_records, idx->capacity);
+            idx->data_cache_lower = biscuit_persist_load_strcache(index, BISCUIT_DIR_COL_LEGACY, true, idx->num_records, idx->capacity);
 
             biscuit_persist_load_column(index, BISCUIT_DIR_COL_LEGACY,
                                          idx->max_length_legacy, idx->max_length_lower,
@@ -962,9 +979,9 @@ biscuit_persist_load(Relation index)
             for (col = 0; col < num_columns; col++)
             {
                 idx->column_data_cache[col] =
-                    biscuit_persist_load_strcache(index, col, false, idx->num_records);
+                    biscuit_persist_load_strcache(index, col, false, idx->num_records, idx->capacity);
                 idx->column_data_cache_lower[col] =
-                    biscuit_persist_load_strcache(index, col, true, idx->num_records);
+                    biscuit_persist_load_strcache(index, col, true, idx->num_records, idx->capacity);
             }
 
             for (col = 0; col < num_columns; col++)
