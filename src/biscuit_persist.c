@@ -608,6 +608,120 @@ biscuit_persist_save(Oid indexoid, BiscuitIndex *idx)
          indexoid, idx->num_records, idx->gen);
 }
 
+/*
+ * biscuit_persist_save_row_identity
+ *
+ * Re-persist ONLY the whole-blob "row identity" structures that a
+ * steady-state INSERT/DELETE mutates: the HEADER (num_records, capacity,
+ * counters), the TIDS array (slot -> heap ItemPointer), the TOMBSTONES
+ * bitmap, the FREELIST, and the per-column STRCACHE.
+ *
+ * Why this exists (and why it is separate from biscuit_persist_save):
+ * the bitmap structures (POS/NEG/CACHE/LEN/LEN_GE) are already made
+ * durable incrementally by biscuit_pending_mutate_structure()'s
+ * per-mutation pending-list appends, so a cold load reconstructs them
+ * from blob+pending. The row-identity structures have NO such incremental
+ * mechanism -- they were written only by the build-time biscuit_persist_save().
+ * That left a gap: after any steady-state insert, a cold load in another
+ * backend rebuilt num_records/tids[] from the stale build-time snapshot,
+ * so the inserted rows' bitmap slots had no TID to map to and were
+ * invisible. This function closes that gap by re-writing exactly those
+ * structures (and nothing else -- rewriting the bitmaps here would be
+ * redundant with the pending lists and needlessly expensive).
+ *
+ * Cost note: this rewrites O(num_records) bytes (TIDS + STRCACHE) per
+ * call. Callers that run it once per statement (not once per row -- see
+ * biscuit_insert()'s end-of-call site) keep amortized cost linear in the
+ * number of rows inserted by that statement.
+ *
+ * Takes a live Relation (already open) rather than an Oid, because every
+ * caller (biscuit_insert/biscuit_bulkdelete) already holds one.
+ */
+void
+biscuit_persist_save_row_identity(Relation index, BiscuitIndex *idx)
+{
+    Oid  indexoid = RelationGetRelid(index);
+    PBuf header;
+    int  i;
+
+    PG_TRY();
+    {
+        /* ---- header (scalar bookkeeping) ---- */
+        pbuf_init(&header);
+        pbuf_put_i32(&header, idx->num_records);
+        pbuf_put_i32(&header, idx->capacity);
+        pbuf_put_i32(&header, idx->max_len);
+        pbuf_put_i32(&header, idx->max_length_legacy);
+        pbuf_put_i32(&header, idx->max_length_lower);
+        pbuf_put_i64(&header, idx->insert_count);
+        pbuf_put_i64(&header, idx->update_count);
+        pbuf_put_i64(&header, idx->delete_count);
+        pbuf_put_i32(&header, idx->tombstone_count);
+        pbuf_put_i32(&header, idx->num_columns);
+
+        if (idx->num_columns > 1)
+        {
+            for (i = 0; i < idx->num_columns; i++)
+            {
+                pbuf_put_u32(&header, idx->column_types[i]);
+                pbuf_put_i32(&header, idx->column_indices[i].max_length);
+                pbuf_put_i32(&header, idx->column_indices[i].max_length_lower);
+            }
+        }
+
+        biscuit_persist_write_raw(index, BISCUIT_DIR_COL_SINGLETON, false,
+                                   BISCUIT_DIR_KIND_HEADER, -1, -1,
+                                   header.data, (uint32) header.len);
+        pfree(header.data);
+
+        /* ---- tids ---- */
+        biscuit_persist_write_raw(index, BISCUIT_DIR_COL_SINGLETON, false,
+                                   BISCUIT_DIR_KIND_TIDS, -1, -1,
+                                   idx->num_records > 0 ? (const char *) idx->tids : NULL,
+                                   (uint32) (idx->num_records * sizeof(ItemPointerData)));
+
+        /* ---- tombstones ---- */
+        biscuit_persist_write_bitmap(index, BISCUIT_DIR_COL_SINGLETON, false,
+                                      BISCUIT_DIR_KIND_TOMBSTONES, -1, -1,
+                                      idx->tombstones);
+
+        /* ---- free list ---- */
+        biscuit_persist_write_raw(index, BISCUIT_DIR_COL_SINGLETON, false,
+                                   BISCUIT_DIR_KIND_FREELIST, -1, -1,
+                                   idx->free_count > 0 ? (const char *) idx->free_list : NULL,
+                                   (uint32) (idx->free_count * sizeof(uint32_t)));
+
+        /* ---- string cache(s) ---- */
+        if (idx->num_columns == 1)
+        {
+            biscuit_persist_save_strcache(index, BISCUIT_DIR_COL_LEGACY,
+                                           idx->data_cache, idx->data_cache_lower,
+                                           idx->num_records);
+        }
+        else
+        {
+            int col;
+
+            for (col = 0; col < idx->num_columns; col++)
+                biscuit_persist_save_strcache(index, col,
+                                               idx->column_data_cache[col],
+                                               idx->column_data_cache_lower[col],
+                                               idx->num_records);
+        }
+    }
+    PG_CATCH();
+    {
+        /* Same rationale as biscuit_persist_save(): a swallowed failure
+         * here would leave a cold load unable to see these rows. Let it
+         * propagate so the surrounding INSERT fails visibly. */
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    elog(DEBUG1, "biscuit: re-saved row-identity structures for index %u (%d records, gen " UINT64_FORMAT ")",
+         indexoid, idx->num_records, idx->gen);
+}
+
 /* ================================================================
  * LOAD
  * ================================================================ */
@@ -689,6 +803,14 @@ biscuit_persist_load_column_walk_cb(const BiscuitDirEntry *entry, void *vstate)
 /* Copy a LoadBucket's accumulated (pos,bitmap) pairs into a freshly
  * palloc'd CharIndex, in CacheMemoryContext (matching the old code's
  * allocation context for every in-memory structure it built). */
+static int
+biscuit_posentry_cmp(const void *a, const void *b)
+{
+    int pa = ((const PosEntry *) a)->pos;
+    int pb = ((const PosEntry *) b)->pos;
+    return (pa > pb) - (pa < pb);
+}
+
 static void
 load_bucket_into_charindex(CharIndex *ci, const LoadBucket *b)
 {
@@ -697,6 +819,25 @@ load_bucket_into_charindex(CharIndex *ci, const LoadBucket *b)
     ci->entries  = (PosEntry *) palloc(ci->capacity * sizeof(PosEntry));
     if (b->count > 0)
         memcpy(ci->entries, b->entries, b->count * sizeof(PosEntry));
+
+    /*
+     * Sort by pos. biscuit_get_pos_bitmap()/biscuit_get_neg_bitmap()
+     * binary-search cidx->entries by pos, which requires them ordered.
+     * The load bucket is filled in directory-discovery order, which is
+     * only coincidentally sorted: when a steady-state INSERT creates the
+     * first POS/NEG structure for a new (char,position) AFTER build already
+     * created other positions for that same char, the directory chain --
+     * and hence this bucket -- holds positions out of order. Without this
+     * sort the binary search misses the out-of-order entry and returns
+     * NULL, so a prefix/exact query silently drops every row that depends
+     * on that position once VACUUM (or an inline drain) has moved the
+     * records from the pending list into the compacted blob. (Before the
+     * drain the same query worked, because reconciliation merged the
+     * pending records regardless of entry order -- which is why this only
+     * manifested after a VACUUM.)
+     */
+    if (ci->count > 1)
+        qsort(ci->entries, ci->count, sizeof(PosEntry), biscuit_posentry_cmp);
 }
 
 /* Read one (col,is_lower) pair's whole string-cache blob back into a
@@ -1036,11 +1177,20 @@ biscuit_persist_load(Relation index)
          * a NULL return as "nothing readable" and raises an ERROR with a
          * REINDEX hint -- there is no from-heap rebuild fallback to defer
          * to anymore.
+         *
+         * Order matters here: switch back to the caller's (long-lived)
+         * context FIRST, then CopyErrorData() so the copy is allocated in
+         * a context that survives FlushErrorState(), then flush. Copying
+         * while still notionally "inside" the failed load and freeing the
+         * copy only after tearing down the error state was producing a
+         * wild-pointer free that segfaulted in FreeErrorData().
          */
-        ErrorData *edata = CopyErrorData();
+        ErrorData *edata;
 
-        FlushErrorState();
         MemoryContextSwitchTo(oldcontext);
+        edata = CopyErrorData();
+        FlushErrorState();
+
         elog(WARNING, "biscuit: discarding unreadable directory-backed state for index %u (%s)",
              indexoid, edata->message);
         FreeErrorData(edata);
@@ -1052,6 +1202,7 @@ biscuit_persist_load(Relation index)
 
     elog(DEBUG1, "biscuit: loaded directory-backed state for index %u (%d records, gen " UINT64_FORMAT ")",
          indexoid, idx->num_records, idx->gen);
+
 
     return idx;
 }

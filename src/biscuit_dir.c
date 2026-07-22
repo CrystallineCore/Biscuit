@@ -393,18 +393,53 @@ biscuit_dir_foreach_column(Relation index, int slot, BiscuitDirWalkCallback cb, 
         BiscuitPageOpaque     opaque;
         BlockNumber           next;
         uint32                i;
+        uint32                n;
+        BiscuitDirEntry      *snapshot;
 
         LockBuffer(buf, BUFFER_LOCK_SHARE);
         page    = BufferGetPage(buf);
         hdr     = (BiscuitDirPageHeader *) BiscuitPageDataPtr(page);
         entries = (BiscuitDirEntry *) ((char *) hdr + MAXALIGN(sizeof(BiscuitDirPageHeader)));
 
-        for (i = 0; i < hdr->num_entries; i++)
-            cb(&entries[i], state);
+        /*
+         * Snapshot this page's entries and its next-pointer, then RELEASE
+         * the page lock BEFORE invoking any callback.
+         *
+         * This is load-bearing, not just an optimization: a callback may
+         * mutate the very entry it is handed (e.g. biscuit_vacuum_drain_one()
+         * drains a structure's pending list and calls biscuit_dir_update()
+         * to write back the new blob_head). biscuit_dir_update() takes a
+         * BUFFER_LOCK_EXCLUSIVE on this same directory page. If we still
+         * held BUFFER_LOCK_SHARE on it here, that same-backend share->exclusive
+         * acquisition self-deadlocks on the buffer content LWLock -- the
+         * backend waits forever for a lock it itself holds. In a VACUUM that
+         * manifests as the drain being interrupted after it has already
+         * written the new compacted blob and freed the old one, but before
+         * the directory entry is repointed: the entry is left referencing a
+         * freed page, and every subsequent cold read walks that freed chain
+         * into unrelated pages ("blob chunk chain inconsistency ...").
+         *
+         * Copying is safe because directory entries are never relocated once
+         * written (§5) and this walk only needs each entry's contents, not a
+         * live pointer; a callback that wants to mutate re-finds the entry by
+         * identity (biscuit_dir_find) to get its own fresh, exclusively-lock-
+         * able reference.
+         */
+        n = hdr->num_entries;
+        snapshot = (n > 0) ? (BiscuitDirEntry *) palloc(n * sizeof(BiscuitDirEntry)) : NULL;
+        if (n > 0)
+            memcpy(snapshot, entries, n * sizeof(BiscuitDirEntry));
 
         opaque = (BiscuitPageOpaque) PageGetSpecialPointer(page);
         next   = opaque->next;
         UnlockReleaseBuffer(buf);
+
+        for (i = 0; i < n; i++)
+            cb(&snapshot[i], state);
+
+        if (snapshot)
+            pfree(snapshot);
+
         cur = next;
     }
 }

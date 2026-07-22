@@ -13,6 +13,116 @@
 #include "biscuit_blob.h"   /* biscuit_pending_append/_drain, biscuit_page_*_blob --
                               * see "Biscuit WAL-Logged Storage: Phase 1 Contract" */
 #include "biscuit_dir.h"    /* biscuit_dir_find/_insert/_update, BiscuitDirEntry */
+#include "access/xact.h"    /* RegisterXactCallback, XACT_EVENT_* */
+
+/* ================================================================
+ * SECTION 0b – Deferred row-identity flush
+ * ================================================================
+ *
+ * A steady-state INSERT/DELETE must eventually re-persist its index's
+ * whole-blob "row identity" structures (TIDS/HEADER/STRCACHE/...), which
+ * have no incremental pending mechanism (see
+ * biscuit_persist_save_row_identity()). Doing that per row would be
+ * O(n^2) for a bulk insert, so instead each mutating call marks its index
+ * OID dirty here, and a single pre-commit xact callback flushes every
+ * dirty index exactly once -- O(num_records) per index per transaction.
+ *
+ * The dirty set is a tiny process-local array of OIDs (an index can only
+ * appear once). It lives in TopTransactionContext-independent static
+ * storage and is cleared at every transaction end. The BiscuitIndex to
+ * re-save is fetched from the session cache (biscuit_cache_lookup), which
+ * biscuit_insert() always keeps current for the touched index.
+ */
+#define BISCUIT_MAX_DIRTY_INDEXES 64
+static Oid   biscuit_dirty_oids[BISCUIT_MAX_DIRTY_INDEXES];
+static int   biscuit_dirty_count       = 0;
+static bool  biscuit_xact_cb_registered = false;
+
+static void biscuit_row_identity_xact_callback(XactEvent event, void *arg);
+
+static void
+biscuit_mark_row_identity_dirty(Oid indexoid)
+{
+    int i;
+
+    for (i = 0; i < biscuit_dirty_count; i++)
+        if (biscuit_dirty_oids[i] == indexoid)
+            return;   /* already marked this transaction */
+
+    if (!biscuit_xact_cb_registered)
+    {
+        RegisterXactCallback(biscuit_row_identity_xact_callback, NULL);
+        biscuit_xact_cb_registered = true;
+    }
+
+    if (biscuit_dirty_count < BISCUIT_MAX_DIRTY_INDEXES)
+        biscuit_dirty_oids[biscuit_dirty_count++] = indexoid;
+    else
+    {
+        /*
+         * Overflow (a single transaction touched > 64 distinct biscuit
+         * indexes): fall back to flushing this one inline right now so we
+         * never silently drop a required row-identity save. Rare enough
+         * that the O(num_records) cost here is irrelevant.
+         */
+        BiscuitIndex *idx = biscuit_cache_lookup(indexoid);
+        if (idx)
+        {
+            Relation rel = index_open(indexoid, RowExclusiveLock);
+            biscuit_persist_save_row_identity(rel, idx);
+            index_close(rel, RowExclusiveLock);
+        }
+    }
+}
+
+static void
+biscuit_flush_dirty_row_identity(void)
+{
+    int i;
+
+    for (i = 0; i < biscuit_dirty_count; i++)
+    {
+        Oid            indexoid = biscuit_dirty_oids[i];
+        BiscuitIndex  *idx      = biscuit_cache_lookup(indexoid);
+        Relation       rel;
+
+        if (!idx)
+            continue;   /* evicted (e.g. DROP in same txn) -- nothing to save */
+
+        rel = index_open(indexoid, RowExclusiveLock);
+        biscuit_persist_save_row_identity(rel, idx);
+        index_close(rel, RowExclusiveLock);
+    }
+    biscuit_dirty_count = 0;
+}
+
+static void
+biscuit_row_identity_xact_callback(XactEvent event, void *arg)
+{
+    (void) arg;
+
+    switch (event)
+    {
+        case XACT_EVENT_PRE_COMMIT:
+        case XACT_EVENT_PARALLEL_PRE_COMMIT:
+            /* Flush while the transaction is still live (we can still open
+             * relations and write WAL-logged pages here). */
+            biscuit_flush_dirty_row_identity();
+            break;
+
+        case XACT_EVENT_ABORT:
+        case XACT_EVENT_PARALLEL_ABORT:
+            /* Rolled back: the in-memory idx and any pending appends are
+             * discarded/undone with the transaction; just drop the marks.
+             * (Over-invalidation of idx->gen is harmless, as documented at
+             * the gen++ site.) */
+            biscuit_dirty_count = 0;
+            break;
+
+        default:
+            break;
+    }
+}
 
 /* ================================================================
  * SECTION 0 – Opclass case-mode gating
@@ -147,7 +257,29 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
     uint64      prev_total_drains;
     uint32      prev_reserved[6];
 
-    if (!is_new_page && !PageIsNew(page) && !PageIsEmpty(page))
+    /*
+     * Decide whether the current page already holds a real biscuit
+     * metapage whose carry-forward fields (dir_roots, fsm, pending stats)
+     * must be preserved across the PageInit() below.
+     *
+     * We must NOT use PageIsEmpty()/PageIsNew() as that gate here: a
+     * biscuit metapage keeps ALL of its data in the page's special area
+     * (BiscuitMetaPageData via PageGetSpecialPointer), never in the main
+     * body, so pd_lower stays at SizeOfPageHeaderData and PageIsEmpty()
+     * is *always* true for a validly-written metapage. Gating on it made
+     * this branch never taken on a populated metapage, so every rewrite
+     * after build (every insert/bulkdelete) discarded dir_roots -- resetting
+     * them to InvalidBlockNumber and orphaning the entire on-disk directory
+     * (compacted blobs, pending lists, HEADER entry), which then made every
+     * subsequent cold biscuit_persist_load() fail with "no on-disk snapshot
+     * found". The magic check below is the correct, sufficient validity
+     * test for a special-area format: it confirms the special area really
+     * holds a biscuit metapage before we trust its contents. PageIsNew() is
+     * still worth screening for, since PageGetSpecialPointer() on a
+     * never-initialized (all-zero) page would index past a zero-sized
+     * special area.
+     */
+    if (!is_new_page && !PageIsNew(page))
     {
         BiscuitMetaPageData *old = (BiscuitMetaPageData *) PageGetSpecialPointer(page);
 
@@ -509,7 +641,28 @@ biscuit_pending_mutate_structure(Relation index,
 
     biscuit_dir_update(index, &ref, &entry);
 
-    if (entry.pending_bytes > pending_list_limit)
+    {
+    /*
+     * Proportional drain threshold (write-amplification fix).
+     *
+     * A drain rewrites the WHOLE compacted blob (biscuit_pending_drain ->
+     * biscuit_roaring_serialize of the full merged bitmap). With a fixed
+     * pending_list_limit, a size-B structure was rewritten every ~64KB of
+     * pending, so the amortized WAL cost of a single-row insert grew O(B)
+     * i.e. linearly with the index size -- measured at ~119KB/row on a 35MB
+     * index climbing to ~1.5MB/row on a 700MB index.
+     *
+     * Scaling the threshold with the current blob size makes the number of
+     * rows between drains proportional to B, so each byte inserted pays a
+     * bounded, ~constant amount of rewrite work (write amplification ~2-3x)
+     * and per-row WAL stays flat as the index grows. The pending_list_limit
+     * stays as a floor for small structures.
+     */
+    uint32 eff_limit = pending_list_limit;
+    if (entry.blob_bytes / 2 > eff_limit)
+        eff_limit = entry.blob_bytes / 2;
+
+    if (entry.pending_bytes > eff_limit)
     {
         RoaringBitmap     *target = biscuit_load_blob_bitmap(index, entry.blob_head);
         BiscuitDrainStats  stats;
@@ -521,9 +674,11 @@ biscuit_pending_mutate_structure(Relation index,
 
         entry.pending_count = 0;
         entry.pending_bytes = 0;
+        entry.blob_bytes    = stats.blob_bytes_written;  /* remember size for next threshold */
         biscuit_dir_update(index, &ref, &entry);
 
         biscuit_roaring_free(target);
+    }
     }
 }
 
@@ -1993,6 +2148,8 @@ biscuit_insert(Relation index,
                                                   pending_list_limit);
                 for (int i = 0; i <= cl && i < idx->max_length_legacy; i++)
                 {
+                    if (!idx->length_ge_bitmaps_legacy[i])
+                        idx->length_ge_bitmaps_legacy[i] = biscuit_roaring_create();
                     biscuit_roaring_add(idx->length_ge_bitmaps_legacy[i], slot);
                     biscuit_pending_mutate_structure(index, -1, false, BISCUIT_DIR_KIND_LEN_GE,
                                                       -1, i, slot, BISCUIT_PENDING_OP_ADD,
@@ -2041,6 +2198,8 @@ biscuit_insert(Relation index,
                                                       pending_list_limit);
                     for (int i = 0; i <= lcl && i < idx->max_length_lower; i++)
                     {
+                        if (!idx->length_ge_bitmaps_lower[i])
+                            idx->length_ge_bitmaps_lower[i] = biscuit_roaring_create();
                         biscuit_roaring_add(idx->length_ge_bitmaps_lower[i], slot);
                         biscuit_pending_mutate_structure(index, -1, true, BISCUIT_DIR_KIND_LEN_GE,
                                                           -1, i, slot, BISCUIT_PENDING_OP_ADD,
@@ -2142,6 +2301,8 @@ biscuit_insert(Relation index,
                                                       pending_list_limit);
                     for (int i = 0; i <= cl && i < cidx->max_length; i++)
                     {
+                        if (!cidx->length_ge_bitmaps[i])
+                            cidx->length_ge_bitmaps[i] = biscuit_roaring_create();
                         biscuit_roaring_add(cidx->length_ge_bitmaps[i], slot);
                         biscuit_pending_mutate_structure(index, col, false, BISCUIT_DIR_KIND_LEN_GE,
                                                           -1, i, slot, BISCUIT_PENDING_OP_ADD,
@@ -2188,6 +2349,8 @@ biscuit_insert(Relation index,
                                                               pending_list_limit);
                             for (int i = 0; i <= lcl && i < cidx->max_length_lower; i++)
                             {
+                                if (!cidx->length_ge_bitmaps_lower[i])
+                                    cidx->length_ge_bitmaps_lower[i] = biscuit_roaring_create();
                                 biscuit_roaring_add(cidx->length_ge_bitmaps_lower[i], slot);
                                 biscuit_pending_mutate_structure(index, col, true, BISCUIT_DIR_KIND_LEN_GE,
                                                                   -1, i, slot, BISCUIT_PENDING_OP_ADD,
@@ -2231,19 +2394,26 @@ biscuit_insert(Relation index,
     biscuit_write_metadata_to_disk(index, idx);
 
     /*
-     * No eager full-blob resave here anymore (the old generation-
-     * threshold backstop that used to force a full resave once too many
-     * generations had piled up in memory). Durability for every
-     * bitmap mutation performed above already landed on disk the moment
-     * each biscuit_pending_mutate_structure() call returned -- each one
-     * is its own GenericXLog-logged, WAL-replayed append (and, for any
-     * structure whose pending chain crossed pending_list_limit mid-row,
-     * an already-completed opportunistic drain per §2a). There is
-     * nothing left for a statement-level "catch up the snapshot" step to
-     * do; the per-structure pending appends already covered it deeper in
-     * this same call. See "Biscuit WAL-Logged Storage: Phase 1 Contract"
-     * §4a/§4c.
+     * Durability for every *bitmap* mutation performed above already
+     * landed on disk the moment each biscuit_pending_mutate_structure()
+     * call returned -- each is its own GenericXLog-logged, WAL-replayed
+     * pending-list append (plus, for any structure whose pending chain
+     * crossed pending_list_limit mid-row, an already-completed
+     * opportunistic drain per §2a).
+     *
+     * But the *row-identity* structures -- the TIDS array (slot -> heap
+     * ItemPointer), the HEADER's num_records, the STRCACHE, tombstones and
+     * free list -- have no incremental pending mechanism; they are whole
+     * blobs. Re-persisting them per row would be O(num_records) per row =
+     * O(n^2) for a bulk insert. Instead we mark this index dirty and defer
+     * the (single, O(num_records)) row-identity re-save to a pre-commit
+     * xact callback, so a statement that inserts n rows pays it once, not
+     * n times. Deferring to pre-commit is also semantically correct: an
+     * uncommitted insert must not be visible to a cold reader in another
+     * backend anyway (MVCC), and a warm reader in this backend uses the
+     * in-memory idx directly. See biscuit_mark_row_identity_dirty().
      */
+    biscuit_mark_row_identity_dirty(RelationGetRelid(index));
 
     /*
      * FIX 2 — INSERT → SELECT returns 0.

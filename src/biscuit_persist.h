@@ -50,6 +50,17 @@ extern void biscuit_persist_save(Oid indexoid, BiscuitIndex *idx);
 extern BiscuitIndex *biscuit_persist_load(Relation index);
 
 /*
+ * Re-persist only the whole-blob "row identity" structures (HEADER,
+ * TIDS, TOMBSTONES, FREELIST, STRCACHE) that a steady-state INSERT/DELETE
+ * mutates. These have no incremental pending-list mechanism (unlike the
+ * bitmap structures), so without this a cold load in another backend
+ * would rebuild num_records/tids[] from the stale build-time snapshot and
+ * miss every row inserted since build. Callers already hold an open
+ * Relation and should call this once per statement (see biscuit_insert).
+ */
+extern void biscuit_persist_save_row_identity(Relation index, BiscuitIndex *idx);
+
+/*
  * Remove the on-disk snapshot for this index (DROP INDEX / REINDEX).
  * Safe to call even if no snapshot exists.
  */
