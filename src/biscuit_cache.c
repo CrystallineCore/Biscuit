@@ -96,6 +96,25 @@ biscuit_cache_remove(Oid indexoid)
     BiscuitIndexCacheEntry **entry_ptr = &biscuit_cache_head;
     BiscuitIndexCacheEntry  *entry;
 
+    /*
+     * relid == InvalidOid means "everything" -- PostgreSQL invokes
+     * relcache callbacks that way on a sinval queue overflow, when it can
+     * no longer say which relations changed. biscuit_pendlog_invalidate()
+     * already interprets it that way; this function used to not, so an
+     * overflow dropped every cached pending-log snapshot while keeping
+     * every cached BiscuitIndex. That combination is worse than either
+     * half alone: the in-memory index survives as authoritative while the
+     * deltas that were supposed to be reconciled against it are gone,
+     * which yields silently stale reads instead of a clean cache miss.
+     * Dropping everything just costs a reload from durable state.
+     */
+    if (!OidIsValid(indexoid))
+    {
+        biscuit_cache_head = NULL;
+        elog(DEBUG1, "Biscuit: Dropped all cache entries (global invalidation)");
+        return;
+    }
+
     while (*entry_ptr != NULL)
     {
         entry = *entry_ptr;

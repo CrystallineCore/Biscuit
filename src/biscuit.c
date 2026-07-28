@@ -46,15 +46,17 @@
  * BiscuitIndex is built (or rebuilt) synchronously and kept in the
  * session-scoped cache (biscuit_cache.c). All durable state now lives
  * in the index relation's own pages (directory + compacted-blob +
- * pending-list, see biscuit_persist.c), so it is normally cleaned up
- * for free whenever the relation's storage is dropped. The one thing
- * we still register an object_access_hook for is proactively freeing
- * those pages' chains (biscuit_persist_drop()) and evicting the
- * process-local cache entry before that happens, since nothing in the
- * core AM callback table (ambuild/aminsert/ambulkdelete/
- * amvacuumcleanup) is invoked on DROP INDEX or on the "drop the old
- * index" step of REINDEX CONCURRENTLY. See biscuit_object_access_hook()
- * below.
+ * pending-list, see biscuit_persist.c), so it is cleaned up for free
+ * whenever the relation's storage is dropped -- core unlinks the whole
+ * relfilenode at commit, and every page we own lives inside it.
+ *
+ * The only thing we still register an object_access_hook for is
+ * evicting the process-local cache entry, since nothing in the core AM
+ * callback table (ambuild/aminsert/ambulkdelete/amvacuumcleanup) is
+ * invoked on DROP INDEX or on the "drop the old index" step of REINDEX
+ * CONCURRENTLY. It deliberately does NOT free any pages: see
+ * biscuit_object_access_hook() below for why that was actively
+ * destructive.
  * ================================================================ */
 
 /*
@@ -93,11 +95,51 @@ static object_access_hook_type prev_object_access_hook = NULL;
  * This covers both DROP INDEX (direct call with the dropped index's
  * OID) and REINDEX CONCURRENTLY (which builds a new index under a new
  * OID, swaps relfilenodes, then drops the old index under its
- * original OID -- so the old index's directory/blob/pending-list
- * pages are cleaned up here too). Plain REINDEX keeps the same index
- * OID and goes back through biscuit_build(), which naturally
- * overwrites the existing directory entries in place, so there's
- * nothing extra to do for that case.
+ * original OID). Plain REINDEX keeps the same index OID and goes back
+ * through biscuit_build(), which naturally overwrites the existing
+ * directory entries in place, so there's nothing extra to do for that
+ * case.
+ *
+ * WHY THIS HOOK MUST NOT FREE PAGES
+ * ---------------------------------
+ * This hook used to also call biscuit_persist_drop(objectId) to free
+ * the index's directory/blob/pending-list chains. That was a data-loss
+ * bug, because OAT_DROP fires when the DROP statement *executes* --
+ * inside the still-open transaction, before commit -- while the two
+ * halves of a drop unwind on abort in opposite ways:
+ *
+ *   - Core's DROP INDEX is transactional. On ROLLBACK the pg_class row
+ *     comes back and the relfilenode is never unlinked (unlink is
+ *     deferred to commit), so the index is immediately live and
+ *     planner-visible again.
+ *
+ *   - biscuit_persist_drop()'s page frees are NOT transactional. They
+ *     go through GenericXLog, which is durable against crash but is
+ *     never undone by abort.
+ *
+ * So "BEGIN; DROP INDEX foo; ROLLBACK;" restored the catalog entry on
+ * top of storage whose directory and blob chains had already been
+ * retired, with the cache entry evicted too. The next query then hit
+ * biscuit_load_index() -> biscuit_persist_load() -> NULL and raised
+ * "no on-disk snapshot found", permanently, with no from-heap rebuild
+ * path to recover through. Only REINDEX could bring the index back.
+ *
+ * The frees were also redundant on the success path: every page biscuit
+ * owns lives inside the index's own relfilenode, which core unlinks
+ * wholesale at commit for both DROP INDEX and the drop half of REINDEX
+ * CONCURRENTLY. So the call bought nothing on commit and destroyed the
+ * index on abort. It is removed rather than deferred to a PRE_COMMIT
+ * xact callback, since a PRE_COMMIT version would only be doing work
+ * that core is about to make irrelevant.
+ *
+ * biscuit_persist_drop() itself is left in place in biscuit_persist.c
+ * for callers that own a relation whose storage will outlive the drop
+ * (there are none today); it must never be reached from a path that a
+ * ROLLBACK can rewind.
+ *
+ * Evicting the cache here remains correct and safe: it is likewise not
+ * undone by abort, but the worst case is a cache miss that reloads the
+ * (still fully intact) durable state from disk.
  */
 static void
 biscuit_object_access_hook(ObjectAccessType access, Oid classId,
@@ -121,9 +163,15 @@ biscuit_object_access_hook(ObjectAccessType access, Oid classId,
             if (relform->relkind == RELKIND_INDEX &&
                 relform->relam == biscuit_get_am_oid())
             {
+                /*
+                 * Cache eviction only. Do NOT free durable pages here --
+                 * see this function's header comment. Core unlinks the
+                 * relfilenode (and with it every page we own) at commit,
+                 * and anything we retire now survives a ROLLBACK that
+                 * brings the catalog entry back.
+                 */
                 biscuit_cache_remove(objectId);
-                biscuit_persist_drop(objectId);
-                elog(DEBUG1, "Biscuit: Freed directory/blob/pending-list pages for dropped index %u",
+                elog(DEBUG1, "Biscuit: Evicted cache entry for dropped index %u (durable pages left to core)",
                      objectId);
             }
         }
