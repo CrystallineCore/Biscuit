@@ -320,6 +320,22 @@ typedef struct PendLogSnapshotSlot
 {
     BiscuitPendLogSnapshot *snap;   /* NULL == empty slot */
     uint64                  lru;    /* higher == more recently used */
+
+    /*
+     * meta->pendlog_draining as observed when this slot's snapshot was
+     * last (re)built. total_drains alone does not distinguish "a drain
+     * just detached the log, draining now points at it" from "that same
+     * drain finished its merge, draining is Invalid again" -- both can
+     * be observed under the same total_drains value, since
+     * pendlog_clear_draining() does not bump the counter. Comparing this
+     * against the freshly-read pendlog_draining is what lets
+     * biscuit_pendlog_snapshot() notice the transition and rebuild
+     * instead of serving a snapshot that silently drops the abandoned
+     * chain's deltas once they've been merged into the blobs (or, in the
+     * other direction, keeps re-ingesting a chain that no longer needs
+     * it -- harmless but wasteful).
+     */
+    BlockNumber              built_at_draining;
 } PendLogSnapshotSlot;
 
 static PendLogSnapshotSlot snapshot_cache[BISCUIT_PENDLOG_SNAPSHOT_SLOTS];
@@ -349,7 +365,8 @@ pendlog_slot_clear(PendLogSnapshotSlot *slot)
         MemoryContextDelete(slot->snap->cxt);
         slot->snap = NULL;
     }
-    slot->lru = 0;
+    slot->lru               = 0;
+    slot->built_at_draining = InvalidBlockNumber;
 }
 
 void
@@ -406,6 +423,7 @@ biscuit_pendlog_snapshot(Relation index)
     BiscuitMetaPageData    *meta;
     BlockNumber             head;
     BlockNumber             tail;
+    BlockNumber             draining;
     uint64                  count;
     uint64                  drains;
     uint32                  npages;
@@ -419,11 +437,12 @@ biscuit_pendlog_snapshot(Relation index)
 
     mbuf = ReadBuffer(index, BISCUIT_METAPAGE_BLKNO);
     LockBuffer(mbuf, BUFFER_LOCK_SHARE);
-    meta   = (BiscuitMetaPageData *) PageGetSpecialPointer(BufferGetPage(mbuf));
-    head   = meta->pendlog_head;
-    tail   = meta->pendlog_tail;
-    npages = meta->pendlog_npages;
-    drains = meta->total_drains;
+    meta     = (BiscuitMetaPageData *) PageGetSpecialPointer(BufferGetPage(mbuf));
+    head     = meta->pendlog_head;
+    tail     = meta->pendlog_tail;
+    npages   = meta->pendlog_npages;
+    drains   = meta->total_drains;
+    draining = meta->pendlog_draining;
     UnlockReleaseBuffer(mbuf);
 
     /*
@@ -459,9 +478,25 @@ biscuit_pendlog_snapshot(Relation index)
         UnlockReleaseBuffer(tbuf);
     }
 
-    /* Empty log: the fully-drained steady state. No hash, no allocation,
-     * and callers skip reconciliation entirely. */
-    if (head == InvalidBlockNumber || count == 0)
+    /*
+     * Empty steady state: nothing in the live log AND no abandoned drain
+     * chain left over from an interrupted merge. Only then can callers
+     * skip reconciliation entirely.
+     *
+     * The old check here was "head == InvalidBlockNumber || count == 0".
+     * head/tail/npages are all reset to Invalid/0 by pendlog_detach() in
+     * the SAME transaction that publishes meta->pendlog_draining, so the
+     * instant a drain detaches the log, head is Invalid and count is 0 --
+     * indistinguishable, under the old check, from "fully drained,
+     * nothing pending". Every query landing between that detach and the
+     * matching pendlog_clear_draining() (a crash or a PITR/replica stop
+     * anywhere in that window makes it permanent) took the early return
+     * and silently treated an unmerged chain's deltas as absent. See the
+     * fix in biscuit_pendlog_drain_all(), which already re-ingests this
+     * same "abandoned" chain (there called `abandoned`) for exactly this
+     * reason -- this is the read-path counterpart of that.
+     */
+    if (head == InvalidBlockNumber && draining == InvalidBlockNumber)
     {
         biscuit_pendlog_invalidate(indexoid);
         return NULL;
@@ -473,11 +508,31 @@ biscuit_pendlog_snapshot(Relation index)
         snap = slot->snap;
 
         /*
-         * Same drain cycle, so everything already ingested is still valid:
-         * the log is append-only within a cycle, existing pages are
-         * immutable, and only the tail's record count grows.
+         * Same drain cycle AND the same draining chain (or lack of one).
+         *
+         * total_drains alone is not enough: it is bumped once, by
+         * pendlog_detach(), at the *start* of a drain. It is NOT bumped
+         * again when pendlog_clear_draining() clears the marker at the
+         * *end* of that same drain's merge. So "draining went from H to
+         * Invalid because the merge finished and its deltas are now in
+         * the blobs" and "draining is still H because nothing happened"
+         * are two different, non-idempotent-to-conflate states that can
+         * both be observed at the same total_drains value. Comparing
+         * built_at_draining catches the transition either way:
+         *   - H -> Invalid: the chain we ingested is now redundant with
+         *     the blobs; still correct to keep applying (replay is
+         *     idempotent) but not safe to treat as "nothing changed"
+         *     forever, since a *later* transition (see next point) must
+         *     still be caught.
+         *   - Invalid -> H': a new drain started (and possibly finished)
+         *     entirely within one total_drains-unchanged window is not
+         *     actually possible (detach always bumps total_drains), so
+         *     the only real transition here is H -> Invalid; the check
+         *     is kept symmetric because it costs nothing and does not
+         *     rely on that invariant holding forever.
          */
-        if (snap->built_at_drains == drains)
+        if (snap->built_at_drains == drains &&
+            slot->built_at_draining == draining)
         {
             slot->lru = ++snapshot_lru_clock;
 
@@ -500,7 +555,7 @@ biscuit_pendlog_snapshot(Relation index)
             return snap;
         }
 
-        /* A drain happened: the blobs absorbed these deltas. Start over. */
+        /* A drain (or a drain's completion) happened: start over. */
         pendlog_slot_clear(slot);
     }
 
@@ -523,11 +578,23 @@ biscuit_pendlog_snapshot(Relation index)
     snap->htab = hash_create("biscuit pendlog", 256, &ctl,
                               HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
-    pendlog_ingest_from(index, snap, head, 0);
+    /*
+     * Ingest the abandoned chain (if any) BEFORE the live head, matching
+     * the order biscuit_pendlog_drain_all() uses at its own two
+     * pendlog_ingest_from() calls -- so a key that appears in both chains
+     * replays in original append order and ends up with the same final
+     * state a completed drain would have produced.
+     */
+    if (draining != InvalidBlockNumber && draining != head)
+        pendlog_ingest_from(index, snap, draining, 0);
 
-    slot       = pendlog_slot_acquire();
-    slot->snap = snap;
-    slot->lru  = ++snapshot_lru_clock;
+    if (head != InvalidBlockNumber)
+        pendlog_ingest_from(index, snap, head, 0);
+
+    slot                    = pendlog_slot_acquire();
+    slot->snap              = snap;
+    slot->lru               = ++snapshot_lru_clock;
+    slot->built_at_draining = draining;
 
     return snap;
 }
