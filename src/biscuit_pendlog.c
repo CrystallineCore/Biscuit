@@ -964,17 +964,35 @@ biscuit_pendlog_drain_all(Relation index, bool wait)
             pfree(buf);
         biscuit_roaring_free(bm);
 
-        if (entry.blob_head != InvalidBlockNumber)
-            biscuit_page_free_blob(index, entry.blob_head);
-
         /*
+         * Repoint the directory at the new blob BEFORE freeing the old
+         * one. biscuit_page_free_blob() doesn't just mark old pages dead:
+         * biscuit_retire_page_locked() repurposes each freed page's
+         * opaque->next as a freelist link, overwriting the real
+         * chunk-chain pointer. Freeing the old chain first left a window
+         * where the directory still pointed at it while its "next" links
+         * had already been rewritten into the freelist, so a concurrent
+         * (or even later, same-drain) reader following the still-stale
+         * blob_head would walk off into recycled pages -- exactly the
+         * "blob chunk chain inconsistency" corruption reproduced above.
+         * Updating the directory first means any reader from here on sees
+         * either the old, still-intact chain or the new one -- never one
+         * mid-retirement.
+         *
          * blob_head is the only field a bitmap-kind entry owns; there is
          * no per-entry pending state left to reset (the detached chain is
          * freed below) and strheap_* belongs to STRCACHE, which never
          * appears in this log. Leave everything else exactly as found.
          */
-        entry.blob_head = newhead;
-        biscuit_dir_update(index, &ref, &entry);
+        {
+            BlockNumber oldhead = entry.blob_head;
+
+            entry.blob_head = newhead;
+            biscuit_dir_update(index, &ref, &entry);
+
+            if (oldhead != InvalidBlockNumber)
+                biscuit_page_free_blob(index, oldhead);
+        }
 
         drained++;
     }
