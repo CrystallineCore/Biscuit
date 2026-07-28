@@ -200,25 +200,20 @@ biscuit_rescan_multicolumn(IndexScanDesc scan,
              * only one of the two structure sets only ever has the
              * matching array populated.
              */
-            ColumnIndex   *pred_col    = &so->index->column_indices[pred->column_index];
+            ColumnIndex   *pred_col = &so->index->column_indices[pred->column_index];
             RoaringBitmap *all;
-            RoaringBitmap **ge_arr = pred_is_ilike ? pred_col->length_ge_bitmaps_lower
-                                                    : pred_col->length_ge_bitmaps;
-            if (ge_arr && ge_arr[0])
-            {
-                all = biscuit_roaring_copy(ge_arr[0]);
-            }
-            else
-            {
-                all = biscuit_roaring_create();
-#ifdef HAVE_ROARING
-                roaring_bitmap_add_range(all, 0, so->index->num_records);
-#else
-                int j;
-                for (j = 0; j < so->index->num_records; j++)
-                    biscuit_roaring_add(all, j);
-#endif
-            }
+
+            /*
+             * Reconciled against the shared pending log -- reading
+             * length_ge_bitmaps[0] raw here (as this did) silently drops
+             * every row whose membership is still undrained, which after
+             * freelist reuse meant every recycled row vanished from the
+             * complement. See biscuit_get_negation_base_set().
+             */
+            all = biscuit_get_negation_base_set(scan->indexRelation, pred_col,
+                                                 pred->column_index, pred_is_ilike,
+                                                 so->index->num_records);
+
             if (so->index->tombstone_count > 0 && so->index->tombstones)
                 biscuit_roaring_andnot_inplace(all, so->index->tombstones);
             biscuit_roaring_andnot_inplace(all, col_result);
@@ -386,22 +381,12 @@ biscuit_rescan(IndexScanDesc scan,
                      */
                     bool           is_ilike_strategy = (key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
                     RoaringBitmap *all;
-                    RoaringBitmap **ge_arr = is_ilike_strategy ? so->index->length_ge_bitmaps_lower
-                                                                : so->index->length_ge_bitmaps_legacy;
-                    int j;
-                    if (ge_arr && ge_arr[0])
-                    {
-                        all = biscuit_roaring_copy(ge_arr[0]);
-                    }
-                    else
-                    {
-                        all = biscuit_roaring_create();
-                        for (j = 0; j < so->index->num_records; j++)
-                        {
-                            if (so->index->data_cache[j])
-                                biscuit_roaring_add(all, j);
-                        }
-                    }
+
+                    /* Reconciled -- see biscuit_get_negation_base_set(). */
+                    all = biscuit_get_negation_base_set_legacy(scan->indexRelation,
+                                                                so->index,
+                                                                is_ilike_strategy);
+
                     if (so->index->tombstone_count > 0 && so->index->tombstones)
                         biscuit_roaring_andnot_inplace(all, so->index->tombstones);
                     biscuit_roaring_andnot_inplace(all, key_result);

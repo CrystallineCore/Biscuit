@@ -1,44 +1,43 @@
 /*
  * biscuit_blob.h
  *
- * WAL-logged page storage primitives: compacted-blob chunk chain I/O and
- * pending-delta list append/drain.  See the design doc ("Biscuit WAL-Logged
- * Storage: Pending-List Design") for the full picture; this header covers
- * exactly the two on-disk components it describes in §1 -- nothing about
- * the directory (§5), the per-structure size trigger (§3's *decision* to
- * drain), or the delete fan-out (Round 4) lives here.  Callers own that
- * layer; these are the primitives it will be built on.
+ * WAL-logged page storage primitives: chunked compacted-blob chain I/O
+ * plus the shared page allocator/retirement machinery every other
+ * on-disk structure in Biscuit is built on.
  *
- * Scope of this phase, deliberately:
+ * What lives here:
  *   - biscuit_page_write_blob() / biscuit_page_read_blob(): chunked,
  *     GenericXLog-wrapped compacted-blob chain I/O, FSM-integrated
  *     free/truncate of a superseded chain.
- *   - biscuit_pending_append(): single small GenericXLog-registered write
- *     per call, appending one BiscuitPendingRecord to a pending chain's
- *     tail page, allocating a new tail page only when required.
- *   - biscuit_pending_drain(): apply every pending record to a caller-
- *     supplied in-memory RoaringBitmap, optionally re-serialize it as a
- *     new compacted-blob chain, and free the drained pending chain (and,
- *     if a blob rewrite was requested, the superseded blob chain) back to
- *     Biscuit's own recycle_xid-gated freelist.
+ *   - biscuit_page_alloc() / biscuit_page_free_blob(): page allocation
+ *     from, and retirement to, Biscuit's own recycle_xid-gated freelist.
+ *     Used by biscuit_dir.c, biscuit_pendlog.c and biscuit_rowstore.c for
+ *     their own page kinds, not just by the blob chain.
+ *   - biscuit_ensure_synchronous_commit(): forces xid assignment so
+ *     GenericXLogFinish() gets a synchronous commit rather than silently
+ *     taking the async path. Every durable mutation path calls this.
  *
- * Explicitly NOT in scope here (future phases, per the design doc):
- *   - BiscuitDirEntry lookup/insert/update (§5).
- *   - The §3 size-threshold *decision* to call biscuit_pending_drain() --
- *     that belongs to the CRUD call sites in biscuit_index.c, which this
- *     phase does not touch.
- *   - biscuit_delete_record_and_free_slot() and the multi-structure lock
- *     ordering it requires (Round 4) -- single-structure primitives only.
- *   - biscuit_persist.c and any CRUD call sites -- untouched in this phase.
+ * Explicitly NOT here:
+ *   - BiscuitDirEntry lookup/insert/update -- biscuit_dir.h.
+ *   - The pending-delta log, its append path, its read-time snapshot and
+ *     its drain -- biscuit_pendlog.h. Note that the per-structure pending
+ *     chain primitives that used to live in this file
+ *     (biscuit_pending_append(), biscuit_pending_append_with_dir(),
+ *     biscuit_pending_drain(), and the BiscuitDrainStats they reported
+ *     through) are GONE, along with the BISCUIT_PAGE_PENDING page format
+ *     itself. They were superseded by the single index-wide shared log in
+ *     biscuit_pendlog.c and were dead code by the time they were removed;
+ *     see biscuit_pendlog.h's header for why the shared log replaced them.
+ *   - The in-place row-identity storage (TIDS/STRCACHE/HEADER) --
+ *     biscuit_rowstore.h.
  *
- * Locking (§6): callers that need cross-structure coordination (e.g. the
- * future directory layer) are responsible for whatever directory-entry
- * lock protects BiscuitDirEntry.pending_tail / blob_head; these primitives
- * only take the page-level buffer locks they need for their own chain
- * mutation, nested exactly as §6 specifies for append (page-exclusive
- * lock held across the head/tail pointer update) and for drain (exclusive
- * across the full page set touched by that one structure's critical
- * section).
+ * Locking: these primitives take only the page-level buffer locks they
+ * need for their own chain mutation. Callers needing cross-structure
+ * coordination own that themselves. The one ordering rule imposed here is
+ * biscuit_page_alloc()'s: it takes the metapage lock internally, so no
+ * caller may hold the metapage lock across a call into it (see
+ * biscuit_pendlog_append()'s locking comment, which cost a self-deadlock
+ * to get right).
  */
 
 #ifndef BISCUIT_BLOB_H
@@ -153,7 +152,7 @@ extern void biscuit_page_read_blob(Relation index,
  *
  * This performs its own small GenericXLog transaction per retired page
  * (each page's opaque area plus the metapage's fsm_root/fsm_page_count
- * link-in), matching the granularity biscuit_pending_free_chain() (below)
+ * link-in), matching the granularity biscuit_page_free_blob() (below)
  * uses for the same reason.
  */
 extern void biscuit_page_free_blob(Relation index, BlockNumber head);
@@ -164,9 +163,9 @@ extern void biscuit_page_free_blob(Relation index, BlockNumber head);
  * Alias for biscuit_page_free_blob() under a name that doesn't imply
  * "blob chains only" -- the retirement walk (biscuit_free_chain() in
  * biscuit_blob.c) never inspects page_kind, so it works identically on a
- * pending chain, a directory chain, or a blob chain. Callers outside this
+ * pendlog chain, a directory chain, or a blob chain. Callers outside this
  * file that are retiring a non-blob chain (e.g. the directory layer
- * freeing a drained pending chain, or a whole BISCUIT_PAGE_DIR chain on
+ * freeing a drained pendlog chain, or a whole BISCUIT_PAGE_DIR chain on
  * index drop) should call this name instead, purely for readability at
  * the call site.
  */
@@ -187,7 +186,7 @@ extern void biscuit_page_free_chain(Relation index, BlockNumber head);
  * This is the counterpart to biscuit_page_free_blob()/_free_chain(): use
  * it at every allocation site that used to call
  * ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL) for a
- * blob chunk, pending-chain, or directory page, EXCEPT where the caller
+ * blob chunk, pendlog, or directory page, EXCEPT where the caller
  * already holds the metapage buffer lock itself (this function acquires
  * that lock internally to peek/pop the freelist, so calling it while
  * already holding that same lock will self-deadlock -- see
@@ -199,139 +198,5 @@ extern void biscuit_page_free_chain(Relation index, BlockNumber head);
  * ordering rationale relative to the retirement path.
  */
 extern Buffer biscuit_page_alloc(Relation index, uint16 page_kind);
-
-/* ==================== PENDING-DELTA LIST CHAIN ==================== */
-
-/*
- * biscuit_pending_append
- *
- * Append one (value, op) delta to the pending chain identified by
- * *head / *tail, allocating the chain's first page (if *head is
- * InvalidBlockNumber) or a new tail page (if the current tail is full).
- * *head and *tail are both in/out: the caller (the future directory
- * layer) owns persisting BiscuitDirEntry.pending_head/pending_tail after
- * this call returns -- this primitive only tells you what they became,
- * it does not itself update any directory page, since the directory
- * doesn't exist yet in this phase (see file header "Scope").
- *
- * This is the hot path (§2: every CRUD mutation touching a structure's
- * bitmap does exactly this, and a single row's fan-out is on the order of
- * 2 * strlen(value) calls), so it is deliberately a single small
- * GenericXLog transaction registering only the one page being mutated
- * (§6's WAL-logging decision, "Addressing review feedback" point 3/4) --
- * never the metapage, never another structure's pages. Locking follows
- * §6's nested pattern exactly: the tail page's BUFFER_LOCK_EXCLUSIVE is
- * acquired first and space is re-checked *under* that lock (not before
- * it), so two backends racing to append to the same now-full page
- * serialize on that page's lock and the second one re-checks against the
- * (by-then-already-extended) page rather than acting on a stale
- * observation -- this closes the concurrent tail-allocation race the
- * design doc's Round 1 review flagged. If a new tail page is allocated,
- * it is linked via the old tail's opaque.next and *this function's own
- * exclusive lock on the old tail page is held across that step*, matching
- * §6's requirement that the old page's lock not be released until the
- * new page is fully linked.
- *
- * bytes_written, if non-NULL, is set to sizeof(BiscuitPendingRecord) plus
- * (when a new page was allocated) the page-header overhead -- Phase 5
- * drain-threshold-sizing instrumentation, per the append side of the
- * requested instrumentation.
- */
-extern void biscuit_pending_append(Relation index,
-                                    BlockNumber *head,
-                                    BlockNumber *tail,
-                                    uint32 value,
-                                    uint8 op,
-                                    uint32 *bytes_written);
-
-/*
- * BiscuitDrainStats
- * Instrumentation filled in by biscuit_pending_drain() -- the data Phase 5
- * uses to size pending_list_limit / autovacuum drain cadence.
- */
-typedef struct BiscuitDrainStats
-{
-    uint32 records_drained;        /* pending records applied to target   */
-    uint32 pending_pages_freed;    /* pending-chain pages retired         */
-    uint32 blob_bytes_written;     /* bytes of newly-written compacted
-                                     * blob, 0 if no rewrite was requested */
-    uint32 old_blob_pages_freed;   /* superseded blob-chain pages retired */
-} BiscuitDrainStats;
-
-/*
- * biscuit_pending_drain
- *
- * Apply every record in the pending chain rooted at `pending_head`, in
- * chain order, to `target` via the existing biscuit_roaring_add()/
- * biscuit_roaring_remove() (§3 step 2: no new mutation logic). The caller
- * is responsible for having already decoded the structure's *old*
- * compacted blob (if any) into `target` before calling this (e.g. via
- * biscuit_page_read_blob() + the existing roaring deserialize path) --
- * this function only ever appends deltas on top of whatever `target`
- * already holds, it never reads the blob chain itself.
- *
- * If do_blob_rewrite is true, this additionally performs §3 steps 3-5 as
- * one operation: re-serializes `target` (now fully merged) into a brand
- * new compacted-blob chain via biscuit_page_write_blob(), retires the
- * chain previously pointed at by *blob_head via biscuit_page_free_blob(),
- * and updates *blob_head to the new chain's head. It also then retires
- * the drained pending chain's own pages (biscuit_page_free_blob()-
- * equivalent handling internally) and resets *head_inout* tail_inout to
- * InvalidBlockNumber -- it is the caller's job to persist that into the
- * directory's pending_head/pending_tail/pending_count/pending_bytes.
- *
- * If do_blob_rewrite is false, this call is entirely non-destructive:
- * *blob_head, *head_inout, and *tail_inout are all left exactly as
- * passed in, and the pending chain's pages are NOT retired -- only
- * `target` is mutated (in memory), via the same per-record application
- * described above. This is the read-time reconciliation path (Phase 1
- * Contract §3 / biscuit_pattern.c's biscuit_reconcile_pending()): a scan
- * needs the union of a structure's compacted blob and its pending
- * records, but must not consume those pending records on some other
- * backend's behalf, or a later real drain (do_blob_rewrite = true, from
- * the opportunistic per-structure threshold check or
- * biscuit_vacuumcleanup()'s unconditional pass) would have nothing left
- * to fold into the compacted blob even though it was never actually
- * written there. Concurrent do_blob_rewrite=false readers of the same
- * pending chain are therefore safe to run arbitrarily many times without
- * coordinating with each other -- each one independently re-walks the
- * same still-intact chain.
- *
- * stats, if non-NULL, is filled in with counts for Phase 5 sizing. When
- * do_blob_rewrite is false, stats->pending_pages_freed and
- * stats->old_blob_pages_freed are both 0 (nothing was retired) and
- * stats->blob_bytes_written is 0 (nothing was rewritten); only
- * stats->records_drained reflects real work (how many pending records
- * were applied to `target`).
- *
- * Crash safety: pending-record application to `target` is a pure
- * in-memory operation (no WAL, nothing durable yet). The durable part is
- * the optional blob rewrite and the two chains' retirement, each done
- * under its own critical section exactly like biscuit_page_write_blob()/
- * biscuit_page_free_blob() already guarantee individually. This means a
- * crash between "blob rewritten" and "pending chain retired" is possible
- * and is safe by construction: the pending chain, if the crash happens
- * before its retirement lands, is simply drained *again* on the next
- * attempt (idempotent -- reapplying the same ADD/REMOVE sequence to a
- * *freshly re-read* old blob yields the same result, since target is
- * never partially written back until the new blob chain's
- * GenericXLogFinish() has completed). A crash before the blob rewrite
- * lands leaves the old blob + full pending chain untouched, which is
- * exactly "drain didn't happen yet" -- also safe. There is no window
- * where a reader can observe a new blob with the pending records it came
- * from still also applied on top of it a second time from a *stale*
- * directory entry, because the directory's blob_head/pending_head swing
- * (making either of those states externally visible) is the future
- * directory layer's responsibility, entered only after this function
- * returns successfully -- see file header "Scope".
- */
-extern void biscuit_pending_drain(Relation index,
-                                   BlockNumber pending_head,
-                                   BlockNumber *head_inout,
-                                   BlockNumber *tail_inout,
-                                   BlockNumber *blob_head,
-                                   bool do_blob_rewrite,
-                                   RoaringBitmap *target,
-                                   BiscuitDrainStats *stats);
 
 #endif /* BISCUIT_BLOB_H */

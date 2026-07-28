@@ -27,10 +27,12 @@
  * in-memory content as a compacted blob (biscuit_page_write_blob()),
  * freeing whatever blob chain previously occupied that directory entry.
  * biscuit_persist_load() does the reverse: one pass over every directory
- * entry a column's chain holds, decoding each one's blob (and merging in
- * any pending deltas -- see biscuit_persist_merge_pending() below; dead
- * code for now since nothing appends to a pending chain yet, but correct
- * once CRUD wiring lands) back into the right BiscuitIndex field.
+ * entry a column's chain holds, decoding each one's blob back into the
+ * right BiscuitIndex field. Note it decodes the *compacted* blob only:
+ * undrained deltas live in the index-wide shared log (biscuit_pendlog.c)
+ * and are applied per-statement by the read path, not folded in here --
+ * the log keeps growing after a load completes, so a load-time merge
+ * would be both wrong and pointless.
  *
  * The rest of BiscuitIndex's persistent state that isn't a
  * RoaringBitmap-per-(ch,position) structure at all -- the tid array, the
@@ -74,6 +76,14 @@
 #include "biscuit_bitmap.h"
 #include "biscuit_blob.h"
 #include "biscuit_dir.h"
+#include "biscuit_pendlog.h"
+#include "biscuit_rowstore.h"   /* in-place TIDS/STRCACHE/HEADER I/O --
+                                  * see biscuit_rowstore.h's file header for
+                                  * why HEADER/TIDS/STRCACHE moved off the
+                                  * biscuit_page_write_blob()/_read_blob()
+                                  * whole-rewrite path used below for
+                                  * everything else (POS/NEG/CACHE/LEN/
+                                  * LEN_GE/TOMBSTONES/FREELIST) */
 #include "biscuit_persist.h"
 #include "biscuit_index.h"   /* for biscuit_get_column_case_mode() /
                                * biscuit_read_metadata_from_disk() */
@@ -128,20 +138,14 @@ static void pbuf_put_i32(PBuf *b, int32 v)  { pbuf_put(b, &v, sizeof(v)); }
 static void pbuf_put_i64(PBuf *b, int64 v)  { pbuf_put(b, &v, sizeof(v)); }
 static void pbuf_put_u32(PBuf *b, uint32 v) { pbuf_put(b, &v, sizeof(v)); }
 
-static void
-pbuf_put_str(PBuf *b, const char *s)
-{
-    if (!s)
-    {
-        pbuf_put_i32(b, -1);
-        return;
-    }
-    {
-        int32 len = (int32) strlen(s);
-        pbuf_put_i32(b, len);
-        pbuf_put(b, s, len);
-    }
-}
+/*
+ * The length-prefixed string put/get pair that used to live here
+ * (pbuf_put_str/pcur_get_str) is gone: its only callers were the STRCACHE
+ * whole-array save/load, which concatenated every record's string into one
+ * blob. STRCACHE is now stored per-slot via biscuit_rowstore.c (pointer
+ * array + value heap), so nothing length-prefixes strings into a PBuf
+ * anymore. The remaining PBuf/PCur helpers still serve the HEADER blob.
+ */
 
 typedef struct
 {
@@ -179,29 +183,6 @@ static int64
 pcur_get_i64(PCur *c) { int64 v = 0; pcur_get(c, &v, sizeof(v)); return v; }
 static uint32
 pcur_get_u32(PCur *c) { uint32 v = 0; pcur_get(c, &v, sizeof(v)); return v; }
-
-static char *
-pcur_get_str(PCur *c, MemoryContext cxt)
-{
-    int32         len = pcur_get_i32(c);
-    char         *s;
-    MemoryContext old;
-
-    if (c->error || len < 0)
-        return NULL;
-
-    old = MemoryContextSwitchTo(cxt);
-    s   = (char *) palloc(len + 1);
-    MemoryContextSwitchTo(old);
-
-    if (!pcur_get(c, s, len))
-    {
-        pfree(s);
-        return NULL;
-    }
-    s[len] = '\0';
-    return s;
-}
 
 /* ================================================================
  * Generic per-structure directory+blob write/read.
@@ -256,17 +237,8 @@ biscuit_persist_write_raw(Relation index,
     if (new_head == InvalidBlockNumber)
         return;   /* nothing to persist, nothing existed before */
 
-    memset(&newentry, 0, sizeof(newentry));
-    newentry.col           = (int16) col;
-    newentry.is_lower      = is_lower;
-    newentry.kind          = kind;
-    newentry.ch            = ch;
-    newentry.position       = position;
-    newentry.blob_head      = new_head;
-    newentry.pending_head   = InvalidBlockNumber;
-    newentry.pending_tail   = InvalidBlockNumber;
-    newentry.pending_count  = 0;
-    newentry.pending_bytes  = 0;
+    BiscuitDirEntryInit(&newentry, col, is_lower, kind, ch, position);
+    newentry.blob_head = new_head;
 
     biscuit_dir_insert(index, &newentry, NULL);
 }
@@ -289,60 +261,112 @@ biscuit_persist_write_bitmap(Relation index,
         pfree(buf);
 }
 
+/* Forward declaration: defined further down alongside biscuit_persist_save_strcache()
+ * (its build-time bulk-path sibling), but biscuit_persist_row_identity_write_record()
+ * below needs it too and is declared first to sit next to biscuit_persist_write_tid(). */
+static void biscuit_persist_row_identity_write_str(Relation index, int32 col, bool is_lower,
+                                                     uint32 slot_idx, const char *str);
+
+/* ================================================================
+ * HEADER / TIDS -- directory-aware wrappers around biscuit_rowstore.c's
+ * in-place primitives. Both kinds have exactly one directory entry each
+ * (BISCUIT_DIR_COL_SINGLETON), so "find-or-create the entry, write
+ * through the rowstore, persist blob_head if it moved" is the whole
+ * pattern -- mirrors biscuit_persist_row_identity_write_str() above for
+ * STRCACHE's (col, is_lower)-keyed entries.
+ * ================================================================ */
+
+static void
+biscuit_persist_write_header_blob(Relation index, const char *data, uint32 len)
+{
+    BiscuitDirEntry    entry;
+    BiscuitDirEntryRef ref;
+    BlockNumber        head;
+
+    if (!biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_HEADER,
+                           -1, -1, &entry, &ref))
+    {
+        BiscuitDirEntryInit(&entry, BISCUIT_DIR_COL_SINGLETON, false,
+                             BISCUIT_DIR_KIND_HEADER, -1, -1);
+        biscuit_dir_insert(index, &entry, &ref);
+    }
+
+    head = entry.blob_head;
+    biscuit_rowstore_header_write(index, &head, data, len);
+
+    if (head != entry.blob_head)
+    {
+        entry.blob_head = head;
+        biscuit_dir_update(index, &ref, &entry);
+    }
+}
+
 /*
- * biscuit_persist_merge_pending
- *
- * Read-only walk of a pending chain, applying every record to `target`
- * via the existing biscuit_roaring_add()/_remove() -- the design doc §4
- * merge-at-scan strategy, applied here to give biscuit_persist_load() the
- * same correctness guarantee a live scan would have. Deliberately NOT
- * biscuit_pending_drain(): that function is destructive (frees the
- * pending chain and optionally rewrites the blob), which is exactly wrong
- * for a read -- per §4, "a scan never triggers a drain". This duplicates
- * the small read-loop portion of biscuit_pending_drain()'s walk rather
- * than exposing a new non-destructive primitive from biscuit_blob.h,
- * since that file's exported contract wasn't part of this phase's scope.
- *
- * Dead code in practice as of this phase: nothing yet appends to a
- * pending chain (that's future CRUD call-site wiring), so every
- * directory entry's pending_head is InvalidBlockNumber and this is never
- * actually invoked with real records. Implemented now anyway so
- * biscuit_persist_load() is correct the moment that wiring lands, rather
- * than silently ignoring pending deltas until someone remembers to add
- * this.
+ * biscuit_persist_write_tid
+ * Find-or-create the singleton TIDS directory entry, then durably write
+ * one slot. Shared by the build-time bulk path (biscuit_persist_save(),
+ * looping once per record) and the steady-state per-row entry point
+ * (biscuit_persist_row_identity_write_record()).
  */
 static void
-biscuit_persist_merge_pending(Relation index, BlockNumber pending_head, RoaringBitmap *target)
+biscuit_persist_write_tid(Relation index, uint32 slot_idx, const ItemPointerData *tid)
 {
-    BlockNumber cur = pending_head;
+    BiscuitDirEntry    entry;
+    BiscuitDirEntryRef ref;
+    BlockNumber        pagedir_root;
 
-    while (cur != InvalidBlockNumber)
+    if (!biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_TIDS,
+                           -1, -1, &entry, &ref))
     {
-        Buffer                     buf = ReadBuffer(index, cur);
-        Page                       page;
-        BiscuitPendingPageHeader  *hdr;
-        BiscuitPendingRecord      *rec;
-        BiscuitPageOpaque          opaque;
-        BlockNumber                next;
-        uint32                     i;
+        /* blob_head is the pagedir root for this kind; no value heap. */
+        BiscuitDirEntryInit(&entry, BISCUIT_DIR_COL_SINGLETON, false,
+                             BISCUIT_DIR_KIND_TIDS, -1, -1);
+        biscuit_dir_insert(index, &entry, &ref);
+    }
 
-        LockBuffer(buf, BUFFER_LOCK_SHARE);
-        page = BufferGetPage(buf);
-        hdr  = (BiscuitPendingPageHeader *) ((char *) page + SizeOfPageHeaderData);
-        rec  = (BiscuitPendingRecord *) ((char *) hdr + MAXALIGN(sizeof(BiscuitPendingPageHeader)));
+    pagedir_root = entry.blob_head;
+    biscuit_rowstore_tid_write(index, &pagedir_root, slot_idx, tid);
 
-        for (i = 0; i < hdr->num_records; i++)
+    if (pagedir_root != entry.blob_head)
+    {
+        entry.blob_head = pagedir_root;
+        biscuit_dir_update(index, &ref, &entry);
+    }
+}
+
+/*
+ * biscuit_persist_row_identity_write_record
+ * Public entry point (biscuit_persist.h) for the steady-state per-row
+ * durability write: one TIDS slot plus every (column, is_lower) STRCACHE
+ * slot for record slot_idx, all from idx's current in-memory state.
+ */
+void
+biscuit_persist_row_identity_write_record(Relation index, BiscuitIndex *idx, uint32 slot_idx)
+{
+    biscuit_persist_write_tid(index, slot_idx, &idx->tids[slot_idx]);
+
+    if (idx->num_columns == 1)
+    {
+        biscuit_persist_row_identity_write_str(index, BISCUIT_DIR_COL_LEGACY, false,
+                                                slot_idx,
+                                                idx->data_cache ? idx->data_cache[slot_idx] : NULL);
+        biscuit_persist_row_identity_write_str(index, BISCUIT_DIR_COL_LEGACY, true,
+                                                slot_idx,
+                                                idx->data_cache_lower ? idx->data_cache_lower[slot_idx] : NULL);
+    }
+    else
+    {
+        int col;
+
+        for (col = 0; col < idx->num_columns; col++)
         {
-            if (rec[i].op == BISCUIT_PENDING_OP_ADD)
-                biscuit_roaring_add(target, rec[i].value);
-            else if (rec[i].op == BISCUIT_PENDING_OP_REMOVE)
-                biscuit_roaring_remove(target, rec[i].value);
+            biscuit_persist_row_identity_write_str(index, col, false, slot_idx,
+                                                    idx->column_data_cache[col] ?
+                                                        idx->column_data_cache[col][slot_idx] : NULL);
+            biscuit_persist_row_identity_write_str(index, col, true, slot_idx,
+                                                    idx->column_data_cache_lower[col] ?
+                                                        idx->column_data_cache_lower[col][slot_idx] : NULL);
         }
-
-        opaque = (BiscuitPageOpaque) PageGetSpecialPointer(page);
-        next   = opaque->next;
-        UnlockReleaseBuffer(buf);
-        cur = next;
     }
 }
 
@@ -379,13 +403,16 @@ biscuit_persist_decode_entry(Relation index, const BiscuitDirEntry *entry)
             pfree(data);
     }
 
-    if (entry->pending_head != InvalidBlockNumber)
-    {
-        if (!bm)
-            bm = biscuit_roaring_create();
-        biscuit_persist_merge_pending(index, entry->pending_head, bm);
-    }
-
+    /*
+     * No pending-chain merge here any more. Bitmap kinds no longer own a
+     * per-structure pending chain at all -- undrained deltas live in the
+     * index-wide shared log (biscuit_pendlog.c) and are applied by the
+     * read path via biscuit_pendlog_snapshot()/_apply(), not at load time.
+     * This function therefore returns the *compacted* bitmap only, which
+     * is exactly what the caller wants to cache: reconciliation against
+     * the log happens per-statement on read, because the log keeps growing
+     * after this load completes.
+     */
     return bm;
 }
 
@@ -422,29 +449,67 @@ biscuit_persist_save_length_arrays(Relation index, int32 col, bool is_lower,
     }
 }
 
+/*
+ * biscuit_persist_row_identity_write_str
+ *
+ * Find-or-create the (col, is_lower) STRCACHE directory entry, then write
+ * slot_idx's string into it via biscuit_rowstore_str_write(). Shared by
+ * both the build-time bulk path (biscuit_persist_save_strcache() below,
+ * called once per record) and the steady-state per-row entry point
+ * (biscuit_persist_row_identity_write_record()) -- there is exactly one
+ * way to durably write a STRCACHE slot, regardless of which caller needed
+ * it written.
+ */
+static void
+biscuit_persist_row_identity_write_str(Relation index, int32 col, bool is_lower,
+                                        uint32 slot_idx, const char *str)
+{
+    BiscuitDirEntry     entry;
+    BiscuitDirEntryRef  ref;
+    BlockNumber         ptr_root, heap_head, heap_tail;
+    bool                changed;
+
+    if (!biscuit_dir_find(index, col, is_lower, BISCUIT_DIR_KIND_STRCACHE, -1, -1, &entry, &ref))
+    {
+        /* blob_head = ptr-array pagedir root; strheap_* = value heap. */
+        BiscuitDirEntryInit(&entry, col, is_lower,
+                             BISCUIT_DIR_KIND_STRCACHE, -1, -1);
+        biscuit_dir_insert(index, &entry, &ref);
+    }
+
+    ptr_root  = entry.blob_head;
+    heap_head = entry.strheap_head;
+    heap_tail = entry.strheap_tail;
+
+    biscuit_rowstore_str_write(index, &ptr_root, &heap_head, &heap_tail,
+                                slot_idx, str, str ? (int32) strlen(str) : -1);
+
+    changed = (ptr_root != entry.blob_head ||
+               heap_head != entry.strheap_head ||
+               heap_tail != entry.strheap_tail);
+
+    if (changed)
+    {
+        entry.blob_head    = ptr_root;
+        entry.strheap_head = heap_head;
+        entry.strheap_tail = heap_tail;
+        biscuit_dir_update(index, &ref, &entry);
+    }
+}
+
 static void
 biscuit_persist_save_strcache(Relation index, int32 col,
                                char **cache, char **cache_lower, int num_records)
 {
-    PBuf b1, b2;
-    int  i;
-
-    pbuf_init(&b1);
-    pbuf_init(&b2);
+    int i;
 
     for (i = 0; i < num_records; i++)
     {
-        pbuf_put_str(&b1, cache ? cache[i] : NULL);
-        pbuf_put_str(&b2, cache_lower ? cache_lower[i] : NULL);
+        biscuit_persist_row_identity_write_str(index, col, false, (uint32) i,
+                                                cache ? cache[i] : NULL);
+        biscuit_persist_row_identity_write_str(index, col, true, (uint32) i,
+                                                cache_lower ? cache_lower[i] : NULL);
     }
-
-    biscuit_persist_write_raw(index, col, false, BISCUIT_DIR_KIND_STRCACHE, -1, -1,
-                               b1.len ? b1.data : NULL, (uint32) b1.len);
-    biscuit_persist_write_raw(index, col, true, BISCUIT_DIR_KIND_STRCACHE, -1, -1,
-                               b2.len ? b2.data : NULL, (uint32) b2.len);
-
-    pfree(b1.data);
-    pfree(b2.data);
 }
 
 /* ================================================================
@@ -486,16 +551,12 @@ biscuit_persist_save(Oid indexoid, BiscuitIndex *idx)
             }
         }
 
-        biscuit_persist_write_raw(index, BISCUIT_DIR_COL_SINGLETON, false,
-                                   BISCUIT_DIR_KIND_HEADER, -1, -1,
-                                   header.data, (uint32) header.len);
+        biscuit_persist_write_header_blob(index, header.data, (uint32) header.len);
         pfree(header.data);
 
         /* ---- tids ---- */
-        biscuit_persist_write_raw(index, BISCUIT_DIR_COL_SINGLETON, false,
-                                   BISCUIT_DIR_KIND_TIDS, -1, -1,
-                                   idx->num_records > 0 ? (const char *) idx->tids : NULL,
-                                   (uint32) (idx->num_records * sizeof(ItemPointerData)));
+        for (i = 0; i < idx->num_records; i++)
+            biscuit_persist_write_tid(index, (uint32) i, &idx->tids[i]);
 
         /* ---- tombstones ---- */
         biscuit_persist_write_bitmap(index, BISCUIT_DIR_COL_SINGLETON, false,
@@ -611,28 +672,29 @@ biscuit_persist_save(Oid indexoid, BiscuitIndex *idx)
 /*
  * biscuit_persist_save_row_identity
  *
- * Re-persist ONLY the whole-blob "row identity" structures that a
- * steady-state INSERT/DELETE mutates: the HEADER (num_records, capacity,
- * counters), the TIDS array (slot -> heap ItemPointer), the TOMBSTONES
- * bitmap, the FREELIST, and the per-column STRCACHE.
+ * As of the in-place row-identity rewrite (biscuit_rowstore.c): re-persists
+ * the HEADER (scalar bookkeeping -- num_records, capacity, counters, ...),
+ * the TOMBSTONES bitmap, and the
+ * FREELIST. TIDS and the per-column STRCACHE are deliberately NOT written
+ * here anymore -- see biscuit_persist.h's comment on this function and on
+ * biscuit_persist_row_identity_write_record() for why: they are now made
+ * durable incrementally, one slot at a time, at the exact row-mutation
+ * call sites in biscuit_index.c, instead of being rewritten wholesale
+ * here on every commit (the O(num_records)-per-commit root cause the
+ * "Biscuit Row-Identity In-Place Storage" implementation summary measured
+ * and fixed).
  *
- * Why this exists (and why it is separate from biscuit_persist_save):
- * the bitmap structures (POS/NEG/CACHE/LEN/LEN_GE) are already made
- * durable incrementally by biscuit_pending_mutate_structure()'s
- * per-mutation pending-list appends, so a cold load reconstructs them
- * from blob+pending. The row-identity structures have NO such incremental
- * mechanism -- they were written only by the build-time biscuit_persist_save().
- * That left a gap: after any steady-state insert, a cold load in another
- * backend rebuilt num_records/tids[] from the stale build-time snapshot,
- * so the inserted rows' bitmap slots had no TID to map to and were
- * invisible. This function closes that gap by re-writing exactly those
- * structures (and nothing else -- rewriting the bitmaps here would be
- * redundant with the pending lists and needlessly expensive).
+ * HEADER is now a single in-place page write (biscuit_rowstore_header_write())
+ * rather than a chain reallocation, so this whole function is O(1) in
+ * num_records, not O(num_records) -- it no longer needs (and doesn't get)
+ * any special "don't call this per row" caveat; the existing once-per-
+ * statement deferred-flush call sites in biscuit_index.c are kept simply
+ * because there's no reason to write the header more often than that, not
+ * because doing so would be expensive.
  *
- * Cost note: this rewrites O(num_records) bytes (TIDS + STRCACHE) per
- * call. Callers that run it once per statement (not once per row -- see
- * biscuit_insert()'s end-of-call site) keep amortized cost linear in the
- * number of rows inserted by that statement.
+ * TOMBSTONES/FREELIST are unchanged from before this phase -- both are
+ * already proportional to deleted-row count rather than total table size,
+ * so they were never the cost problem this phase targets.
  *
  * Takes a live Relation (already open) rather than an Oid, because every
  * caller (biscuit_insert/biscuit_bulkdelete) already holds one.
@@ -669,16 +731,8 @@ biscuit_persist_save_row_identity(Relation index, BiscuitIndex *idx)
             }
         }
 
-        biscuit_persist_write_raw(index, BISCUIT_DIR_COL_SINGLETON, false,
-                                   BISCUIT_DIR_KIND_HEADER, -1, -1,
-                                   header.data, (uint32) header.len);
+        biscuit_persist_write_header_blob(index, header.data, (uint32) header.len);
         pfree(header.data);
-
-        /* ---- tids ---- */
-        biscuit_persist_write_raw(index, BISCUIT_DIR_COL_SINGLETON, false,
-                                   BISCUIT_DIR_KIND_TIDS, -1, -1,
-                                   idx->num_records > 0 ? (const char *) idx->tids : NULL,
-                                   (uint32) (idx->num_records * sizeof(ItemPointerData)));
 
         /* ---- tombstones ---- */
         biscuit_persist_write_bitmap(index, BISCUIT_DIR_COL_SINGLETON, false,
@@ -690,24 +744,6 @@ biscuit_persist_save_row_identity(Relation index, BiscuitIndex *idx)
                                    BISCUIT_DIR_KIND_FREELIST, -1, -1,
                                    idx->free_count > 0 ? (const char *) idx->free_list : NULL,
                                    (uint32) (idx->free_count * sizeof(uint32_t)));
-
-        /* ---- string cache(s) ---- */
-        if (idx->num_columns == 1)
-        {
-            biscuit_persist_save_strcache(index, BISCUIT_DIR_COL_LEGACY,
-                                           idx->data_cache, idx->data_cache_lower,
-                                           idx->num_records);
-        }
-        else
-        {
-            int col;
-
-            for (col = 0; col < idx->num_columns; col++)
-                biscuit_persist_save_strcache(index, col,
-                                               idx->column_data_cache[col],
-                                               idx->column_data_cache_lower[col],
-                                               idx->num_records);
-        }
     }
     PG_CATCH();
     {
@@ -718,7 +754,7 @@ biscuit_persist_save_row_identity(Relation index, BiscuitIndex *idx)
     }
     PG_END_TRY();
 
-    elog(DEBUG1, "biscuit: re-saved row-identity structures for index %u (%d records, gen " UINT64_FORMAT ")",
+    elog(DEBUG1, "biscuit: re-saved header/tombstones/freelist for index %u (%d records, gen " UINT64_FORMAT ")",
          indexoid, idx->num_records, idx->gen);
 }
 
@@ -861,10 +897,6 @@ biscuit_persist_load_strcache(Relation index, int32 col, bool is_lower,
 {
     BiscuitDirEntry entry;
     char          **arr;
-    char           *data;
-    uint32          len;
-    PCur            cur;
-    int             i;
 
     /* Width follows capacity (>= num_records, enforced by the header
      * validation in biscuit_persist_load); Max(...,1) keeps a 0-capacity
@@ -875,21 +907,30 @@ biscuit_persist_load_strcache(Relation index, int32 col, bool is_lower,
         return arr;   /* nothing saved yet -- all-NULL array, matches absent cache */
 
     if (entry.blob_head == InvalidBlockNumber)
-        return arr;
+        return arr;   /* pointer-array page directory never allocated */
 
-    biscuit_page_read_blob(index, entry.blob_head, &data, &len);
-    pcur_init(&cur, data, len);
-
-    for (i = 0; i < num_records; i++)
-        arr[i] = pcur_get_str(&cur, CacheMemoryContext);
-
-    if (data)
-        pfree(data);
-
-    if (cur.error)
-        ereport(ERROR,
-                (errmsg("biscuit: truncated string-cache blob for index %u (col=%d is_lower=%d)",
-                        RelationGetRelid(index), col, (int) is_lower)));
+    /*
+     * entry.blob_head is the pointer-array page-directory root (see
+     * biscuit_common.h's "Field repurposing" comment), not a concatenated
+     * length-prefixed blob as it was before the in-place rewrite.
+     *
+     * Read via the bulk path rather than a per-slot loop: reading slots
+     * individually re-walks the page directory and re-reads the STRPTR
+     * page for every record, which measured ~1.8x slower on cold load than
+     * the single-blob read this replaced.
+     * biscuit_rowstore_str_read_all() walks the directory once and reuses
+     * the value-heap buffer across consecutive slots (the heap is
+     * bump-allocated in slot order, so runs of slots share a page).
+     *
+     * A slot that comes back NULL is either an explicitly-NULL entry or
+     * one whose logical page was never allocated. Those are
+     * indistinguishable here and identical in effect -- both leave the
+     * palloc0'd NULL in place, exactly as the old length-prefixed
+     * NULL encoding did -- so, unlike the old single-blob read, there is
+     * no truncation condition to detect and no error to raise.
+     */
+    biscuit_rowstore_str_read_all(index, entry.blob_head, (uint32) num_records,
+                                   CacheMemoryContext, arr);
 
     return arr;
 }
@@ -969,7 +1010,9 @@ biscuit_persist_load(Relation index)
         uint64  live_gen;
         int     unused_records, unused_columns, unused_max_len;
 
-        biscuit_page_read_blob(index, header_entry.blob_head, &hdata, &hlen);
+        /* HEADER lives on a single in-place page now, not a blob chain --
+         * see biscuit_common.h's "Field repurposing" comment. */
+        biscuit_rowstore_header_read(index, header_entry.blob_head, &hdata, &hlen);
         pcur_init(&hcur, hdata, hlen);
 
         idx = (BiscuitIndex *) palloc0(sizeof(BiscuitIndex));
@@ -1039,24 +1082,31 @@ biscuit_persist_load(Relation index)
             pfree(hdata);
 
         /* ---- tids ---- */
-        idx->tids = (ItemPointerData *) palloc(idx->capacity * sizeof(ItemPointerData));
+        idx->tids = (ItemPointerData *) palloc0(idx->capacity * sizeof(ItemPointerData));
         if (idx->num_records > 0)
         {
             BiscuitDirEntry tids_entry;
-            char           *tdata;
-            uint32          tlen;
 
             if (!biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_TIDS,
                                    -1, -1, &tids_entry, NULL) ||
                 tids_entry.blob_head == InvalidBlockNumber)
                 ereport(ERROR, (errmsg("biscuit: missing tid array for index %u", indexoid)));
 
-            biscuit_page_read_blob(index, tids_entry.blob_head, &tdata, &tlen);
-            if (tlen != (uint32) (idx->num_records * sizeof(ItemPointerData)))
-                ereport(ERROR, (errmsg("biscuit: tid array size mismatch for index %u", indexoid)));
-            memcpy(idx->tids, tdata, tlen);
-            if (tdata)
-                pfree(tdata);
+            /*
+             * tids_entry.blob_head is the TIDS page-directory root now, not
+             * a blob chain -- see biscuit_common.h's "Field repurposing"
+             * comment. The old explicit "tlen != num_records * sizeof(...)"
+             * check is subsumed by biscuit_rowstore_tid_read_all(), which
+             * ERRORs if the directory doesn't cover num_records slots.
+             *
+             * Note idx->tids is palloc0'd (was plain palloc): the read fills
+             * exactly [0, num_records), and the tail [num_records, capacity)
+             * must start zeroed the same way a freshly-built index's does,
+             * since the steady-state insert path writes into that tail
+             * without initializing it first.
+             */
+            biscuit_rowstore_tid_read_all(index, tids_entry.blob_head,
+                                           (uint32) idx->num_records, idx->tids);
         }
 
         /* ---- tombstones ---- */
@@ -1221,10 +1271,42 @@ biscuit_persist_drop_walk_cb(const BiscuitDirEntry *entry, void *vstate)
 {
     DropWalkState *st = (DropWalkState *) vstate;
 
+    /*
+     * TIDS/STRCACHE/HEADER don't own a plain compacted-blob chain -- their
+     * blob_head/strheap_* fields address the in-place row-identity
+     * structures instead (see BiscuitDirEntry's per-kind field table in
+     * biscuit_common.h), so freeing them as if they were blob chains would
+     * retire only the *directory* pages and orphan every
+     * TIDSLOT/STRPTR/STRHEAP page hanging off them. Route each kind to the
+     * teardown helper that actually knows its page graph.
+     */
+    switch (entry->kind)
+    {
+        case BISCUIT_DIR_KIND_TIDS:
+            biscuit_rowstore_free_tid_chain(st->index, entry->blob_head);
+            return;
+
+        case BISCUIT_DIR_KIND_STRCACHE:
+            biscuit_rowstore_free_str_chains(st->index, entry->blob_head,
+                                              entry->strheap_head);
+            return;
+
+        case BISCUIT_DIR_KIND_HEADER:
+            biscuit_rowstore_free_header(st->index, entry->blob_head);
+            return;
+
+        default:
+            break;
+    }
+
+    /*
+     * Everything else (the bitmap kinds and FREELIST) owns exactly one
+     * compacted-blob chain and no value heap. There is no pending chain to
+     * free: undrained deltas for these kinds live in the shared log, which
+     * biscuit_pendlog_free_chain() retires separately as a whole.
+     */
     if (entry->blob_head != InvalidBlockNumber)
         biscuit_page_free_blob(st->index, entry->blob_head);
-    if (entry->pending_head != InvalidBlockNumber)
-        biscuit_page_free_chain(st->index, entry->pending_head);
 }
 
 void
@@ -1249,7 +1331,12 @@ biscuit_persist_drop(Oid indexoid)
             biscuit_dir_foreach_column(index, slot, biscuit_persist_drop_walk_cb, &st);
         }
 
-        biscuit_dir_drop_all(index);
+        /* Retire the shared pending log too -- biscuit_dir_drop_all() only
+     * knows about BISCUIT_PAGE_DIR pages, and the log is rooted in the
+     * metapage, not in any directory entry. */
+    biscuit_pendlog_free_chain(index);
+
+    biscuit_dir_drop_all(index);
     }
     PG_CATCH();
     {

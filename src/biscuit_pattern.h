@@ -75,6 +75,27 @@ extern RoaringBitmap *biscuit_get_col_neg_bitmap_lower(Relation index, ColumnInd
 extern void           biscuit_set_col_pos_bitmap_lower(ColumnIndex *col, unsigned char ch, int pos, RoaringBitmap *bm);
 extern void           biscuit_set_col_neg_bitmap_lower(ColumnIndex *col, unsigned char ch, int neg_offset, RoaringBitmap *bm);
 
+/*
+ * biscuit_get_negation_base_set
+ * The reconciled "all non-null indexed rows of this column" set that
+ * NOT LIKE / NOT ILIKE inverts against. Caller owns the result.
+ *
+ * Use this rather than reading col->length_ge_bitmaps[0] directly: the raw
+ * array is not reconciled against the shared pending log, and mixing an
+ * unreconciled base set with a reconciled subtrahend silently drops every
+ * row whose membership is still undrained. See the implementation comment
+ * for the freelist-reuse failure this fixed.
+ */
+extern RoaringBitmap *biscuit_get_negation_base_set(Relation index,
+                                                     ColumnIndex *col,
+                                                     int col_idx,
+                                                     bool is_lower,
+                                                     int num_records);
+
+extern RoaringBitmap *biscuit_get_negation_base_set_legacy(Relation index,
+                                                            BiscuitIndex *idx,
+                                                            bool is_lower);
+
 /* ==================== PATTERN PARSING ==================== */
 
 extern ParsedPattern *biscuit_parse_pattern(const char *pattern);

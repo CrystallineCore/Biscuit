@@ -31,7 +31,7 @@
  *
  * What this layer does NOT own: the §3 size-threshold drain decision, any
  * CRUD call-site wiring, or anything about what a BiscuitDirEntry's
- * blob_head/pending_head chains actually contain -- that's
+ * blob_head chain actually contains -- that's
  * biscuit_blob.c's and (for whole-structure save/load) biscuit_persist.c's
  * job.
  */
@@ -149,7 +149,7 @@ extern int biscuit_dir_num_slots(Relation index);
  * (does NOT free the blob/pending chains the entries point at -- callers
  * that need "free everything a whole index owns" must walk the directory
  * with biscuit_dir_foreach_column() *before* calling this, freeing each
- * entry's blob_head/pending_head chains themselves, since this function
+ * entry's blob_head/strheap_* chains themselves, since this function
  * only knows about BISCUIT_PAGE_DIR pages). Resets every dir_roots[] slot
  * to InvalidBlockNumber and num_dir_columns to 0 in the metapage.
  */

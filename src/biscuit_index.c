@@ -10,22 +10,36 @@
 #include "biscuit_utf8.h"
 #include "biscuit_cache.h"
 #include "biscuit_index.h"
-#include "biscuit_blob.h"   /* biscuit_pending_append/_drain, biscuit_page_*_blob --
-                              * see "Biscuit WAL-Logged Storage: Phase 1 Contract" */
+#include "utils/spccache.h"   /* get_tablespace_page_costs() -- cost model */
+#include "biscuit_blob.h"   /* biscuit_page_write_blob() -- the per-structure
+                              * pending-chain primitives this used to need are
+                              * gone; see biscuit_pendlog.h */
 #include "biscuit_dir.h"    /* biscuit_dir_find/_insert/_update, BiscuitDirEntry */
+#include "biscuit_pendlog.h" /* shared index-wide pending log: replaced the
+                              * per-structure pending chains on the write path */
 #include "access/xact.h"    /* RegisterXactCallback, XACT_EVENT_* */
 
 /* ================================================================
- * SECTION 0b – Deferred row-identity flush
+ * SECTION 0b – Deferred header/tombstone/freelist flush
  * ================================================================
  *
  * A steady-state INSERT/DELETE must eventually re-persist its index's
- * whole-blob "row identity" structures (TIDS/HEADER/STRCACHE/...), which
- * have no incremental pending mechanism (see
- * biscuit_persist_save_row_identity()). Doing that per row would be
- * O(n^2) for a bulk insert, so instead each mutating call marks its index
- * OID dirty here, and a single pre-commit xact callback flushes every
- * dirty index exactly once -- O(num_records) per index per transaction.
+ * HEADER blob (num_records, capacity, the insert/update/delete counters),
+ * its tombstone bitmap and its free list. Those are index-wide scalars
+ * rather than per-row data: every row in a statement would write the same
+ * content, so each mutating call just marks its index OID dirty here and a
+ * single pre-commit xact callback flushes every dirty index exactly once.
+ *
+ * Scope note: TIDS and STRCACHE used to go through this path too, and it
+ * was load-bearing then -- they were whole-array blob rewrites, so doing
+ * one per row would have been O(n^2) for a bulk insert. That is no longer
+ * the case: both are now written per-row, in place, at the mutation site
+ * (biscuit_persist_row_identity_write_record(), called from
+ * biscuit_insert()), and biscuit_persist_save_row_identity() no longer
+ * touches them at all. What remains here is O(1) per flush, so this
+ * machinery is now a redundancy-avoidance measure rather than a
+ * complexity-class fix -- worth keeping (writing the same header once per
+ * row is pure waste) but no longer a correctness-critical amortization.
  *
  * The dirty set is a tiny process-local array of OIDs (an index can only
  * appear once). It lives in TopTransactionContext-independent static
@@ -251,11 +265,14 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
     BlockNumber prev_dir_roots[BISCUIT_MAX_DIR_COLUMNS];
     int32       prev_num_dir_columns;
     BlockNumber prev_fsm_root;
+    BlockNumber prev_pendlog_head, prev_pendlog_tail;
+    BlockNumber prev_pendlog_draining;
+    uint32      prev_pendlog_npages;
     uint32      prev_fsm_page_count;
     uint32      prev_pending_list_limit;
     uint64      prev_total_pending_bytes;
     uint64      prev_total_drains;
-    uint32      prev_reserved[6];
+    uint32      prev_reserved[5];
 
     /*
      * Decide whether the current page already holds a real biscuit
@@ -292,6 +309,10 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
             prev_pending_list_limit   = old->pending_list_limit;
             prev_total_pending_bytes  = old->total_pending_bytes;
             prev_total_drains         = old->total_drains;
+            prev_pendlog_head         = old->pendlog_head;
+            prev_pendlog_tail         = old->pendlog_tail;
+            prev_pendlog_npages       = old->pendlog_npages;
+            prev_pendlog_draining     = old->pendlog_draining;
             memcpy(prev_reserved, old->reserved, sizeof(prev_reserved));
             goto have_prev_values;
         }
@@ -306,6 +327,24 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
     prev_pending_list_limit  = BISCUIT_DEFAULT_PENDING_LIST_LIMIT;
     prev_total_pending_bytes = 0;
     prev_total_drains        = 0;
+    /*
+     * MUST be InvalidBlockNumber, not 0. A zero-filled metapage special
+     * area leaves these at 0, which is a perfectly valid-looking block
+     * number -- and block 0 is the metapage itself. The shared-log append
+     * path then reads the metapage as if it were a log page, decides the
+     * "tail" is full, and tries to lock block 0 while already holding it,
+     * self-deadlocking on the buffer content lock on an index's very first
+     * insert. Defaulting these explicitly is the fix.
+     */
+    prev_pendlog_head        = InvalidBlockNumber;
+    prev_pendlog_tail        = InvalidBlockNumber;
+    prev_pendlog_npages      = 0;
+    /*
+     * Same reasoning as pendlog_head/tail above: a zeroed BlockNumber is
+     * block 0, the metapage itself, and a later drain would read it as an
+     * abandoned log chain.
+     */
+    prev_pendlog_draining    = InvalidBlockNumber;
     memset(prev_reserved, 0, sizeof(prev_reserved));
 
 have_prev_values:
@@ -327,6 +366,10 @@ have_prev_values:
     meta->pending_list_limit  = prev_pending_list_limit;
     meta->total_pending_bytes = prev_total_pending_bytes;
     meta->total_drains        = prev_total_drains;
+    meta->pendlog_head        = prev_pendlog_head;
+    meta->pendlog_tail        = prev_pendlog_tail;
+    meta->pendlog_npages      = prev_pendlog_npages;
+    meta->pendlog_draining    = prev_pendlog_draining;
     memcpy(meta->reserved, prev_reserved, sizeof(meta->reserved));
 
     GenericXLogFinish(state);
@@ -444,18 +487,17 @@ biscuit_pop_free_slot(BiscuitIndex *idx, uint32_t *slot)
 }
 
 /* ================================================================
- * SECTION 2b – Pending-list mutation contract
+ * SECTION 2b – Shared-log mutation contract
  * ================================================================
  *
- * See "Biscuit WAL-Logged Storage: Phase 1 Contract" §1-§2. Every
- * steady-state (post-build) CRUD mutation against a bitmap-shaped
+ * Every steady-state (post-build) CRUD mutation against a bitmap-shaped
  * structure goes through biscuit_pending_mutate_structure() below,
  * which is the *only* place outside biscuit_build()/biscuit_load_index()
- * and biscuit_pending_drain() itself that a structure's durable state
- * changes. It never decodes/re-encodes the compacted blob except when
- * the opportunistic per-structure threshold (§2a) is crossed, in which
- * case it drains through the existing biscuit_pending_drain() primitive
- * exactly as VACUUM's unconditional pass does (biscuit_vacuumcleanup()).
+ * and biscuit_pendlog_drain_all() itself that a structure's durable state
+ * changes. It never decodes/re-encodes the compacted blob except when the
+ * shared log has grown past BISCUIT_PENDLOG_DRAIN_PAGES, in which case it
+ * drains the whole log through biscuit_pendlog_drain_all() exactly as
+ * VACUUM's unconditional pass does (biscuit_vacuumcleanup()).
  *
  * This does NOT touch the in-memory RoaringBitmap* cache on
  * BiscuitIndex/ColumnIndex/CharIndex -- callers (biscuit_index_single_record,
@@ -572,34 +614,23 @@ biscuit_read_pending_list_limit(Relation index)
  * sites (here and biscuit_vacuumcleanup()) don't repeat the
  * read-then-deserialize pair.
  */
-static RoaringBitmap *
-biscuit_load_blob_bitmap(Relation index, BlockNumber blob_head)
-{
-    char          *buf;
-    uint32         len;
-    RoaringBitmap *rb;
-
-    if (blob_head == InvalidBlockNumber)
-        return biscuit_roaring_create();
-
-    biscuit_page_read_blob(index, blob_head, &buf, &len);
-    rb = biscuit_roaring_deserialize(buf, len);
-    if (buf)
-        pfree(buf);
-    return rb;
-}
+/*
+ * biscuit_load_blob_bitmap was removed: its only callers were the
+ * per-structure pending-drain paths, which the shared pending log
+ * replaced. biscuit_pendlog_drain_all() does the equivalent
+ * read-blob-and-deserialize inline, once per structure per drain.
+ */
 
 /*
  * biscuit_pending_mutate_structure
  *
  * Durable half of one bitmap mutation for structure (col, is_lower,
- * kind, ch, position): appends one BiscuitPendingRecord for
- * (rec_idx, op), bumps the directory entry's pending_count/pending_bytes,
- * and -- per Phase 1 Contract §2a -- opportunistically drains that one
- * structure if its pending chain has now crossed pending_list_limit
- * bytes. Creates the directory entry on first-ever mutation for this
- * structure (blob_head/pending_head/pending_tail all InvalidBlockNumber,
- * counters zero).
+ * kind, ch, position): appends one BiscuitPendLogRecord for
+ * (rec_idx, op) into the index-wide shared log, and opportunistically
+ * drains the whole log if it has grown past BISCUIT_PENDLOG_DRAIN_PAGES.
+ * Does NOT touch the directory at all: the record is self-describing, so
+ * a structure need not even have a directory entry yet. Entries are
+ * created lazily at drain time (biscuit_pendlog_drain_all()).
  *
  * col uses the same addressing biscuit_dir_slot_for_col() expects
  * elsewhere: -1 for the legacy single-column layout, 0-based column
@@ -612,74 +643,64 @@ biscuit_pending_mutate_structure(Relation index,
                                   uint32 rec_idx, uint8 op,
                                   uint32 pending_list_limit)
 {
-    BiscuitDirEntry     entry;
-    BiscuitDirEntryRef  ref;
-    uint32              bytes_written = 0;
+    uint64 pendlog_bytes;
 
-    if (!biscuit_dir_find(index, col, is_lower, kind, ch, position, &entry, &ref))
-    {
-        memset(&entry, 0, sizeof(entry));
-        entry.col           = (int16) col;
-        entry.is_lower      = is_lower;
-        entry.kind          = kind;
-        entry.ch            = ch;
-        entry.position      = position;
-        entry.blob_head     = InvalidBlockNumber;
-        entry.pending_head  = InvalidBlockNumber;
-        entry.pending_tail  = InvalidBlockNumber;
-        entry.pending_count = 0;
-        entry.pending_bytes = 0;
-
-        biscuit_dir_insert(index, &entry, &ref);
-    }
-
-    biscuit_pending_append(index, &entry.pending_head, &entry.pending_tail,
-                            rec_idx, op, &bytes_written);
-
-    entry.pending_count++;
-    entry.pending_bytes += bytes_written;
-
-    biscuit_dir_update(index, &ref, &entry);
-
-    {
     /*
-     * Proportional drain threshold (write-amplification fix).
+     * One self-describing append to the index-wide shared log
+     * (biscuit_pendlog.c). No biscuit_dir_find(), no biscuit_dir_insert(),
+     * no biscuit_dir_update() -- the record carries its own structure
+     * identity, so this path never touches the directory at all. Directory
+     * entries are created lazily at drain time for whichever structures
+     * actually appear in the log.
      *
-     * A drain rewrites the WHOLE compacted blob (biscuit_pending_drain ->
-     * biscuit_roaring_serialize of the full merged bitmap). With a fixed
-     * pending_list_limit, a size-B structure was rewritten every ~64KB of
-     * pending, so the amortized WAL cost of a single-row insert grew O(B)
-     * i.e. linearly with the index size -- measured at ~119KB/row on a 35MB
-     * index climbing to ~1.5MB/row on a 700MB index.
-     *
-     * Scaling the threshold with the current blob size makes the number of
-     * rows between drains proportional to B, so each byte inserted pays a
-     * bounded, ~constant amount of rewrite work (write amplification ~2-3x)
-     * and per-row WAL stays flat as the index grows. The pending_list_limit
-     * stays as a floor for small structures.
+     * What this replaced: a per-structure pending chain, so a row touching
+     * K structures dirtied ~K distinct pages, and PostgreSQL charges a
+     * full-page image per distinct page per checkpoint interval. Now all K
+     * records land on the same log tail page, so the FPI bill stops
+     * scaling with K.
      */
-    uint32 eff_limit = pending_list_limit;
-    if (entry.blob_bytes / 2 > eff_limit)
-        eff_limit = entry.blob_bytes / 2;
+    pendlog_bytes = biscuit_pendlog_append(index, col, is_lower, kind,
+                                            ch, position, rec_idx, op);
 
-    if (entry.pending_bytes > eff_limit)
-    {
-        RoaringBitmap     *target = biscuit_load_blob_bitmap(index, entry.blob_head);
-        BiscuitDrainStats  stats;
+    /*
+     * Opportunistic drain trigger -- tuned for OLAP, kept sane for OLTP.
+     *
+     * A drain re-serializes the compacted blob of EVERY structure the log
+     * touched, so its cost is proportional to index size, not to how much
+     * is pending. Draining every pending_list_limit bytes therefore makes
+     * a bulk load quadratic: (N/limit) drains x O(index size) each. That
+     * is the same shape as the O(n)-per-commit bug the row-identity work
+     * removed, and reintroducing it here through the back door would be a
+     * poor trade.
+     *
+     * So the threshold is deliberately generous:
+     *
+     *   - OLAP (the priority): bulk loads and read-mostly workloads. A big
+     *     log costs almost nothing here. Reads pay a single snapshot hash
+     *     build per statement (biscuit_pendlog_snapshot()), amortized over
+     *     a scan that touches many structures, and VACUUM does the real
+     *     draining. Rare, large drains are exactly right.
+     *
+     *   - OLTP (kept reasonable, not optimized): the ceiling bounds how
+     *     much a cold reader must replay before its first query, and how
+     *     much memory one snapshot costs. BISCUIT_PENDLOG_DRAIN_PAGES caps
+     *     it at a few MB, so worst-case snapshot build stays in the
+     *     milliseconds rather than growing without limit until someone
+     *     runs VACUUM.
+     *
+     * pending_list_limit is intentionally NOT consulted: it is a
+     * per-structure figure (64KB-ish) from the old design, and applying a
+     * per-structure number to a whole-index log is what made the first
+     * version of this drain fire constantly.
+     */
+    if (pendlog_bytes > (uint64) BISCUIT_PENDLOG_DRAIN_PAGES * BLCKSZ)
+        biscuit_pendlog_drain_all(index, false);   /* opportunistic: skip if
+                                                    * another backend is
+                                                    * already draining */
 
-        biscuit_pending_drain(index, entry.pending_head,
-                               &entry.pending_head, &entry.pending_tail,
-                               &entry.blob_head, /* do_blob_rewrite = */ true,
-                               target, &stats);
-
-        entry.pending_count = 0;
-        entry.pending_bytes = 0;
-        entry.blob_bytes    = stats.blob_bytes_written;  /* remember size for next threshold */
-        biscuit_dir_update(index, &ref, &entry);
-
-        biscuit_roaring_free(target);
-    }
-    }
+    (void) pending_list_limit;   /* retained in the signature for the
+                                   * statement-cached-read contract in
+                                   * biscuit_index.h; no longer the trigger */
 }
 
 /*
@@ -1820,18 +1841,18 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
          * rewritten as a bulk loader"). Every biscuit_index_single_record()/
          * biscuit_index_column_record() call above was invoked with
          * index == NULL, so the full in-memory structure set built above
-         * never touched the pending list at all -- only biscuit_persist_save()
+         * never touched the shared log at all -- only biscuit_persist_save()
          * below writes anything durable, and it writes straight to each
          * structure's compacted-blob chain (biscuit_persist_write_raw() ->
          * biscuit_page_write_blob(), see biscuit_persist.c) rather than
-         * going through biscuit_pending_append()/biscuit_pending_drain().
+         * going through the shared log and its drain.
          * This is deliberate and safe specifically because build runs with
          * no concurrent readers of this not-yet-visible index to reconcile
          * against -- the read-time merge machinery in biscuit_pattern.c
          * (Phase 1 Contract §3) exists to let a *different* backend see a
-         * structure's undrained pending records; a brand-new index has no
+         * structure's undrained log records; a brand-new index has no
          * "different backend" that could have observed a half-built state,
-         * so there is nothing to reconcile and the pending list would be
+         * so there is nothing to reconcile and the log would be
          * pure overhead here. Separate from the num_records-only metapage
          * write above. This write is no longer best-effort: biscuit_load_index()
          * has no from-heap rebuild fallback, so a failed/skipped snapshot
@@ -2401,18 +2422,36 @@ biscuit_insert(Relation index,
      * crossed pending_list_limit mid-row, an already-completed
      * opportunistic drain per §2a).
      *
-     * But the *row-identity* structures -- the TIDS array (slot -> heap
-     * ItemPointer), the HEADER's num_records, the STRCACHE, tombstones and
-     * free list -- have no incremental pending mechanism; they are whole
-     * blobs. Re-persisting them per row would be O(num_records) per row =
-     * O(n^2) for a bulk insert. Instead we mark this index dirty and defer
-     * the (single, O(num_records)) row-identity re-save to a pre-commit
-     * xact callback, so a statement that inserts n rows pays it once, not
-     * n times. Deferring to pre-commit is also semantically correct: an
-     * uncommitted insert must not be visible to a cold reader in another
-     * backend anyway (MVCC), and a warm reader in this backend uses the
-     * in-memory idx directly. See biscuit_mark_row_identity_dirty().
+     * The *row-identity* structures split two ways:
+     *
+     *   - TIDS and STRCACHE are made durable right here, for this one row,
+     *     in place: biscuit_persist_row_identity_write_record() writes
+     *     tids[slot] and this row's string-cache entries and nothing else.
+     *     This is O(1) per row (a handful of single-page writes), and it
+     *     replaces the old "defer a full rewrite of both whole arrays to
+     *     pre-commit" scheme, which was O(num_records) per *commit* --
+     *     i.e. 70x the WAL per row for single-row transactions, the root
+     *     cause this work exists to fix. Note this covers all three
+     *     mutation shapes uniformly, since `slot` was resolved above
+     *     identically for each: a fresh append (slot == num_records++), a
+     *     reused freelist slot, and the sub-case where either lands on a
+     *     logical page that doesn't exist on disk yet (biscuit_rowstore.c
+     *     allocates it -- see biscuit_rowstore_tid_write()).
+     *
+     *   - The HEADER (num_records and the counters), tombstones and free
+     *     list are still deferred to a pre-commit xact callback via
+     *     biscuit_mark_row_identity_dirty(), because unlike TIDS/STRCACHE
+     *     they are not per-row data at all: they'd be written with the
+     *     same content by every row in the statement. Deferring is now a
+     *     plain redundancy-avoidance measure rather than a workaround for
+     *     an O(n^2) blowup (biscuit_persist_save_row_identity() is itself
+     *     O(1) in num_records now). It also stays semantically correct for
+     *     the same reason it always was: an uncommitted insert must not be
+     *     visible to a cold reader in another backend anyway (MVCC), and a
+     *     warm reader in this backend uses the in-memory idx directly.
      */
+    biscuit_persist_row_identity_write_record(index, idx, (uint32) slot);
+
     biscuit_mark_row_identity_dirty(RelationGetRelid(index));
 
     /*
@@ -2552,6 +2591,34 @@ biscuit_bulkdelete(IndexVacuumInfo *info,
                     }
             }
 
+            /*
+             * Durably clear each deleted slot's TID and string-cache
+             * entries, now that the in-memory arrays above have been
+             * NULLed. This is a new, required step: before the in-place
+             * rewrite, the pre-commit flush re-serialized both whole
+             * arrays from memory, so a slot cleared in memory became
+             * cleared on disk for free. Now that nothing rewrites them
+             * wholesale, a delete that only clears memory would leave the
+             * dead row's TID and string bytes on disk, and the next cold
+             * load in another backend would read them straight back into
+             * data_cache[slot] -- resurrecting a deleted row's payload for
+             * any scan path that consults the string cache. The slot stays
+             * within [0, num_records) after a delete (it goes on the free
+             * list rather than shrinking the array), so the stale entry
+             * really would be read.
+             *
+             * biscuit_persist_row_identity_write_record() reads the
+             * (now-NULL) in-memory state, so this writes a NULL STRCACHE
+             * pointer and the zeroed TID exactly as intended -- no
+             * separate "clear" entry point is needed.
+             */
+            for (j = 0; j < (int) delete_count; j++)
+            {
+                ItemPointerSetInvalid(&idx->tids[delete_indices[j]]);
+                biscuit_persist_row_identity_write_record(index, idx,
+                                                           (uint32) delete_indices[j]);
+            }
+
             pfree(delete_indices);
         }
     }
@@ -2605,72 +2672,23 @@ biscuit_bulkdelete(IndexVacuumInfo *info,
     return stats;
 }
 
+
+
 /*
- * biscuit_vacuum_drain_one / BiscuitVacuumDrainState
+ * biscuit_vacuum_drain_one has been removed.
  *
- * Per-structure drain callback for biscuit_vacuumcleanup()'s unconditional
- * full pass (Phase 1 Contract §2b). biscuit_dir_foreach_column() only
- * hands the callback a read-only BiscuitDirEntry snapshot, not the
- * BiscuitDirEntryRef needed to write the post-drain entry back -- so this
- * re-resolves the ref via biscuit_dir_find() on the same
- * (col, is_lower, kind, ch, position) key rather than changing
- * biscuit_dir_foreach_column()'s frozen signature (see "Biscuit WAL-Logged
- * Storage: Phase 1 Contract" §0). That's one extra directory-page lookup
- * per structure that actually has pending records, which is negligible
- * next to the drain itself.
+ * It walked every directory entry and drained each structure's own
+ * pending chain. With those chains replaced by a single index-wide log
+ * (biscuit_pendlog.c) there is nothing per-entry left to drain -- the
+ * whole log is merged in one pass by biscuit_pendlog_drain_all(), which
+ * groups records by structure itself and so visits each structure once
+ * regardless of how many times it was touched.
+ *
+ * The kind guard that used to live here (refusing TIDS/STRCACHE/HEADER so
+ * their repurposed value-heap fields were never read as pending-record
+ * chains) is no longer needed for the same reason: nothing walks
+ * directory entries looking for pending chains any more.
  */
-typedef struct BiscuitVacuumDrainState
-{
-    Relation          index;
-    uint64            structures_drained;
-    BiscuitDrainStats total;
-} BiscuitVacuumDrainState;
-
-static void
-biscuit_vacuum_drain_one(const BiscuitDirEntry *entry, void *state)
-{
-    BiscuitVacuumDrainState *vstate = (BiscuitVacuumDrainState *) state;
-    Relation                 index  = vstate->index;
-    BiscuitDirEntry          fresh;
-    BiscuitDirEntryRef       ref;
-    RoaringBitmap            *target;
-    BiscuitDrainStats         stats;
-
-    /* Unconditional per §2b means "no size-threshold gate", not "rewrite
-     * every structure whether or not it has anything pending" -- a
-     * structure with an empty pending chain costs nothing to skip and
-     * draining it would be a no-op blob rewrite anyway. */
-    if (entry->pending_count == 0)
-        return;
-
-    if (!biscuit_dir_find(index, entry->col, entry->is_lower, entry->kind,
-                           entry->ch, entry->position, &fresh, &ref))
-        return;   /* shouldn't happen (we're iterating this same directory
-                    * chain) but tolerate a concurrently-vanished entry
-                    * rather than erroring out of the whole VACUUM */
-
-    if (fresh.pending_count == 0)
-        return;   /* already drained by another path since foreach's read */
-
-    target = biscuit_load_blob_bitmap(index, fresh.blob_head);
-
-    biscuit_pending_drain(index, fresh.pending_head,
-                           &fresh.pending_head, &fresh.pending_tail,
-                           &fresh.blob_head, /* do_blob_rewrite = */ true,
-                           target, &stats);
-
-    fresh.pending_count = 0;
-    fresh.pending_bytes = 0;
-    biscuit_dir_update(index, &ref, &fresh);
-
-    biscuit_roaring_free(target);
-
-    vstate->structures_drained++;
-    vstate->total.records_drained      += stats.records_drained;
-    vstate->total.pending_pages_freed  += stats.pending_pages_freed;
-    vstate->total.blob_bytes_written   += stats.blob_bytes_written;
-    vstate->total.old_blob_pages_freed += stats.old_blob_pages_freed;
-}
 
 /* ================================================================
  * SECTION 6 – Remaining AM callbacks
@@ -2679,10 +2697,8 @@ biscuit_vacuum_drain_one(const BiscuitDirEntry *entry, void *state)
 IndexBulkDeleteResult *
 biscuit_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 {
-    Relation                 index = info->index;
-    BiscuitVacuumDrainState  dstate;
-    int                      num_slots;
-    int                      slot;
+    Relation index = info->index;
+    int      structures_drained;
 
     if (!stats)
         stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));
@@ -2698,61 +2714,26 @@ biscuit_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
      * on-disk directory, so it works correctly even for a cold index with
      * nothing cached for this backend.
      */
-    memset(&dstate, 0, sizeof(dstate));
-    dstate.index = index;
-
-    num_slots = biscuit_dir_num_slots(index);
-    for (slot = 0; slot < num_slots; slot++)
-        biscuit_dir_foreach_column(index, slot, biscuit_vacuum_drain_one, &dstate);
+    /*
+     * One pass over the shared log merges every structure. This replaced
+     * a walk over every directory entry draining each structure's own
+     * chain -- besides being simpler, it visits a structure once per
+     * VACUUM regardless of how many times it was written, where the old
+     * walk re-serialized a hot structure's blob once per threshold
+     * crossing.
+     */
+    structures_drained = biscuit_pendlog_drain_all(index, true);   /* VACUUM must not skip */
 
     /*
-     * Surface the Phase 2 instrumentation (bytes drained, records
-     * processed) through the existing stats/observability path:
-     * IndexBulkDeleteResult itself has no biscuit-specific fields, so
-     * this goes to BiscuitMetaPageData's own counters (design doc §3 /
-     * Round 5's total_drains/total_pending_bytes) plus a DEBUG1 elog for
-     * anyone watching server logs during a VACUUM. SQL-visible access to
-     * total_drains/total_pending_bytes is biscuit_index_stats()
-     * (biscuit.c) -- extending that function's output is a one-line
-     * addition, not part of this conversion.
-     *
-     * total_pending_bytes: design doc's stated recomputation rule is
-     * "recomputed from scratch only by biscuit_vacuumcleanup()'s existing
-     * full directory walk" -- this pass just visited every directory
-     * slot and zeroed every structure's pending_bytes it touched (and
-     * skipped every structure that was already at 0), so the true
-     * index-wide total after this VACUUM is unconditionally 0. No
-     * second walk is needed to "recompute" it.
+     * total_drains is already bumped by biscuit_pendlog_drain_all() (it
+     * owns the metapage reset, so bumping the counter there keeps both in
+     * one transaction). total_pending_bytes is now trivially 0 after a
+     * drain: the log is the only place pending records live, and the
+     * drain empties it -- no directory walk is needed to "recompute" it,
+     * and pendlog_bytes in the metapage is the live figure anyway.
      */
-    if (dstate.structures_drained > 0)
-    {
-        Buffer               mbuf = ReadBuffer(index, BISCUIT_METAPAGE_BLKNO);
-        Page                 mpage;
-        GenericXLogState    *xlstate;
-        BiscuitMetaPageData *meta;
-
-        LockBuffer(mbuf, BUFFER_LOCK_EXCLUSIVE);
-        biscuit_ensure_synchronous_commit();
-        xlstate = GenericXLogStart(index);
-        mpage   = GenericXLogRegisterBuffer(xlstate, mbuf, 0);
-        meta    = (BiscuitMetaPageData *) PageGetSpecialPointer(mpage);
-
-        meta->total_drains        += dstate.structures_drained;
-        meta->total_pending_bytes  = 0;
-
-        GenericXLogFinish(xlstate);
-        UnlockReleaseBuffer(mbuf);
-    }
-
-    elog(DEBUG1,
-         "biscuit: vacuumcleanup drained %llu structure(s), "
-         "%llu record(s), %u compacted-blob byte(s) written, "
-         "%u pending page(s) freed, %u old blob page(s) freed",
-         (unsigned long long) dstate.structures_drained,
-         (unsigned long long) dstate.total.records_drained,
-         dstate.total.blob_bytes_written,
-         dstate.total.pending_pages_freed,
-         dstate.total.old_blob_pages_freed);
+    elog(DEBUG1, "biscuit: vacuumcleanup drained %d structure(s) from the shared pending log",
+         structures_drained);
 
     return stats;
 }
@@ -2765,53 +2746,290 @@ biscuit_canreturn(Relation index, int attno)
     return false;
 }
 
-void
-biscuit_costestimate(PlannerInfo *root, IndexPath *path,
+/*
+ * biscuit_costestimate
+ *
+ * The previous version returned a constant (indexTotalCost = 0.01,
+ * selectivity = 0.01) with the real computation commented out. That made
+ * every Biscuit path look free and identical: three structurally different
+ * queries all planned at cost=0.00..10.56, and the planner had no way to
+ * avoid a scan measured at 378ms against a 7ms seqscan on the same table.
+ *
+ * The model below comes from measurement, not first principles. Biscuit's
+ * matcher is positional: an anchored pattern tests one window, while an
+ * unanchored infix must test every possible start offset, so the work is
+ *
+ *      windows x pattern_chars   bitmap intersections
+ *
+ * with windows = 1 when anchored and ~max_length when not, doubled for
+ * ILIKE because the lowercase structure set is maintained and scanned in
+ * parallel. Observed on a 5,508-row table (seqscan 1-7ms):
+ *
+ *      email  (short) infix        0.5 - 2 ms
+ *      long_text      infix LIKE   35 - 42 ms
+ *      long_text      infix ILIKE  188 ms
+ *      long_text      infix (0 rows, common chars)  378 - 595 ms
+ *
+ * Note the worst cases RETURN NOTHING: a non-matching pattern has no early
+ * exit and pays the full sweep, so cost must be driven by the scan shape,
+ * never by estimated selectivity.
+ *
+ * On anchoring to other index types: an earlier plan here was to peg infix
+ * costs above pg_trgm's. pg_trgm has no cost estimator -- it is an opclass;
+ * the planner calls gincostestimate()/gistcostestimate(), whose GIN-specific
+ * inputs come from ginGetStats() on a GIN metapage that a Biscuit relation
+ * does not have. Pegging to a competitor would also be the wrong target:
+ * the path Biscuit actually loses to on long columns is the SEQSCAN, and a
+ * blanket infix penalty would discard the cases where Biscuit legitimately
+ * wins (short-column infix beats both seqscan and trigram). Costing the
+ * real work puts long-column infix above seqscan and GIN on its own merits
+ * while leaving short-column and anchored scans cheap.
+ */
+ void
+ biscuit_costestimate(PlannerInfo *root, IndexPath *path,
                     double loop_count,
                     Cost *indexStartupCost, Cost *indexTotalCost,
-                    Selectivity *indexSelectivity,
-                    double *indexCorrelation, double *indexPages)
+                    Selectivity *indexSelectivity, double *indexCorrelation,
+                    double *indexPages)
 {
-    Relation    index    = (path->indexinfo->indexoid != InvalidOid)
-                           ? index_open(path->indexinfo->indexoid, AccessShareLock)
-                           : NULL;
-    BlockNumber numPages = 1;
+    IndexOptInfo *indexinfo = path->indexinfo;
+    Relation      index;
+    BlockNumber   numPages     = 1;
+    int           num_records  = 0;
+    int           num_columns  = 0;
+    int           max_len      = 0;
+    uint64        gen          = 0;
+    bool          have_meta    = false;
 
-    (void) root;
+    double        spc_random_page_cost;
+    double        spc_seq_page_cost;
+
+    double        total_windows   = 0.0;   /* summed over all clauses      */
+    double        total_bitmapops = 0.0;
+    double        selectivity     = 1.0;
+    int           nclauses        = 0;
+    bool          has_infix_clause = false;
+
+    ListCell     *lc;
+
     (void) loop_count;
 
-    if (index)
-    {
-        numPages = RelationGetNumberOfBlocks(index);
-        if (numPages == 0) numPages = 1;
-        index_close(index, AccessShareLock);
-    }
-
+    /* ---- No usable quals: keep this path off the table entirely. ---- */
     if (path->indexclauses == NIL)
     {
         /*
-         * No usable quals (e.g. plain SELECT * with no WHERE). Make this
-         * path unattractive so the planner falls back to a seqscan instead
-         * of using Biscuit with zero scan keys, which would return 0 rows.
+         * Biscuit with zero scan keys returns 0 rows, so this is not merely
+         * expensive, it is wrong. Price it out of consideration.
          */
         *indexStartupCost = 1.0e10;
         *indexTotalCost   = 1.0e10;
         *indexSelectivity = 1.0;
         *indexCorrelation = 0.0;
-        if (indexPages) *indexPages = numPages;
+        if (indexPages) *indexPages = 1;
         return;
     }
 
-    double selectivity = 0.01; /* or a real per-clause estimate if you have one */
-    double pages_touched = Max(1.0, numPages * selectivity);
+    /* ---- Index-level facts. ---- */
+    if (OidIsValid(indexinfo->indexoid))
+    {
+        index = index_open(indexinfo->indexoid, AccessShareLock);
+        numPages = RelationGetNumberOfBlocks(index);
+        if (numPages == 0)
+            numPages = 1;
+        have_meta = biscuit_read_metadata_from_disk(index, &num_records,
+                                                     &num_columns, &max_len,
+                                                     &gen);
+        index_close(index, AccessShareLock);
+    }
 
-    *indexStartupCost  = 0.0;
-    *indexTotalCost    = 0.01; //+ (pages_touched * random_page_cost)
-                              // + (path->indexinfo->tuples * selectivity * cpu_index_tuple_cost);
-    *indexSelectivity  = selectivity;
-    *indexCorrelation  = 1.0;
-    if (indexPages) *indexPages = numPages;
+    if (!have_meta || num_records <= 0)
+        num_records = (int) Max(1.0, indexinfo->tuples);
+    if (max_len <= 0)
+        max_len = 32;   /* unknown column width: assume something modest
+                          * rather than something alarming, so a missing
+                          * metapage doesn't silently disable the index */
+
+    get_tablespace_page_costs(indexinfo->reltablespace,
+                               &spc_random_page_cost, &spc_seq_page_cost);
+
+    /* ---- Per-clause scan shape. ---- */
+    foreach(lc, path->indexclauses)
+    {
+        IndexClause  *iclause = (IndexClause *) lfirst(lc);
+        RestrictInfo *rinfo   = iclause->rinfo;
+        Expr         *clause  = rinfo ? rinfo->clause : NULL;
+        bool          is_ilike       = false;
+        bool          anchored_start = false;
+        bool          anchored_end   = false;
+        int           pattern_chars  = 0;
+        double        windows;
+        double        clause_sel;
+
+        nclauses++;
+
+        if (clause && IsA(clause, OpExpr))
+        {
+            OpExpr *op    = (OpExpr *) clause;
+            char   *opname = get_opname(op->opno);
+            Node   *rnode;
+
+            /*
+             * "~~" is LIKE, "~~*" is ILIKE. Matching on the operator name
+             * rather than a strategy number keeps this readable and avoids
+             * depending on the opclass's strategy numbering, which is
+             * private to biscuit.sql and has changed before.
+             */
+            if (opname != NULL)
+                is_ilike = (strcmp(opname, "~~*") == 0 ||
+                            strcmp(opname, "!~~*") == 0);
+
+            rnode = (list_length(op->args) >= 2) ? (Node *) lsecond(op->args) : NULL;
+            if (rnode && IsA(rnode, Const) && !((Const *) rnode)->constisnull)
+            {
+                Const *c = (Const *) rnode;
+                Oid    ctype = c->consttype;
+
+                if (ctype == TEXTOID || ctype == VARCHAROID || ctype == BPCHAROID)
+                {
+                    char *pat = TextDatumGetCString(c->constvalue);
+                    int   len = (int) strlen(pat);
+
+                    anchored_start = (len > 0 && pat[0] != '%');
+                    anchored_end   = (len > 0 && pat[len - 1] != '%');
+
+                    /*
+                     * Count matchable characters: wildcards drive the window
+                     * count, they are not themselves intersected. Counting
+                     * UTF-8 characters (not bytes) matters -- a Tamil or
+                     * kana pattern is far shorter in characters than bytes,
+                     * and the matcher works in characters.
+                     */
+                    pattern_chars = biscuit_utf8_char_count(pat, len);
+                    {
+                        int i;
+                        for (i = 0; i < len; i++)
+                            if (pat[i] == '%' || pat[i] == '_')
+                                pattern_chars--;
+                    }
+                    if (pattern_chars < 0)
+                        pattern_chars = 0;
+
+                    pfree(pat);
+                }
+            }
+        }
+
+        if (pattern_chars == 0)
+        {
+            /*
+             * Couldn't read the pattern (non-Const, e.g. a parameter, or an
+             * unexpected type). Assume the bad case rather than the good
+             * one: an unanchored scan of a short pattern is exactly the
+             * shape that blows up, and guessing "cheap" here is how the
+             * constant-cost version caused the problem this function exists
+             * to fix.
+             */
+            pattern_chars  = 2;
+            anchored_start = false;
+            anchored_end   = false;
+        }
+
+        /*
+         * Windows to test. Anchored at either end pins the offset, so one
+         * window suffices (prefix uses the positional bitmaps, suffix the
+         * negative-offset ones). Unanchored means every start offset.
+         */
+        if (anchored_start || anchored_end)
+            windows = 1.0;
+        else
+            windows = Max(1.0, (double) max_len - (double) pattern_chars + 1.0);
+
+        /*
+         * A clause anchored at neither end is a true infix match: there is
+         * no pinned offset for the matcher to exploit, so it has no
+         * locality to fall back on. Track this so the page-cost term below
+         * can price it like a near-full scan instead of "one structure per
+         * window" -- this is the lever that steers infix patterns toward a
+         * trigram (GIN) index while leaving prefix/suffix patterns on
+         * biscuit.
+         */
+        if (!anchored_start && !anchored_end)
+            has_infix_clause = true;
+
+        total_windows   += windows;
+        total_bitmapops += windows * (double) pattern_chars * (is_ilike ? 2.0 : 1.0);
+
+        /*
+         * Selectivity. Deliberately crude and deliberately NOT used to
+         * discount the scan cost above: the measured worst cases returned
+         * zero rows. Longer and anchored patterns are more selective.
+         */
+        clause_sel = pow(0.30, (double) Max(1, pattern_chars));
+        if (!anchored_start && !anchored_end)
+            clause_sel *= 3.0;              /* infix matches more places */
+        clause_sel = Min(1.0, Max(1.0e-6, clause_sel));
+        selectivity *= clause_sel;
+    }
+
+    selectivity = Min(1.0, Max(1.0e-6, selectivity));
+
+    /*
+     * Cost the bitmap work. Each intersection touches a bitmap holding
+     * num_records entries; Roaring processes these in word-sized chunks, so
+     * scale per-op cost by the bitmap's word count rather than its bit
+     * count. The 64.0 divisor is bits-per-word, not a fudge factor.
+     */
+    {
+        double bitmap_words = Max(1.0, (double) num_records / 64.0);
+        double cpu_bitmap   = total_bitmapops * bitmap_words * cpu_operator_cost;
+
+        /*
+         * Pages: an anchored scan (prefix or suffix) pins the match to a
+         * known offset, so it only touches a handful of structures and
+         * biscuit should win there. A true infix scan has no anchor at
+         * all -- every window position can land on a different part of
+         * the bitmap structures -- so there is no locality to exploit and
+         * it is priced as touching essentially the whole index. This is
+         * what steers the planner toward a trigram (GIN) index for infix
+         * patterns specifically, while leaving anchored patterns on
+         * biscuit. Cap at the index size -- it cannot read more than it
+         * has.
+         */
+        double pages_touched = has_infix_clause
+            ? (double) numPages
+            : Min((double) numPages, Max(1.0, total_windows));
+
+        /*
+         * Startup: Biscuit materializes a column's structures on first
+         * touch. Measured at 35-70ms per index on the benchmark table, which
+         * the planner cannot amortize because it does not know whether this
+         * backend has already paid it. Charge a fraction of the index size
+         * so large indexes are not treated as free to open.
+         */
+        *indexStartupCost = (double) numPages * 0.05 * spc_random_page_cost;
+
+        *indexTotalCost = *indexStartupCost
+                        + pages_touched * spc_random_page_cost
+                        + cpu_bitmap
+                        + (double) num_records * selectivity * cpu_index_tuple_cost;
+
+        /* Qual evaluation, as genericcostestimate does. */
+        *indexTotalCost += (double) nclauses * cpu_operator_cost;
+
+        if (indexPages)
+            *indexPages = pages_touched;
+    }
+
+    *indexSelectivity = selectivity;
+
+    /*
+     * Biscuit returns TIDs sorted by block (biscuit_sort_tids_by_block), so
+     * heap access is sequential-ish. This is genuinely favourable and is the
+     * one place the old constant model was accidentally right.
+     */
+    *indexCorrelation = 1.0;
 }
+
 bytea *
 biscuit_options(Datum reloptions, bool validate)
 {

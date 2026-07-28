@@ -10,12 +10,11 @@
 #include "biscuit_bitmap.h"
 #include "biscuit_utf8.h"
 #include "biscuit_pattern.h"
-#include "biscuit_blob.h"   /* biscuit_pending_drain -- read-time reconciliation,
-                              * see "Biscuit WAL-Logged Storage: Phase 1 Contract" §3 */
+#include "biscuit_pendlog.h"
 #include "biscuit_dir.h"    /* biscuit_dir_find, BiscuitDirEntry */
 
 /* ================================================================
- * SECTION 0 – Read-time pending-list reconciliation
+ * SECTION 0 – Read-time shared-log reconciliation
  * ================================================================
  *
  * Chosen strategy (Phase 1 Contract §3): in-memory merge at scan time,
@@ -43,9 +42,9 @@ biscuit_reconcile_pending(Relation index, RoaringBitmap *cached,
                            int32 col, bool is_lower, uint8 kind,
                            int32 ch, int32 position)
 {
-    BiscuitDirEntry     entry;
-    BiscuitDirEntryRef  ref;
-    RoaringBitmap      *merged;
+    BiscuitPendLogSnapshot *snap;
+    BiscuitPendLogEntry    *pend;
+    RoaringBitmap          *merged;
 
     if (index == NULL)
         return cached;   /* no backing Relation available -- tolerate
@@ -53,25 +52,38 @@ biscuit_reconcile_pending(Relation index, RoaringBitmap *cached,
                            * query-path caller has one (biscuit_scan.c
                            * always has scan->indexRelation) */
 
-    if (!biscuit_dir_find(index, col, is_lower, kind, ch, position, &entry, &ref))
-        return cached;   /* nothing durable beyond what's already cached */
+    /*
+     * Since the per-structure pending chains were replaced by one shared
+     * log, a structure's undrained deltas are scattered through that log
+     * rather than sitting in a chain of its own. Scanning the log per
+     * structure would be O(structures x log size) for a query that touches
+     * hundreds of structures, so instead the log is materialized once into
+     * a hash keyed by structure identity and cached until the log moves
+     * (biscuit_pendlog_snapshot()). Per-structure reconciliation is then a
+     * hash probe.
+     *
+     * Both early exits below are the common cases and both are cheap: a
+     * fully-drained index returns NULL from the snapshot without
+     * allocating anything, and a structure with nothing pending misses the
+     * hash. Only a structure that actually has undrained deltas pays for a
+     * bitmap copy.
+     */
+    snap = biscuit_pendlog_snapshot(index);
+    if (snap == NULL)
+        return cached;   /* log empty -- fully drained, the steady state */
 
-    if (entry.pending_count == 0)
-        return cached;   /* already reconciled -- the common case */
-
-    merged = cached ? biscuit_roaring_copy(cached) : biscuit_roaring_create();
+    pend = biscuit_pendlog_lookup(snap, col, is_lower, kind, ch, position);
+    if (pend == NULL || pend->ndeltas == 0)
+        return cached;   /* nothing pending for this structure */
 
     /*
-     * do_blob_rewrite = false: apply pending records to `merged` only.
-     * Leaves both the pending chain and the compacted blob untouched --
-     * this is a read, not a drain (see biscuit_blob.c's biscuit_pending_drain()
-     * header comment and Phase 1 Contract §3 for why the non-destructive
-     * behavior is required here specifically).
+     * Copy before applying: `cached` is the caller's live, borrowed
+     * bitmap and this is a read, not a drain -- mutating it in place would
+     * corrupt the cached structure with deltas that are already durably
+     * recorded and will be applied again at the next real drain.
      */
-    biscuit_pending_drain(index, entry.pending_head,
-                           &entry.pending_head, &entry.pending_tail,
-                           &entry.blob_head, /* do_blob_rewrite = */ false,
-                           merged, /* stats = */ NULL);
+    merged = cached ? biscuit_roaring_copy(cached) : biscuit_roaring_create();
+    biscuit_pendlog_apply(pend, merged);
 
     return merged;
 }
@@ -576,6 +588,96 @@ biscuit_get_col_length_ge_lower(Relation index, ColumnIndex *col, int col_idx, i
         if (reconciled == cached)
             return cached ? biscuit_roaring_copy(cached) : biscuit_roaring_create();
         return reconciled;
+    }
+}
+
+/*
+ * biscuit_get_negation_base_set
+ *
+ * The "all indexed, non-null rows of this column" set that NOT LIKE /
+ * NOT ILIKE inverts against: length_ge[0], reconciled against the shared
+ * pending log. Returns an owned bitmap the caller must free; falls back to
+ * a dense [0, num_records) range when the column has no length_ge array
+ * (a column built before length bitmaps existed, or one where they were
+ * never populated).
+ *
+ * WHY THIS EXISTS -- this is a correctness fix, not a refactor.
+ *
+ * biscuit_scan.c used to build this set by reading
+ * col->length_ge_bitmaps[0] directly out of the in-memory ColumnIndex,
+ * with no reconciliation, and then subtract from it a col_result that HAD
+ * been reconciled. While per-structure pending chains existed that was
+ * survivable in practice; once the shared pending log deferred drains far
+ * longer (BISCUIT_PENDLOG_DRAIN_PAGES = 4MB, deliberately, for OLAP bulk
+ * loads) the two sides routinely disagreed about which slots exist.
+ *
+ * The observable failure: insert 600 rows, delete 80, VACUUM, insert 80
+ * more (which recycle the freed slots via the free list). The recycled
+ * slots' LEN_GE membership is sitting undrained in the log, so the
+ * unreconciled base set omits them while the reconciled positive side
+ * includes them. `a NOT LIKE 'Item%'` returned 0 where the heap says 80 --
+ * every recycled row silently missing from the complement. It only
+ * reproduced with autovacuum off; an autovacuum-triggered drain hid it
+ * completely, which is exactly what makes this class of bug dangerous.
+ *
+ * The rule this encodes: ANY bitmap that participates in a query must come
+ * from a reconciling accessor. Mixing a raw cached bitmap with a
+ * reconciled one in the same expression is always a bug, and the two-sided
+ * nature of negation makes it a silent one.
+ */
+/*
+ * biscuit_get_negation_base_set_legacy
+ *
+ * Single-column (legacy field) equivalent of
+ * biscuit_get_negation_base_set(); same reconciliation requirement and the
+ * same bug if it is bypassed. The dense fallback here filters on
+ * data_cache[j] rather than using a plain range, matching what the
+ * single-column scan path did before -- a NULL-valued row has no
+ * data_cache entry and must not appear in the complement.
+ */
+RoaringBitmap *
+biscuit_get_negation_base_set_legacy(Relation index, BiscuitIndex *idx,
+                                      bool is_lower)
+{
+    RoaringBitmap **ge_arr = is_lower ? idx->length_ge_bitmaps_lower
+                                       : idx->length_ge_bitmaps_legacy;
+
+    if (ge_arr && ge_arr[0])
+        return is_lower ? biscuit_get_length_ge_lower(index, idx, 0)
+                        : biscuit_get_length_ge(index, idx, 0);
+
+    {
+        RoaringBitmap *all = biscuit_roaring_create();
+        int            j;
+
+        for (j = 0; j < idx->num_records; j++)
+            if (idx->data_cache[j])
+                biscuit_roaring_add(all, j);
+        return all;
+    }
+}
+
+RoaringBitmap *
+biscuit_get_negation_base_set(Relation index, ColumnIndex *col, int col_idx,
+                               bool is_lower, int num_records)
+{
+    RoaringBitmap  **ge_arr = is_lower ? col->length_ge_bitmaps_lower
+                                        : col->length_ge_bitmaps;
+
+    if (ge_arr && ge_arr[0])
+        return is_lower ? biscuit_get_col_length_ge_lower(index, col, col_idx, 0)
+                        : biscuit_get_col_length_ge(index, col, col_idx, 0);
+
+    {
+        RoaringBitmap *all = biscuit_roaring_create();
+#ifdef HAVE_ROARING
+        roaring_bitmap_add_range(all, 0, num_records);
+#else
+        int j;
+        for (j = 0; j < num_records; j++)
+            biscuit_roaring_add(all, j);
+#endif
+        return all;
     }
 }
 

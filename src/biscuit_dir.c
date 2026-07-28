@@ -210,6 +210,33 @@ biscuit_dir_find(Relation index,
 
 /* ==================== UPDATE ==================== */
 
+/*
+ * biscuit_dir_entry_write_registered
+ *
+ * Write *new_entry into slot `index` of a BISCUIT_PAGE_DIR page that the
+ * caller has ALREADY locked exclusively and registered with an open
+ * GenericXLog transaction. `page` must be the value
+ * GenericXLogRegisterBuffer() returned (the scratch copy), not
+ * BufferGetPage() -- writing to the latter would bypass the WAL delta.
+ *
+ * Now static: this was briefly exported so biscuit_pending_append_with_dir()
+ * (biscuit_blob.c) could fold a directory update into its own GenericXLog
+ * transaction. That function and the whole per-structure pending chain it
+ * served are gone -- the shared pendlog never touches the directory on the
+ * append path at all -- so biscuit_dir_update() below is once again the
+ * only caller, and this is just its inner half.
+ */
+static void
+biscuit_dir_entry_write_registered(Page page, int index,
+                                    const BiscuitDirEntry *new_entry)
+{
+    BiscuitDirPageHeader *hdr     = (BiscuitDirPageHeader *) BiscuitPageDataPtr(page);
+    BiscuitDirEntry      *entries = (BiscuitDirEntry *) ((char *) hdr + MAXALIGN(sizeof(BiscuitDirPageHeader)));
+
+    Assert((uint32) index < hdr->num_entries);
+    entries[index] = *new_entry;
+}
+
 void
 biscuit_dir_update(Relation index,
                     const BiscuitDirEntryRef *ref,
@@ -218,19 +245,14 @@ biscuit_dir_update(Relation index,
     Buffer                 buf = ReadBuffer(index, ref->blkno);
     Page                   page;
     GenericXLogState      *state;
-    BiscuitDirPageHeader  *hdr;
-    BiscuitDirEntry       *entries;
 
     LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 
     biscuit_ensure_synchronous_commit();
-    state   = GenericXLogStart(index);
-    page    = GenericXLogRegisterBuffer(state, buf, 0);
-    hdr     = (BiscuitDirPageHeader *) BiscuitPageDataPtr(page);
-    entries = (BiscuitDirEntry *) ((char *) hdr + MAXALIGN(sizeof(BiscuitDirPageHeader)));
+    state = GenericXLogStart(index);
+    page  = GenericXLogRegisterBuffer(state, buf, 0);
 
-    Assert((uint32) ref->index < hdr->num_entries);
-    entries[ref->index] = *new_entry;
+    biscuit_dir_entry_write_registered(page, ref->index, new_entry);
 
     GenericXLogFinish(state);
     UnlockReleaseBuffer(buf);
@@ -311,7 +333,7 @@ biscuit_dir_insert(Relation index, const BiscuitDirEntry *entry, BiscuitDirEntry
      * Tail page full: allocate a new tail page, link it via the old
      * tail's opaque.next, and write the new entry there -- both pages in
      * one GenericXLog transaction, same nested-lock pattern as
-     * biscuit_pending_append()'s overflow branch.
+     * biscuit_pendlog_append()'s page-rollover branch.
      */
     {
         Buffer                 newbuf;

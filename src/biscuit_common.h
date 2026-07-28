@@ -131,18 +131,53 @@ typedef struct {
                                                        * version-1 (old
                                                        * external-file) and
                                                        * version-2 indexes
-                                                       * must be REINDEXed. */
+                                                       * must be REINDEXed.
+                                                       *
+                                                       * DELIBERATELY NOT
+                                                       * bumped for the
+                                                       * row-identity in-place
+                                                       * storage rewrite
+                                                       * (biscuit_rowstore.c),
+                                                       * which changes the
+                                                       * on-disk layout of
+                                                       * TIDS/STRCACHE/HEADER
+                                                       * incompatibly: version 3
+                                                       * (BISCUIT_LIBRARY_VERSION
+                                                       * "3.0.0 - Player") was
+                                                       * never shipped, so there
+                                                       * is no deployed
+                                                       * version-3 index
+                                                       * anywhere for a bump to
+                                                       * distinguish this format
+                                                       * from. That is also
+                                                       * exactly why this
+                                                       * rewrite carries no
+                                                       * backward-compatibility
+                                                       * obligation and needs no
+                                                       * dual-format reader --
+                                                       * the only readers that
+                                                       * ever existed for the
+                                                       * old TIDS/STRCACHE blob
+                                                       * layout are in this same
+                                                       * unreleased tree, and
+                                                       * they are replaced, not
+                                                       * kept alongside. Any
+                                                       * index built from an
+                                                       * intermediate
+                                                       * development checkout
+                                                       * must be REINDEXed, same
+                                                       * as always. */
 #define BISCUIT_METAPAGE_BLKNO          0
 
 /*
  * BISCUIT_PAGE_FORMAT_VERSION
  *
  * Guards the *binary layout* of the individual page structs below
- * (BiscuitBlobChunkHeader, BiscuitPendingPageHeader, BiscuitPendingRecord,
+ * (BiscuitBlobChunkHeader, BiscuitPendLogPageHeader, BiscuitPendLogRecord,
  * BiscuitDirPageHeader, BiscuitDirEntry, BiscuitPageOpaqueData) rather than
  * the overall extension/catalog-visible format that BISCUIT_VERSION guards.
  * Kept separate so a future change that only touches one page struct's
- * layout (e.g. widening BiscuitPendingRecord) doesn't have to be bundled
+ * layout (e.g. widening BiscuitPendLogRecord) doesn't have to be bundled
  * with an unrelated BISCUIT_VERSION bump, and so page-level tools
  * (pg_filedump-style inspection, amcheck) can validate a page in isolation
  * against this field without needing to know anything about the rest of
@@ -176,7 +211,7 @@ typedef struct {
 #define CHAR_RANGE                      256
 #define TOMBSTONE_CLEANUP_THRESHOLD     1000
 #define RADIX_SORT_THRESHOLD            5000
-#define BISCUIT_LIBRARY_VERSION         "3.0.0 - Player"
+#define BISCUIT_LIBRARY_VERSION         "3.0.0 - Lock"
 
 /* ==================== MEMORY MANAGEMENT MACROS ==================== */
 
@@ -264,8 +299,8 @@ typedef struct BiscuitMetaPageData {
      * deferred-recycle-gated on BiscuitPageOpaqueData.recycle_xid (see its
      * comment) and must not be reused until no concurrent scan could
      * still be walking them. fsm_root is the head of Biscuit's own
-     * recycle_xid-gated freelist chain (plain BISCUIT_PAGE_PENDING-shaped
-     * link list of retired-but-not-yet-recyclable pages, reusing
+     * recycle_xid-gated freelist chain (a plain singly-linked
+     * list of retired-but-not-yet-recyclable pages, reusing
      * opaque.next for chaining); only once biscuit_vacuumcleanup()'s
      * horizon check clears a page does it get pushed to the standard
      * index FSM for actual reuse. InvalidBlockNumber until the first page
@@ -301,6 +336,82 @@ typedef struct BiscuitMetaPageData {
                                     * pending_list_limit and autovacuum
                                     * cadence */
 
+    /* ---------------- Shared pending log (biscuit_pendlog.c) ----------
+     *
+     * The single index-wide append-only log that replaced the old
+     * per-structure pending chains. Every steady-state bitmap mutation
+     * now appends one self-describing BiscuitPendLogRecord here instead
+     * of appending to (and updating the directory entry of) its own
+     * structure's private chain.
+     *
+     * Why: a row touching K structures used to dirty ~K distinct pages,
+     * and PostgreSQL charges a full-page image per distinct page per
+     * checkpoint interval. Measured on one insert of a 9-character
+     * string: 82 pages, 84 FPIs, 60KB of WAL. With one shared log those
+     * K records (20 bytes each) land on the *same* tail page, so the
+     * page count -- and therefore the FPI bill -- stops scaling with the
+     * number of structures a row touches.
+     *
+     * BiscuitDirEntry's per-structure pending fields were consequently
+     * removed outright: a bitmap-kind entry now carries only blob_head.
+     * See BiscuitDirEntry's per-kind field table below.
+     */
+    BlockNumber pendlog_head;     /* first page of the shared log chain,
+                                    * InvalidBlockNumber when the log is
+                                    * empty (nothing appended since the
+                                    * last drain) */
+    BlockNumber pendlog_tail;     /* current append target; the O(1) tail
+                                    * pointer, same role the old
+                                    * per-structure tail pointer served */
+    uint32      pendlog_npages;   /* pages currently in the log chain.
+                                    *
+                                    * Deliberately a PAGE count, not a record
+                                    * count: it is only touched when the log
+                                    * grows a page, so the metapage stays out
+                                    * of the per-append WAL record entirely.
+                                    * An earlier version kept an exact record
+                                    * count here and paid for it twice --
+                                    * every append carried the metapage into
+                                    * its WAL record (doubling pages-per-append,
+                                    * the very quantity this design minimizes)
+                                    * and every writer serialized on one
+                                    * exclusive metapage lock.
+                                    *
+                                    * npages * BLCKSZ is the log's size for
+                                    * drain-trigger purposes, which is all the
+                                    * trigger ever needed. Exact record counts
+                                    * are available per page in
+                                    * BiscuitPendLogPageHeader.num_records for
+                                    * anything that genuinely needs them. */
+
+    BlockNumber pendlog_draining;  /* Head of a chain that has been detached
+                                     * for draining but whose merge has not
+                                     * completed. InvalidBlockNumber
+                                     * normally.
+                                     *
+                                     * Exists because a drain detaches the
+                                     * log from pendlog_head *before*
+                                     * merging (so appenders never block and
+                                     * can never lose a record into a chain
+                                     * being drained), which leaves a window
+                                     * where the only reference to those
+                                     * records is the drainer's local
+                                     * variable. GenericXLog page changes
+                                     * survive transaction abort, so an
+                                     * ereport(ERROR) mid-merge -- or a
+                                     * crash -- would otherwise strand every
+                                     * not-yet-merged delta permanently.
+                                     *
+                                     * Recovery is replay: the next drain
+                                     * ingests this chain before the live
+                                     * one. Re-applying deltas that were
+                                     * already folded into a blob is safe
+                                     * because the last op per rec_idx wins,
+                                     * so replaying a structure's full
+                                     * sequence lands on the same state
+                                     * whether or not part of it was already
+                                     * applied. */
+
     /*
      * Reserved for future metadata. No backward-compat constraint on this
      * cutover (clean format bump), so headroom is cheap. Writers must
@@ -308,7 +419,7 @@ typedef struct BiscuitMetaPageData {
      * value found here), so old readers stay forward-compatible with
      * newer writers that start using a slot here.
      */
-    uint32 reserved[6];
+    uint32 reserved[5];
 } BiscuitMetaPageData;
 
 typedef BiscuitMetaPageData *BiscuitMetaPage;
@@ -334,8 +445,95 @@ typedef BiscuitMetaPageData *BiscuitMetaPage;
 
 /* ---- shared chunk/page "kind" tag, stored in the opaque area ---- */
 #define BISCUIT_PAGE_BLOB     1     /* compacted-blob chunk page   */
-#define BISCUIT_PAGE_PENDING  2     /* pending-delta list page     */
+/*
+ * Kind 2 is RETIRED: it tagged the old per-structure pending-delta pages,
+ * a format nothing writes or reads any more (replaced by
+ * BISCUIT_PAGE_PENDLOG). Deliberately left defined-but-unused rather than
+ * deleted, and deliberately not recycled for a new page kind, so that any
+ * page still carrying this tag in a development-era relation file is
+ * recognizable as stale rather than being silently misread as whatever
+ * structure claimed the number next.
+ */
+#define BISCUIT_PAGE_PENDING_RETIRED  2
 #define BISCUIT_PAGE_DIR      3     /* directory page              */
+
+/*
+ * ---- row-identity in-place storage (biscuit_rowstore.c) ----
+ *
+ * Added for the TIDS/STRCACHE/HEADER in-place rewrite (biscuit_rowstore.c;
+ * no BISCUIT_VERSION bump -- version 3 was never shipped, see that
+ * constant's comment): unlike the compacted-blob/pending-list chains
+ * above, these are mutated with single-page in-place GenericXLog writes,
+ * not rewritten wholesale on every commit. See biscuit_rowstore.c's file
+ * header for the full design.
+ *
+ *   BISCUIT_PAGE_PAGEDIR  -- append-only chain mapping a dense logical
+ *                            page number (0, 1, 2, ...) to the physical
+ *                            BlockNumber holding that logical page's fixed
+ *                            slot array. Shared by both TIDS (slot =
+ *                            ItemPointerData[]) and STRCACHE's pointer
+ *                            array (slot = BiscuitStrPtr[]); entries are
+ *                            appended once, when a new logical page is
+ *                            first allocated, and never change afterward,
+ *                            so (unlike BISCUIT_PAGE_DIR) there is no
+ *                            in-place update case at all here.
+ *   BISCUIT_PAGE_TIDSLOT  -- fixed ItemPointerData[BiscuitTidSlotsPerPage]
+ *                            array, one slot per record index landing in
+ *                            this logical page's range. No header: the
+ *                            slot array starts right after the standard
+ *                            page header.
+ *   BISCUIT_PAGE_STRPTR   -- fixed BiscuitStrPtr[BiscuitStrPtrSlotsPerPage]
+ *                            array, same addressing shape as TIDSLOT.
+ *   BISCUIT_PAGE_STRHEAP  -- append-only, bump-allocated chain of raw
+ *                            string bytes that BiscuitStrPtr entries point
+ *                            into. A write either fits in the remaining
+ *                            space of the current tail page (in-place
+ *                            append, pointer written elsewhere) or spills
+ *                            to a fresh tail page -- same tail-page
+ *                            pattern as biscuit_pendlog_append(). Bytes
+ *                            already written are never moved or reclaimed
+ *                            in this phase (freelist-slot reuse orphans
+ *                            the old bytes; see biscuit_rowstore.c's file
+ *                            header for the deferred compaction note).
+ *   BISCUIT_PAGE_HEADER   -- single fixed page (never chained) holding the
+ *                            HEADER scalar-bookkeeping blob, overwritten
+ *                            in place every commit instead of being
+ *                            reallocated.
+ */
+/*
+ * BISCUIT_PAGE_PENDLOG -- a page of the single index-wide shared pending
+ * log (biscuit_pendlog.c). Layout is BiscuitPendLogPageHeader followed by
+ * a packed BiscuitPendLogRecord[] array; chained via opaque.next, with the
+ * tail marked BISCUIT_PENDING_FLAG_TAIL.
+ *
+ * This replaced the per-structure pending page (retired kind 2, see
+ * BISCUIT_PAGE_PENDING_RETIRED above); nothing writes or reads that
+ * format any more.
+ */
+#define BISCUIT_PAGE_PENDLOG  9     /* shared index-wide pending log page  */
+
+/*
+ * BISCUIT_PENDLOG_DRAIN_PAGES
+ *
+ * Log size (in pages) at which the append path drains opportunistically.
+ * VACUUM drains unconditionally regardless of this.
+ *
+ * Sized for an OLAP-first workload: a drain costs O(index size) because it
+ * rewrites every touched structure's compacted blob, so frequent draining
+ * makes bulk loading quadratic. Letting the log grow to a few MB keeps
+ * drains rare during a load while bounding what a cold reader has to
+ * materialize into a snapshot before its first query (and bounding that
+ * snapshot's memory). 512 pages = 4MB at the default BLCKSZ, which is the
+ * same order as GIN's gin_pending_list_limit default, arrived at for the
+ * same reasons.
+ */
+#define BISCUIT_PENDLOG_DRAIN_PAGES  512
+
+#define BISCUIT_PAGE_PAGEDIR  4     /* logical-page -> BlockNumber directory */
+#define BISCUIT_PAGE_TIDSLOT  5     /* fixed ItemPointerData[] slot page     */
+#define BISCUIT_PAGE_STRPTR   6     /* fixed BiscuitStrPtr[] slot page       */
+#define BISCUIT_PAGE_STRHEAP  7     /* append-only string value-heap page    */
+#define BISCUIT_PAGE_HEADER   8     /* single in-place HEADER blob page      */
 
 /*
  * BiscuitPageOpaqueData
@@ -367,7 +565,7 @@ typedef struct BiscuitPageOpaqueData
 
 typedef BiscuitPageOpaqueData *BiscuitPageOpaque;
 
-/* flags for BISCUIT_PAGE_PENDING pages */
+/* flags for tail-page-tracking chains (PENDLOG, STRHEAP) */
 #define BISCUIT_PENDING_FLAG_TAIL   0x0001  /* this is the current append target */
 
 /* ---- (a) COMPACTED-BLOB CHUNK CHAIN ---- */
@@ -393,76 +591,136 @@ typedef struct BiscuitBlobChunkHeader
     /* chunk_len bytes of raw CRoaring-serialized payload follow */
 } BiscuitBlobChunkHeader;
 
-/* ---- (b) PENDING-DELTA LIST CHAIN ---- */
+/* ---- (b) PENDING DELTAS ----
+ *
+ * There is no per-structure pending chain any more, and no
+ * BISCUIT_PAGE_PENDING page format. Both were replaced by the single
+ * index-wide append-only log in biscuit_pendlog.c: see
+ * BiscuitPendLogRecord / BiscuitPendLogPageHeader below and
+ * BiscuitMetaPageData.pendlog_* above. BISCUIT_PENDING_OP_ADD/_REMOVE
+ * survive because the shared log's records still use them.
+ */
 
 #define BISCUIT_PENDING_OP_ADD     1
 #define BISCUIT_PENDING_OP_REMOVE  2
-
-/*
- * BiscuitPendingRecord
- * One raw delta against a structure's compacted bitmap. `value` is
- * the roaring-bitmap uint32 element -- for record-position bitmaps
- * this is the record slot index (not a raw ItemPointerData; Biscuit
- * already maps TIDs to dense uint32 slots elsewhere, so the pending
- * record reuses that same domain to stay a fixed-size 8-byte record
- * and pack densely on a page).
- */
-typedef struct BiscuitPendingRecord
-{
-    uint32  value;   /* roaring-bitmap element (record slot) */
-    uint8   op;      /* BISCUIT_PENDING_OP_ADD / _REMOVE */
-    uint8   reserved[3];
-} BiscuitPendingRecord;
-
-/*
- * BiscuitPendingPageHeader
- * Header at the start of each page's data area in a pending-list
- * chain. Records are appended packed and in order; a page fills up
- * to num_records * sizeof(BiscuitPendingRecord) and a new tail page
- * is allocated when it can't fit the next record (GIN-style: no
- * in-place compaction of a pending page, only whole-chain drain).
- */
-typedef struct BiscuitPendingPageHeader
-{
-    uint32  num_records;    /* records currently stored on this page */
-    uint32  max_records;    /* capacity for this page, set at alloc  */
-    /* num_records * sizeof(BiscuitPendingRecord) records follow */
-} BiscuitPendingPageHeader;
 
 /* ---- DIRECTORY ---- */
 
 /*
  * BiscuitDirEntry
- * Whole-bitmap-granularity directory entry: (col, is_lower, kind,
- * char, position) -> this pair of chain heads. Container-level
+ * Whole-structure-granularity directory entry: (col, is_lower, kind,
+ * ch, position) -> the chain head(s) that structure owns. Container-level
  * (per-block-of-the-bitmap) addressing is explicitly out of scope
  * for this design -- see design doc point 5. This is a further
  * write-amplification reduction for a *later* iteration, not a fix
  * for any correctness or performance problem this design has.
  *
- * pending_count/pending_bytes are maintained incrementally on every
- * append and reset on drain, so the size-threshold check in point 3
- * is an O(1) field read rather than a chain walk.
+ * Per-kind field meanings
+ * -----------------------
+ * blob_head is the only field every kind uses, but what it heads differs:
+ *
+ *   POS/NEG/CACHE/LEN/LEN_GE/TOMBSTONES (the bitmap kinds)
+ *     blob_head     -- compacted-blob chunk chain (biscuit_blob.c), i.e.
+ *                      the structure's serialized RoaringBitmap.
+ *     strheap_*     -- unused, always InvalidBlockNumber.
+ *
+ *     These kinds have NO per-structure pending chain. Undrained deltas
+ *     live in the index-wide shared log (biscuit_pendlog.c) and are keyed
+ *     by structure identity there, so nothing per-entry tracks them. The
+ *     old pending_head/pending_tail/pending_count/pending_bytes fields
+ *     that used to serve that purpose are gone; see the note below.
+ *
+ *   FREELIST
+ *     blob_head     -- compacted-blob chain holding a flat uint32_t[] dump.
+ *     strheap_*     -- unused.
+ *
+ *   TIDS
+ *     blob_head     -- root of the TIDS logical-page directory chain
+ *                      (BISCUIT_PAGE_PAGEDIR), mapping
+ *                      slot_idx / BiscuitTidSlotsPerPage to a
+ *                      BISCUIT_PAGE_TIDSLOT block. InvalidBlockNumber
+ *                      until the first TID is ever written.
+ *     strheap_*     -- unused.
+ *
+ *   STRCACHE (one entry per (col, is_lower))
+ *     blob_head     -- root of the pointer-array logical-page directory
+ *                      chain (BISCUIT_PAGE_PAGEDIR) over
+ *                      BISCUIT_PAGE_STRPTR pages of BiscuitStrPtr[].
+ *     strheap_head  -- head of this column's append-only value-heap chain
+ *                      (BISCUIT_PAGE_STRHEAP).
+ *     strheap_tail  -- current value-heap tail (bump-allocation target).
+ *
+ *   HEADER
+ *     blob_head     -- the single BISCUIT_PAGE_HEADER block, overwritten
+ *                      in place every save (never chained, never
+ *                      reallocated once the first write creates it).
+ *     strheap_*     -- unused.
+ *
+ * Why strheap_head/strheap_tail rather than reused pending fields
+ * ---------------------------------------------------------------
+ * These two fields used to be pending_head/pending_tail, silently
+ * reinterpreted as the STRCACHE value heap for that one kind while
+ * meaning "pending-delta chain" for the bitmap kinds. That was a
+ * comment-level rename only, and it was a live hazard: biscuit_persist.c's
+ * drop walk branches on kind to decide how to free them, and one missing
+ * or mis-ordered case would have freed a STRHEAP chain as if it were a
+ * pending chain (or walked a pending chain as a value heap). With the
+ * bitmap kinds' pending chains gone entirely there is no longer anything
+ * to share these fields *with*, so they are named for their only real
+ * user. Nothing forced the old shape to be preserved -- no format is
+ * shipped -- so the honest names win.
+ *
+ * pending_count/pending_bytes are also gone: they existed for the
+ * per-structure size-threshold drain trigger, and the shared log's
+ * trigger is a page count on the metapage (pendlog_npages) instead.
+ * Dropping all four fields shrinks the entry from 32 to 24 bytes, which
+ * directly raises BiscuitDirPageMaxEntries().
+ *
+ * ALWAYS initialize with BiscuitDirEntryInit() rather than
+ * memset()-then-assign: a zeroed BlockNumber is block 0 (the metapage),
+ * NOT InvalidBlockNumber, so a field left at its memset value is a
+ * pointer at the metapage that teardown code will happily try to free.
  */
 typedef struct BiscuitDirEntry
 {
     /* identity -- see biscuit_pattern.c accessor naming for kind values */
     int16   col;            /* column index, or -1 for legacy single-column */
     bool    is_lower;        /* case-insensitive structure set?             */
-    uint8   kind;            /* BISCUIT_DIR_KIND_* -- pos/neg/cache/len/len_ge */
+    uint8   kind;            /* BISCUIT_DIR_KIND_*                          */
     int32   ch;               /* character (unsigned char), or -1 if n/a     */
     int32   position;         /* pos/neg_offset/length value, or -1 if n/a   */
 
-    /* compacted-blob chain */
+    /* primary chain head -- meaning is kind-dependent, see above */
     BlockNumber blob_head;    /* InvalidBlockNumber if structure is empty/absent */
 
-    /* pending-delta chain */
-    BlockNumber pending_head; /* InvalidBlockNumber if none ever allocated   */
-    BlockNumber pending_tail; /* == pending_head if single page; cached to
-                                * make append O(1) instead of a chain walk   */
-    uint32      pending_count;  /* total undained records across the chain  */
-    uint32      pending_bytes;  /* total undrained bytes, for the size trigger */
+    /* STRCACHE value heap only; InvalidBlockNumber for every other kind */
+    BlockNumber strheap_head;
+    BlockNumber strheap_tail;
 } BiscuitDirEntry;
+
+/*
+ * BiscuitDirEntryInit
+ *
+ * Set an entry's identity and put every chain head at InvalidBlockNumber.
+ * This exists because the natural-looking memset(&e, 0, sizeof e) leaves
+ * all three BlockNumbers pointing at block 0 -- the metapage -- and every
+ * call site then had to remember to overwrite each one. Callers set
+ * whichever chain heads they actually own after calling this.
+ */
+static inline void
+BiscuitDirEntryInit(BiscuitDirEntry *e, int32 col, bool is_lower,
+                     uint8 kind, int32 ch, int32 position)
+{
+    memset(e, 0, sizeof(*e));
+    e->col          = (int16) col;
+    e->is_lower     = is_lower;
+    e->kind         = kind;
+    e->ch           = ch;
+    e->position     = position;
+    e->blob_head    = InvalidBlockNumber;
+    e->strheap_head = InvalidBlockNumber;
+    e->strheap_tail = InvalidBlockNumber;
+}
 
 #define BISCUIT_DIR_KIND_POS      1
 #define BISCUIT_DIR_KIND_NEG      2
@@ -562,8 +820,8 @@ typedef struct BiscuitDirEntry
  * appended in the order their structures are first referenced during
  * build/insert; a page fills up to num_entries * sizeof(BiscuitDirEntry)
  * and a new tail page is linked via opaque.next when it can't fit the
- * next entry. Unlike the pending-list chain, directory entries are
- * mutated in place (pending_count/pending_bytes/blob_head are updated on
+ * next entry. Unlike the shared log, directory entries are
+ * mutated in place (blob_head/strheap_* are updated on
  * their existing entry, not re-appended), so a directory page never
  * shrinks and entries are never relocated once written -- an entry's
  * (page, offset) is stable for the life of the structure it describes.
@@ -586,12 +844,6 @@ typedef struct BiscuitDirPageHeader
  * given size, for use when a chain allocates a new page and needs to set
  * max_records/max_entries in that page's header.
  */
-#define BiscuitPendingPageMaxRecords(pagesize) \
-    (((pagesize) - MAXALIGN(SizeOfPageHeaderData) \
-                  - MAXALIGN(sizeof(BiscuitPendingPageHeader)) \
-                  - MAXALIGN(sizeof(BiscuitPageOpaqueData))) \
-     / sizeof(BiscuitPendingRecord))
-
 #define BiscuitDirPageMaxEntries(pagesize) \
     (((pagesize) - MAXALIGN(SizeOfPageHeaderData) \
                   - MAXALIGN(sizeof(BiscuitDirPageHeader)) \
@@ -606,6 +858,171 @@ typedef struct BiscuitDirPageHeader
 #define BiscuitBlobChunkMaxPayload(pagesize) \
     ((pagesize) - MAXALIGN(SizeOfPageHeaderData) \
                 - MAXALIGN(sizeof(BiscuitBlobChunkHeader)) \
+                - MAXALIGN(sizeof(BiscuitPageOpaqueData)))
+
+/* ==================== SHARED PENDING LOG ====================
+ * See BISCUIT_PAGE_PENDLOG above, BiscuitMetaPageData.pendlog_* and
+ * biscuit_pendlog.c for the full design.
+ */
+
+/*
+ * BiscuitPendLogRecord
+ *
+ * One delta against one structure's compacted bitmap, in the shared log.
+ *
+ * The difference from the retired per-structure pending record is that
+ * this record is *self-describing*: it carries the full structure identity
+ * (col, is_lower, kind, ch, position) that the old per-structure chain
+ * conveyed implicitly by which chain the record was sitting in. That
+ * costs 12 extra bytes per record (20 vs 8) and buys the collapse from
+ * K pages per row down to 1 -- a trade that is overwhelmingly worth it,
+ * because page count drives full-page-image volume while record width
+ * only drives the (already cheap) delta.
+ *
+ * rec_idx is the dense record slot index, the same uint32 domain the
+ * retired per-structure pending record's `value` field used.
+ */
+typedef struct BiscuitPendLogRecord
+{
+    int16   col;            /* BiscuitDirEntry.col, incl. the sentinels */
+    uint8   is_lower;
+    uint8   kind;           /* BISCUIT_DIR_KIND_* */
+    int32   ch;
+    int32   position;
+    uint32  rec_idx;        /* roaring element to add/remove */
+    uint8   op;             /* BISCUIT_PENDING_OP_ADD / _REMOVE */
+    uint8   reserved[3];    /* zero-filled by writers, ignored by readers */
+} BiscuitPendLogRecord;
+
+typedef struct BiscuitPendLogPageHeader
+{
+    uint32  num_records;
+    uint32  max_records;
+} BiscuitPendLogPageHeader;
+
+#define BiscuitPendLogMaxRecords(pagesize) \
+    (((pagesize) - MAXALIGN(SizeOfPageHeaderData) \
+                  - MAXALIGN(sizeof(BiscuitPendLogPageHeader)) \
+                  - MAXALIGN(sizeof(BiscuitPageOpaqueData))) \
+     / sizeof(BiscuitPendLogRecord))
+
+#define BiscuitPendLogUsedBytes(n) \
+    (MAXALIGN(sizeof(BiscuitPendLogPageHeader)) + (Size)(n) * sizeof(BiscuitPendLogRecord))
+
+/* ==================== ROW-IDENTITY IN-PLACE STORAGE ====================
+ * See BISCUIT_PAGE_PAGEDIR/_TIDSLOT/_STRPTR/_STRHEAP/_HEADER above and
+ * biscuit_rowstore.c for the full design.
+ */
+
+/*
+ * BiscuitPageDirHeader
+ * Header for a BISCUIT_PAGE_PAGEDIR page: a packed, append-only
+ * BlockNumber[] array mapping a contiguous run of logical page numbers to
+ * physical blocks. Logical page L lives on pagedir chain page
+ * (L / max_entries), at offset (L % max_entries) once the right chain
+ * page is reached by walking opaque.next -- entries are only ever
+ * appended (when a new logical TIDSLOT/STRPTR page is first allocated),
+ * never updated, so unlike BISCUIT_PAGE_DIR there is no in-place-update
+ * case here at all.
+ */
+typedef struct BiscuitPageDirHeader
+{
+    uint32  num_entries;    /* entries currently stored on this page */
+    uint32  max_entries;    /* capacity for this page, set at alloc  */
+    /* num_entries * sizeof(BlockNumber) entries follow */
+} BiscuitPageDirHeader;
+
+#define BiscuitPageDirMaxEntries(pagesize) \
+    (((pagesize) - MAXALIGN(SizeOfPageHeaderData) \
+                  - MAXALIGN(sizeof(BiscuitPageDirHeader)) \
+                  - MAXALIGN(sizeof(BiscuitPageOpaqueData))) \
+     / sizeof(BlockNumber))
+
+/*
+ * A BISCUIT_PAGE_TIDSLOT page has no header at all: it is simply
+ * ItemPointerData[BiscuitTidSlotsPerPage] starting right after the
+ * standard page header, ending before the BiscuitPageOpaqueData special
+ * area. An all-zero (never-written) slot decodes as an invalid
+ * ItemPointer (ip_posid == 0), which is exactly PageInit()'s zero-filled
+ * starting state, so unwritten slots need no explicit initialization.
+ */
+#define BiscuitTidSlotsPerPage(pagesize) \
+    (((pagesize) - MAXALIGN(SizeOfPageHeaderData) \
+                  - MAXALIGN(sizeof(BiscuitPageOpaqueData))) \
+     / sizeof(ItemPointerData))
+
+/*
+ * BiscuitStrPtr
+ * One STRCACHE pointer-array slot: where in the value heap (or, for an
+ * oversized value, which dedicated blob chain) the string for this record
+ * slot lives.
+ *
+ *   blkno == InvalidBlockNumber              -> NULL (absent) string.
+ *   offset == BISCUIT_STRPTR_OVERSIZE_SENTINEL
+ *                                              -> blkno is a
+ *                                                 biscuit_page_write_blob()
+ *                                                 chain head (the value
+ *                                                 didn't fit in one heap
+ *                                                 page); length is the
+ *                                                 blob's total byte length.
+ *   otherwise                                 -> blkno/offset/length
+ *                                                 address `length` bytes
+ *                                                 starting at byte `offset`
+ *                                                 of that BISCUIT_PAGE_STRHEAP
+ *                                                 page's payload area
+ *                                                 (length == 0 is a legal
+ *                                                 non-NULL empty string,
+ *                                                 distinguished from the
+ *                                                 NULL case above by blkno).
+ */
+typedef struct BiscuitStrPtr
+{
+    BlockNumber blkno;
+    uint32      offset;
+    uint32      length;
+} BiscuitStrPtr;
+
+#define BISCUIT_STRPTR_OVERSIZE_SENTINEL   PG_UINT32_MAX
+
+#define BiscuitStrPtrSlotsPerPage(pagesize) \
+    (((pagesize) - MAXALIGN(SizeOfPageHeaderData) \
+                  - MAXALIGN(sizeof(BiscuitPageOpaqueData))) \
+     / sizeof(BiscuitStrPtr))
+
+/*
+ * BiscuitStrHeapHeader
+ * Header for a BISCUIT_PAGE_STRHEAP page: a simple bump allocator.
+ * `used` bytes of the `avail`-byte payload area (immediately following
+ * this header) are occupied; a write either fits in (avail - used) and is
+ * appended in place, or the page is full and a new tail page is
+ * allocated -- identical shape to BiscuitPendLogPageHeader's
+ * num_records/max_records, just byte-granular instead of record-granular.
+ * Bytes already written are never moved or reclaimed in this phase
+ * (freelist-slot reuse orphans the old bytes -- deferred to the future
+ * STRCACHE value-heap compaction work, not required for v1 correctness).
+ */
+typedef struct BiscuitStrHeapHeader
+{
+    uint32  used;
+    uint32  avail;
+    /* `used` bytes of raw string payload follow, up to `avail` total */
+} BiscuitStrHeapHeader;
+
+#define BiscuitStrHeapMaxPayload(pagesize) \
+    ((pagesize) - MAXALIGN(SizeOfPageHeaderData) \
+                - MAXALIGN(sizeof(BiscuitStrHeapHeader)) \
+                - MAXALIGN(sizeof(BiscuitPageOpaqueData)))
+
+/*
+ * A BISCUIT_PAGE_HEADER page has just a 4-byte length prefix (MAXALIGN'd)
+ * followed by that many bytes of the HEADER blob -- never chained, always
+ * overwritten in place. biscuit_rowstore_header_write() ERRORs rather
+ * than silently truncating if the caller's blob ever exceeds this (only
+ * realistically reachable with a huge number of indexed columns).
+ */
+#define BiscuitHeaderMaxPayload(pagesize) \
+    ((pagesize) - MAXALIGN(SizeOfPageHeaderData) \
+                - MAXALIGN(sizeof(uint32)) \
                 - MAXALIGN(sizeof(BiscuitPageOpaqueData)))
 
 /* ---- METAPAGE EXTENSION ----
@@ -648,16 +1065,15 @@ typedef struct BiscuitDirPageHeader
  * wrong, and was corrected; see design doc Round 5, finding 1, for why a
  * per-append write to a single shared metapage field is a global
  * serialization point that contradicts §6's no-cross-structure-contention
- * guarantee). The only synchronously-maintained pending-byte counters are
- * the per-structure `BiscuitDirEntry.pending_bytes` fields, which is also
- * all the §3 size-threshold trigger actually needs -- it was never
- * necessary for the append path to touch anything index-wide.
+ * guarantee). The shared log's drain trigger reads pendlog_npages, which
+ * the append path only writes when the log grows a page -- so the common
+ * append still touches nothing index-wide.
  *
  * Scope note: this header only defines the metapage layout and the page
  * structs it points at (BiscuitDirPageHeader alongside the existing
- * BiscuitBlobChunkHeader/BiscuitPendingPageHeader). Directory
- * lookup/insert, compacted-blob chunk read/write, and pending-list
- * append/drain logic are all still unimplemented -- see biscuit_index.c's
+ * BiscuitBlobChunkHeader/BiscuitPendLogPageHeader). Directory
+ * lookup/insert, compacted-blob chunk read/write, and shared-log
+ * append/drain logic live in their own files -- see biscuit_index.c's
  * biscuit_write_metadata_to_disk()/biscuit_read_metadata_from_disk() for
  * the metapage read/write that *is* wired up in this phase, and the
  * design doc for what's still pending.

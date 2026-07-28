@@ -11,6 +11,9 @@
 
 #include "biscuit_common.h"
 #include "biscuit_cache.h"
+#include "biscuit_pendlog.h"   /* biscuit_pendlog_invalidate() -- the snapshot
+                                 * cache must be dropped alongside the index
+                                 * cache on relcache invalidation */
 
 /* ==================== CACHE STATE ==================== */
 
@@ -131,6 +134,16 @@ biscuit_relcache_callback(Datum arg, Oid relid)
 {
     (void) arg;
     biscuit_cache_remove(relid);
+
+    /*
+     * Drop any cached pending-log snapshot for this relation too. These are
+     * two independent process-local caches keyed by the same Oid, and
+     * leaving the snapshot behind after a DROP/REINDEX would let a later
+     * query reconcile against deltas belonging to an index that no longer
+     * exists. relid == InvalidOid means "everything", which
+     * biscuit_pendlog_invalidate() already interprets the same way.
+     */
+    biscuit_pendlog_invalidate(relid);
     //elog(DEBUG1, "Biscuit: Invalidated cache for relation %u", relid);
 }
 

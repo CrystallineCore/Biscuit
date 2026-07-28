@@ -5,15 +5,34 @@ EXTVERSION = 3.0.0
 
 MODULE_big = biscuit
 
-# Automatically compile all source files in src/
+# Automatically compile all source files in src/.
+#
+# This wildcard is why adding a new module (e.g. src/biscuit_rowstore.c, the
+# in-place row-identity storage layer) needs no edit here -- new .c files in
+# src/ are picked up on the next build automatically. Note the corollary:
+# `make clean` only removes src/*.o, so a *removed* source file's stale .o
+# would still be linked; run `make clean` after deleting a module.
 OBJS = $(patsubst %.c,%.o,$(wildcard src/*.c))
 
 # Versioned install script (IMPORTANT: must match EXTENSION versioning scheme)
+#
+# Every upgrade script that exists in sql/ must be listed here, or PGXS won't
+# install it and ALTER EXTENSION ... UPDATE will fail to find a path to the
+# target version. sql/biscuit--2.5.0--3.0.0.sql was missing from this list
+# while EXTVERSION was already 3.0.0, so `ALTER EXTENSION biscuit UPDATE TO
+# '3.0.0'` had no installed script to reach 3.0.0 through -- only a fresh
+# CREATE EXTENSION worked.
 DATA = \
 	sql/biscuit--$(EXTVERSION).sql \
 	sql/biscuit--2.2.3--2.3.0.sql \
 	sql/biscuit--2.3.0.sql \
-	sql/biscuit--2.3.0--2.4.0.sql
+	sql/biscuit--2.3.0--2.4.0.sql \
+	sql/biscuit--2.5.0--3.0.0.sql
+
+# Regression tests: `make installcheck` runs sql/*.sql from test/sql against a
+# running server and diffs against test/expected/*.out.
+REGRESS_OPTS = --inputdir=test --load-extension=biscuit
+REGRESS = $(patsubst test/sql/%.sql,%,$(wildcard test/sql/*.sql))
 
 PGFILEDESC = "Wildcard pattern matching through bitmap indexing"
 
