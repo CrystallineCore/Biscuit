@@ -24,6 +24,9 @@
 #include "biscuit_bitmap.h"
 #include "biscuit_blob.h"
 #include "storage/bufpage.h"
+#include "storage/lmgr.h"      /* LockRelationForExtension() /
+                                  UnlockRelationForExtension(), used by
+                                  biscuit_page_alloc()'s P_NEW path below */
 #include "storage/procarray.h"   /* GetOldestNonRemovableTransactionId(), used
                                    * by biscuit_page_alloc()'s recycle_xid
                                    * horizon check below */
@@ -303,8 +306,30 @@ biscuit_page_alloc(Relation index, uint16 page_kind)
     return cbuf;
 
 extend:
-    cbuf = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL);
-    LockBuffer(cbuf, BUFFER_LOCK_EXCLUSIVE);
+    /*
+     * Extending the relation needs the standard extension lock, the same
+     * way every other in-core index AM's P_NEW path does (see e.g.
+     * _bt_getbuf(), ginNewBuffer(), _hash_getnewbuf()). Without it, two
+     * backends racing to extend at the same moment -- a foreground
+     * inserter and autovacuum, or two concurrent sessions -- can both be
+     * handed the *same* new block number: nothing here was serializing
+     * that decision. Whoever writes second silently overwrites the
+     * first's chunk, which is indistinguishable, from a later reader's
+     * point of view, from the WAL-atomicity gap this file used to have
+     * in biscuit_page_write_blob() -- same "expected seq" mismatch,
+     * different cause. This one only fires when a second backend
+     * genuinely overlaps the extension instant, which is why it surfaces
+     * far less often than the bug that used to dominate here, but it's
+     * not zero.
+     *
+     * RBM_ZERO_AND_LOCK (rather than RBM_NORMAL + a separate LockBuffer()
+     * call) makes "zero-fill the new page" and "take the exclusive
+     * content lock" a single atomic step with respect to other backends,
+     * instead of two, closing the window between them.
+     */
+    LockRelationForExtension(index, ExclusiveLock);
+    cbuf = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_ZERO_AND_LOCK, NULL);
+    UnlockRelationForExtension(index, ExclusiveLock);
     return cbuf;
 }
 
