@@ -211,7 +211,7 @@ typedef struct {
 #define CHAR_RANGE                      256
 #define TOMBSTONE_CLEANUP_THRESHOLD     1000
 #define RADIX_SORT_THRESHOLD            5000
-#define BISCUIT_LIBRARY_VERSION         "3.0.0 - Cologne"
+#define BISCUIT_LIBRARY_VERSION         "3.0.0 - Kit"
 
 /* ==================== MEMORY MANAGEMENT MACROS ==================== */
 
@@ -534,6 +534,85 @@ typedef BiscuitMetaPageData *BiscuitMetaPage;
 #define BISCUIT_PAGE_STRPTR   6     /* fixed BiscuitStrPtr[] slot page       */
 #define BISCUIT_PAGE_STRHEAP  7     /* append-only string value-heap page    */
 #define BISCUIT_PAGE_HEADER   8     /* single in-place HEADER blob page      */
+
+/*
+ * BISCUIT_ROWSTORE_LOCK_BLKNO
+ *
+ * Lock tag for the per-index row-identity allocation lock, taken as
+ * LockPage(index, BISCUIT_ROWSTORE_LOCK_BLKNO, ExclusiveLock) -- see
+ * biscuit_persist.c's biscuit_rowstore_alloc_lock().
+ *
+ * Deliberately a block number that can never name a real page, because
+ * this is a pure lock tag and not a page reference. It must also differ
+ * from BISCUIT_METAPAGE_BLKNO, which biscuit_pendlog_drain_all() already
+ * uses as its own heavyweight serialization tag: coupling row-identity
+ * writes to the drain lock would make every INSERT queue behind an
+ * O(index size) merge, which is precisely the thing that drain's
+ * ConditionalLockPage(wait = false) path exists to avoid.
+ *
+ * Why the lock exists at all: writing a row's identity is a
+ * read-modify-write of shared directory-entry state
+ * (biscuit_dir_find() -> allocate pages -> biscuit_dir_update()), and
+ * every step of it raced. Two backends could both miss the same
+ * directory entry and both insert it (biscuit_dir_insert() does not
+ * check for duplicates -- by design, callers were supposed to do the
+ * find-then-act split under something); both allocate a page-directory
+ * root and orphan one of them; both allocate the same logical slot page
+ * and hit the dense-in-order check; or both propagate a stale
+ * strheap_tail back into the entry and rewind the value heap's tail
+ * pointer. Serializing the whole sequence per index fixes all four at
+ * once, and does so where it costs least: allocation-shaped work already
+ * serializes on the shared pendlog tail page for the bulk of an insert's
+ * cost, so this adds queueing to an already-queued path rather than
+ * introducing a new bottleneck.
+ */
+#define BISCUIT_ROWSTORE_LOCK_BLKNO  ((BlockNumber) 0xFFFFFFF0)
+
+/*
+ * BiscuitSlotWriteMode
+ *
+ * Expected prior state of a row-identity slot, threaded from the CRUD
+ * call site (biscuit_index.c) down through biscuit_persist.c into
+ * biscuit_rowstore_tid_write()'s in-place branch, where it becomes an
+ * assertion about what that slot must currently contain on disk.
+ *
+ * This exists as defense-in-depth for the slot-allocation race fixed in
+ * biscuit_index.c's biscuit_claim_new_slot(). Slot numbers used to be
+ * handed out from a process-local counter, so two backends routinely
+ * computed the same slot_idx for different rows; the TIDSLOT page's
+ * buffer lock serialized the two writes without preventing the
+ * collision, and the second writer silently clobbered the first row.
+ * biscuit_pagedir_append()'s dense-in-order check was the only guard in
+ * this area and it only fires when a whole new *logical page* is
+ * allocated, which is why the collision showed up as a loud error in a
+ * minority of runs and as silent, total row loss in all of them.
+ *
+ * With a mode passed down, a fresh claim landing on an already-occupied
+ * slot raises an ERROR at the moment of the overwrite instead. The point
+ * is not to catch today's bug -- that is fixed at the allocator -- but to
+ * make any future regression in slot-allocation atomicity fail loudly and
+ * immediately rather than corrupting data invisibly.
+ */
+typedef enum BiscuitSlotWriteMode
+{
+    /*
+     * The caller just claimed this slot number and believes nothing has
+     * ever occupied it. The TIDS slot on disk must therefore be an invalid
+     * ItemPointer (a freshly PageInit'd TIDSLOT page is all zeroes, and
+     * ItemPointerIsValid() is false for a zeroed pointer). Anything else
+     * means two writers were handed the same slot.
+     */
+    BISCUIT_SLOT_WRITE_FRESH = 0,
+
+    /*
+     * The caller already owns this slot and is rewriting it: the UPDATE
+     * path in biscuit_insert() (duplicate TID found), the delete-clear
+     * loop in biscuit_bulkdelete(), and biscuit_persist_save()'s
+     * whole-snapshot bulk rewrite. Whatever the slot currently holds is
+     * expected, so no check is performed.
+     */
+    BISCUIT_SLOT_WRITE_INPLACE = 1
+} BiscuitSlotWriteMode;
 
 /*
  * BiscuitPageOpaqueData

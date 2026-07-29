@@ -109,11 +109,21 @@
  * vs "freelist-slot reuse" distinction at this layer -- both look
  * identical here (overwrite slot_idx), the distinction only matters one
  * layer up for which in-memory bitmaps also need updating.
+ *
+ * `mode` states what the caller expects the slot to currently contain
+ * (see BiscuitSlotWriteMode in biscuit_common.h). BISCUIT_SLOT_WRITE_FRESH
+ * makes the in-place branch verify the slot is genuinely unoccupied
+ * before overwriting it, and ERROR if it is not -- the write-layer half
+ * of the slot-allocation race fix, mirroring what
+ * biscuit_pagedir_append()'s dense-in-order check already does for
+ * cross-page appends. BISCUIT_SLOT_WRITE_INPLACE skips the check for
+ * callers that legitimately own the slot already.
  */
 extern void biscuit_rowstore_tid_write(Relation index,
                                         BlockNumber *pagedir_root,
                                         uint32 slot_idx,
-                                        const ItemPointerData *tid);
+                                        const ItemPointerData *tid,
+                                        BiscuitSlotWriteMode mode);
 
 /*
  * biscuit_rowstore_tid_read

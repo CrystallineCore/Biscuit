@@ -61,6 +61,26 @@ extern BiscuitIndex     *biscuit_load_index(Relation index);
 
 extern void biscuit_init_crud_structures(BiscuitIndex *idx);
 extern void biscuit_push_free_slot(BiscuitIndex *idx, uint32_t slot);
+
+/*
+ * biscuit_pop_free_slot
+ *
+ * Currently has NO callers. biscuit_insert() used to reuse tombstoned
+ * slots through this, but idx->free_list is process-local (rebuilt from
+ * the durable FREELIST blob on load, then mutated only in this backend's
+ * copy), so two backends both holding slot 42 on their lists would both
+ * pop it for two different rows -- the same silent-overwrite collision as
+ * the num_records race that biscuit_claim_new_slot() fixes, just sourced
+ * from the other allocator. Taking the metapage lock around the pop does
+ * not help while the list being popped from is still private.
+ *
+ * Retained (rather than deleted) because it is the natural shape of the
+ * eventual fix: a metapage-anchored durable freelist claimed under the
+ * same lock as biscuit_claim_new_slot(), at which point this function
+ * becomes its shared-state counterpart. biscuit_push_free_slot() is still
+ * live -- biscuit_bulkdelete() keeps the durable list accurate so that
+ * work has the data it needs.
+ */
 extern bool biscuit_pop_free_slot(BiscuitIndex *idx, uint32_t *slot);
 
 /*

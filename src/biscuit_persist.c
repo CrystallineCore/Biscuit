@@ -261,6 +261,42 @@ biscuit_persist_write_bitmap(Relation index,
         pfree(buf);
 }
 
+/* ================================================================
+ * Row-identity allocation lock
+ * ================================================================
+ *
+ * One heavyweight ExclusiveLock per index, held across the whole
+ * row-identity durable write. See BISCUIT_ROWSTORE_LOCK_BLKNO in
+ * biscuit_common.h for what it protects and why.
+ *
+ * Scope and ordering:
+ *   - Taken before any buffer lock in this path and released after all of
+ *     them are dropped, so it never participates in a buffer-lock cycle.
+ *   - biscuit_page_alloc() takes the metapage buffer lock and
+ *     LockRelationForExtension() beneath us; nothing anywhere takes those
+ *     and then reaches for this lock, so the order is total.
+ *   - biscuit_pendlog_drain_all() serializes on BISCUIT_METAPAGE_BLKNO, a
+ *     different tag. A backend never holds both: biscuit_insert() does all
+ *     of its pendlog work (including any opportunistic drain) before it
+ *     reaches the row-identity write.
+ *
+ * No PG_TRY is needed to release on error: heavyweight locks are dropped
+ * by the lock manager at transaction end, including abort. The explicit
+ * unlock is just early release so a long transaction does not hold the
+ * index's allocation lock across statements.
+ */
+static void
+biscuit_rowstore_alloc_lock(Relation index)
+{
+    LockPage(index, BISCUIT_ROWSTORE_LOCK_BLKNO, ExclusiveLock);
+}
+
+static void
+biscuit_rowstore_alloc_unlock(Relation index)
+{
+    UnlockPage(index, BISCUIT_ROWSTORE_LOCK_BLKNO, ExclusiveLock);
+}
+
 /* Forward declaration: defined further down alongside biscuit_persist_save_strcache()
  * (its build-time bulk-path sibling), but biscuit_persist_row_identity_write_record()
  * below needs it too and is declared first to sit next to biscuit_persist_write_tid(). */
@@ -309,7 +345,8 @@ biscuit_persist_write_header_blob(Relation index, const char *data, uint32 len)
  * (biscuit_persist_row_identity_write_record()).
  */
 static void
-biscuit_persist_write_tid(Relation index, uint32 slot_idx, const ItemPointerData *tid)
+biscuit_persist_write_tid(Relation index, uint32 slot_idx, const ItemPointerData *tid,
+                           BiscuitSlotWriteMode mode)
 {
     BiscuitDirEntry    entry;
     BiscuitDirEntryRef ref;
@@ -325,7 +362,7 @@ biscuit_persist_write_tid(Relation index, uint32 slot_idx, const ItemPointerData
     }
 
     pagedir_root = entry.blob_head;
-    biscuit_rowstore_tid_write(index, &pagedir_root, slot_idx, tid);
+    biscuit_rowstore_tid_write(index, &pagedir_root, slot_idx, tid, mode);
 
     if (pagedir_root != entry.blob_head)
     {
@@ -341,9 +378,19 @@ biscuit_persist_write_tid(Relation index, uint32 slot_idx, const ItemPointerData
  * slot for record slot_idx, all from idx's current in-memory state.
  */
 void
-biscuit_persist_row_identity_write_record(Relation index, BiscuitIndex *idx, uint32 slot_idx)
+biscuit_persist_row_identity_write_record(Relation index, BiscuitIndex *idx, uint32 slot_idx,
+                                           BiscuitSlotWriteMode mode)
 {
-    biscuit_persist_write_tid(index, slot_idx, &idx->tids[slot_idx]);
+    /*
+     * Serialize the whole sequence, not just the page allocations inside
+     * it. Every one of the calls below is a find-or-create against shared
+     * directory-entry state, and the TIDS write and the STRCACHE writes
+     * must agree about that state -- locking each one individually would
+     * leave the gaps between them open.
+     */
+    biscuit_rowstore_alloc_lock(index);
+
+    biscuit_persist_write_tid(index, slot_idx, &idx->tids[slot_idx], mode);
 
     if (idx->num_columns == 1)
     {
@@ -368,6 +415,8 @@ biscuit_persist_row_identity_write_record(Relation index, BiscuitIndex *idx, uin
                                                         idx->column_data_cache_lower[col][slot_idx] : NULL);
         }
     }
+
+    biscuit_rowstore_alloc_unlock(index);
 }
 
 /*
@@ -556,7 +605,13 @@ biscuit_persist_save(Oid indexoid, BiscuitIndex *idx)
 
         /* ---- tids ---- */
         for (i = 0; i < idx->num_records; i++)
-            biscuit_persist_write_tid(index, (uint32) i, &idx->tids[i]);
+            /*
+             * Whole-snapshot rewrite: every slot here is one this call
+             * already owns by definition, so no fresh-claim occupancy
+             * check applies.
+             */
+            biscuit_persist_write_tid(index, (uint32) i, &idx->tids[i],
+                                       BISCUIT_SLOT_WRITE_INPLACE);
 
         /* ---- tombstones ---- */
         biscuit_persist_write_bitmap(index, BISCUIT_DIR_COL_SINGLETON, false,
@@ -706,6 +761,16 @@ biscuit_persist_save_row_identity(Relation index, BiscuitIndex *idx)
     PBuf header;
     int  i;
 
+    /*
+     * Same directory find-or-create race as the per-row path: all three
+     * writes below are read-modify-writes of shared directory entries
+     * (HEADER, TOMBSTONES, FREELIST), and biscuit_dir_insert() does not
+     * detect duplicates. This runs once per statement at pre-commit, so
+     * the lock is uncontended in practice -- but "uncontended in practice"
+     * was exactly the assumption that produced the original bug.
+     */
+    biscuit_rowstore_alloc_lock(index);
+
     PG_TRY();
     {
         /* ---- header (scalar bookkeeping) ---- */
@@ -749,10 +814,14 @@ biscuit_persist_save_row_identity(Relation index, BiscuitIndex *idx)
     {
         /* Same rationale as biscuit_persist_save(): a swallowed failure
          * here would leave a cold load unable to see these rows. Let it
-         * propagate so the surrounding INSERT fails visibly. */
+         * propagate so the surrounding INSERT fails visibly. The
+         * allocation lock needs no explicit release on this path -- abort
+         * drops it. */
         PG_RE_THROW();
     }
     PG_END_TRY();
+
+    biscuit_rowstore_alloc_unlock(index);
 
     elog(DEBUG1, "biscuit: re-saved header/tombstones/freelist for index %u (%d records, gen " UINT64_FORMAT ")",
          indexoid, idx->num_records, idx->gen);

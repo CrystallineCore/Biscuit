@@ -95,10 +95,19 @@ extern void biscuit_persist_save_row_identity(Relation index, BiscuitIndex *idx)
  * O(1) per call (a handful of single-page GenericXLog writes), which is
  * the entire point -- see biscuit_persist_save_row_identity()'s comment
  * for what this replaced.
+ *
+ * `mode` is passed straight through to biscuit_rowstore_tid_write() as
+ * the caller's assertion about the slot's expected prior state (see
+ * BiscuitSlotWriteMode in biscuit_common.h). Pass
+ * BISCUIT_SLOT_WRITE_FRESH only from a call site that just claimed the
+ * slot via biscuit_claim_new_slot(); every rewrite of a slot the caller
+ * already owns (the UPDATE path, the bulkdelete clear loop, the
+ * whole-snapshot bulk save) passes BISCUIT_SLOT_WRITE_INPLACE.
  */
 extern void biscuit_persist_row_identity_write_record(Relation index,
                                                         BiscuitIndex *idx,
-                                                        uint32 slot_idx);
+                                                        uint32 slot_idx,
+                                                        BiscuitSlotWriteMode mode);
 
 /*
  * Remove the on-disk snapshot for this index (DROP INDEX / REINDEX).

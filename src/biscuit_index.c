@@ -233,8 +233,10 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
     /*
      * This function is called repeatedly over an index's lifetime
      * (unconditionally from every biscuit_insert()/biscuit_bulkdelete()
-     * call, to keep num_records/gen current -- see callers). Only
-     * num_records/gen actually change on those calls; the directory
+     * call, to keep gen current -- see callers). Only gen actually
+     * changes on those calls (num_records is now advanced under lock by
+     * biscuit_claim_new_slot() and is carried forward here rather than
+     * written from the caller's copy -- see below); the directory
      * roots, FSM bootstrap state, and pending-list tuning/stats
      * (allocated/maintained by later phases, not yet by anything in this
      * one) must survive every such call, not be reset to "nothing
@@ -273,6 +275,38 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
     uint64      prev_total_pending_bytes;
     uint64      prev_total_drains;
     uint32      prev_reserved[5];
+    /*
+     * CONCURRENCY FIX (slot-allocation race).
+     *
+     * num_records and gen are now carry-forward fields too, exactly like
+     * dir_roots/fsm_root above -- they are NOT written from the caller's
+     * idx unconditionally any more.
+     *
+     * Why: slot numbers are claimed from meta->num_records under the
+     * metapage's exclusive buffer lock (see biscuit_claim_new_slot()), so
+     * the metapage is the authoritative counter and any backend's
+     * idx->num_records is a process-local copy that goes stale the moment
+     * another backend claims a slot. This function runs unconditionally at
+     * the end of every biscuit_insert()/biscuit_bulkdelete(), well after
+     * the claim and its lock have been released. Blindly writing
+     * meta->num_records = idx->num_records here would let a backend that
+     * claimed slot 5 (leaving the counter at 6) stamp 6 back over a 7 that
+     * a concurrent backend had since committed -- handing the *same* slot
+     * number out twice and silently clobbering a row. That is the exact
+     * failure mode this fix exists to close, so re-introducing it here
+     * would defeat the locked claim entirely.
+     *
+     * Max() rather than a plain carry-forward because both counters are
+     * monotonically non-decreasing over an index's lifetime (bulkdelete
+     * tombstones slots, it never shrinks num_records) and because the
+     * caller's value legitimately leads the page's in one case: the very
+     * first write after biscuit_build(). Build always runs against a fresh
+     * relfilenode, i.e. nblocks == 0 / is_new_page, so it takes the
+     * defaults branch below and Max() is never asked to reconcile a
+     * populated page against a rebuilt-from-zero idx.
+     */
+    uint32      prev_num_records;
+    uint64      prev_gen;
 
     /*
      * Decide whether the current page already holds a real biscuit
@@ -314,6 +348,8 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
             prev_pendlog_npages       = old->pendlog_npages;
             prev_pendlog_draining     = old->pendlog_draining;
             memcpy(prev_reserved, old->reserved, sizeof(prev_reserved));
+            prev_num_records          = old->num_records;
+            prev_gen                  = old->gen;
             goto have_prev_values;
         }
     }
@@ -346,6 +382,12 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
      */
     prev_pendlog_draining    = InvalidBlockNumber;
     memset(prev_reserved, 0, sizeof(prev_reserved));
+    /*
+     * No prior metapage to reconcile against: the caller's idx is the only
+     * source of truth (this is the biscuit_build() path).
+     */
+    prev_num_records         = (uint32) Max(idx->num_records, 0);
+    prev_gen                 = idx->gen;
 
 have_prev_values:
 
@@ -355,8 +397,13 @@ have_prev_values:
     meta->magic   = BISCUIT_MAGIC;
     meta->version = BISCUIT_VERSION;
     meta->page_format_version = BISCUIT_PAGE_FORMAT_VERSION;
-    meta->num_records = idx->num_records;
-    meta->gen     = idx->gen;
+    /* Carry-forward + monotonic max, NOT a blind overwrite -- see the
+     * long comment on prev_num_records/prev_gen above. BiscuitMetaPageData
+     * .num_records is uint32 while BiscuitIndex.num_records is int, so
+     * clamp before comparing to keep Max() away from a signed/unsigned
+     * promotion. */
+    meta->num_records = Max(prev_num_records, (uint32) Max(idx->num_records, 0));
+    meta->gen         = Max(prev_gen, idx->gen);
 
     /* Carried forward from the previous page contents (or defaults). */
     meta->num_dir_columns = prev_num_dir_columns;
@@ -484,6 +531,197 @@ biscuit_pop_free_slot(BiscuitIndex *idx, uint32_t *slot)
         return false;
     *slot = idx->free_list[--idx->free_count];
     return true;
+}
+
+/* ================================================================
+ * SECTION 2a – Cross-backend slot allocation
+ * ================================================================
+ *
+ * Slot numbers are an index-wide shared resource, and until this fix they
+ * were handed out from a purely process-local counter (idx->num_records on
+ * a BiscuitIndex cached in CacheMemoryContext, which biscuit_cache.c keeps
+ * per backend, not in shared memory). Two backends that had each loaded
+ * their own copy at the same baseline would compute the *same* slot_idx
+ * for two different rows. The per-page buffer lock down in
+ * biscuit_rowstore_tid_write() then serialized the two writes in time
+ * without preventing the collision, so the second writer simply overwrote
+ * the first row's slot -- silent data loss, invisible to any number of
+ * single-client runs because a single client never has a competing
+ * baseline to collide against.
+ *
+ * The fix is to make "read the current count, claim the next slot, publish
+ * the new count" a single atomic operation against a genuinely shared
+ * object. The metapage is already a shared, WAL-logged on-disk buffer, and
+ * its exclusive content lock is already the serialization point this
+ * module uses for the other index-wide allocations (biscuit_dir.c's
+ * dir_roots, biscuit_page_alloc()'s fsm freelist), so it is the natural
+ * home: same pattern PostgreSQL itself uses with
+ * LockRelationForExtension() for physical page allocation. Slot allocation
+ * is simply the sibling shared resource that never got the same treatment.
+ *
+ * NON-TRANSACTIONAL, deliberately, for the same reason idx->gen is (see
+ * the comment at the end of biscuit_insert()): the counter advances the
+ * moment the slot is claimed, whether or not the surrounding transaction
+ * commits. An aborted insert therefore leaks its slot number. That is
+ * over-allocation, which is harmless -- the slot is simply never marked
+ * live, reads skip it, and VACUUM reclaims it. The alternative, releasing
+ * the claim on abort, would mean the counter can move backwards, which is
+ * exactly how two rows end up sharing a slot again.
+ *
+ * LOCK ORDERING NOTE. The metapage lock is taken and released entirely
+ * within this function, before the caller touches any other buffer. Do not
+ * hoist it to span the row write: biscuit_pending_mutate_structure(),
+ * biscuit_page_alloc() and biscuit_dir_ensure_root() all acquire the
+ * metapage lock themselves, so holding it across them self-deadlocks (the
+ * same hazard biscuit_dir_ensure_root() documents for its own P_NEW call).
+ */
+static uint32
+biscuit_claim_new_slot(Relation index, BiscuitIndex *idx)
+{
+    Buffer               buf;
+    Page                 page;
+    GenericXLogState    *state;
+    BiscuitMetaPageData *meta;
+    uint32               slot;
+
+    if (RelationGetNumberOfBlocks(index) == 0)
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("biscuit: cannot claim a row slot in index \"%s\": no metapage",
+                        RelationGetRelationName(index)),
+                 errhint("The index may be corrupt; consider running REINDEX.")));
+
+    biscuit_ensure_synchronous_commit();
+
+    buf = ReadBuffer(index, BISCUIT_METAPAGE_BLKNO);
+    LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+
+    page = BufferGetPage(buf);
+    if (PageIsNew(page))
+    {
+        UnlockReleaseBuffer(buf);
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("biscuit: cannot claim a row slot in index \"%s\": metapage uninitialized",
+                        RelationGetRelationName(index)),
+                 errhint("The index may be corrupt; consider running REINDEX.")));
+    }
+
+    meta = (BiscuitMetaPageData *) PageGetSpecialPointer(page);
+    if (meta->magic != BISCUIT_MAGIC ||
+        meta->version != BISCUIT_VERSION ||
+        meta->page_format_version != BISCUIT_PAGE_FORMAT_VERSION)
+    {
+        UnlockReleaseBuffer(buf);
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("biscuit: cannot claim a row slot in index \"%s\": unrecognized metapage",
+                        RelationGetRelationName(index)),
+                 errhint("The index may be corrupt; consider running REINDEX.")));
+    }
+
+    state = GenericXLogStart(index);
+    page  = GenericXLogRegisterBuffer(state, buf, 0);
+    meta  = (BiscuitMetaPageData *) PageGetSpecialPointer(page);
+
+    /*
+     * Re-read the authoritative value from the page under the lock. We
+     * deliberately do NOT consult idx->num_records here: that is this
+     * backend's own possibly-stale copy, and trusting it is precisely the
+     * defect being fixed.
+     */
+    slot = meta->num_records;
+    meta->num_records = slot + 1;
+
+    GenericXLogFinish(state);
+    UnlockReleaseBuffer(buf);
+
+    /*
+     * Pull this backend's copy forward to the value we just published. It
+     * may jump by more than one if other backends claimed slots since we
+     * last looked; that is expected and correct. The gap slots belong to
+     * other backends' rows, and this backend's view of them is a hole
+     * (NULL data cache / invalid TID) until it next reloads from disk --
+     * which is the same "cold reader must reload" contract that already
+     * governs every other cross-backend mutation here.
+     */
+    if ((int) (slot + 1) > idx->num_records)
+        idx->num_records = (int) (slot + 1);
+
+    return slot;
+}
+
+/*
+ * biscuit_ensure_slot_capacity
+ * Grow the per-slot arrays so that `slot` is addressable, zero-filling the
+ * newly allocated tail.
+ *
+ * This replaces the single "if (num_records >= capacity) capacity *= 2"
+ * step that used to live inline in biscuit_insert(). It must loop now: a
+ * claimed slot can be arbitrarily far past this backend's last-known
+ * num_records (another backend may have claimed many slots since), so one
+ * doubling is no longer guaranteed to be enough.
+ *
+ * Zero-filling is not optional -- see FIX A/B/C in the original inline
+ * version. repalloc leaves the tail uninitialized, and both the NULL guard
+ * in biscuit_insert() and the has_data test in biscuit_bulkdelete() treat
+ * garbage bytes as a live pointer.
+ */
+static void
+biscuit_ensure_slot_capacity(BiscuitIndex *idx, uint32 slot)
+{
+    int old_capacity = idx->capacity;
+    int col;
+
+    if ((int) slot < idx->capacity)
+        return;
+
+    while ((int) slot >= idx->capacity)
+        idx->capacity *= 2;
+
+    idx->tids = (ItemPointerData *) repalloc(idx->tids,
+                                             idx->capacity * sizeof(ItemPointerData));
+    /*
+     * The TID tail must be explicitly invalidated, not merely left
+     * uninitialized. biscuit_insert()'s duplicate-TID scan walks
+     * [0, num_records) comparing idx->tids[i] against the incoming ctid,
+     * and with cross-backend slot claiming that range can now contain
+     * holes this backend never wrote. Garbage there could spuriously
+     * compare equal and send the insert down the UPDATE path, overwriting
+     * an unrelated slot.
+     */
+    for (int i = old_capacity; i < idx->capacity; i++)
+        ItemPointerSetInvalid(&idx->tids[i]);
+
+    if (idx->num_columns == 1)
+    {
+        idx->data_cache       = (char **) repalloc(idx->data_cache,
+                                                   idx->capacity * sizeof(char *));
+        idx->data_cache_lower = (char **) repalloc(idx->data_cache_lower,
+                                                   idx->capacity * sizeof(char *));
+        memset(idx->data_cache       + old_capacity, 0,
+               (idx->capacity - old_capacity) * sizeof(char *));
+        memset(idx->data_cache_lower + old_capacity, 0,
+               (idx->capacity - old_capacity) * sizeof(char *));
+    }
+    else
+    {
+        for (col = 0; col < idx->num_columns; col++)
+        {
+            idx->column_data_cache[col] = (char **) repalloc(
+                idx->column_data_cache[col], idx->capacity * sizeof(char *));
+            memset(idx->column_data_cache[col] + old_capacity, 0,
+                   (idx->capacity - old_capacity) * sizeof(char *));
+
+            if (idx->column_data_cache_lower)
+            {
+                idx->column_data_cache_lower[col] = (char **) repalloc(
+                    idx->column_data_cache_lower[col], idx->capacity * sizeof(char *));
+                memset(idx->column_data_cache_lower[col] + old_capacity, 0,
+                       (idx->capacity - old_capacity) * sizeof(char *));
+            }
+        }
+    }
 }
 
 /* ================================================================
@@ -1958,7 +2196,6 @@ biscuit_insert(Relation index,
     MemoryContext  oldcontext;
     uint32_t       slot;
     bool           found_existing  = false;
-    bool           is_reusing_slot = false;
     int            col;
     uint32         pending_list_limit;
 
@@ -2037,75 +2274,45 @@ biscuit_insert(Relation index,
         }
     }
 
-    /* Try to reuse a free slot */
-    if (!found_existing && biscuit_pop_free_slot(idx, &slot))
+    /*
+     * CONCURRENCY FIX (slot-allocation race) -- freelist reuse.
+     *
+     * biscuit_pop_free_slot() is deliberately NOT called here any more.
+     *
+     * idx->free_list is process-local, exactly like idx->num_records was:
+     * it is rebuilt from the durable HEADER blob on load and then mutated
+     * only in this backend's own copy. Two backends that both have slot 42
+     * on their free list will both pop it, for two different rows, and the
+     * later writer silently clobbers the earlier one -- the same collision
+     * as the num_records race, just sourced from the other allocator.
+     * Pushing the pop under the metapage lock would not help on its own,
+     * because the list being popped from is still private; a correct fix
+     * needs the freelist itself to become shared durable state (a
+     * metapage-anchored chain, claimed under the same lock as
+     * biscuit_claim_new_slot() uses), which is an on-disk format change.
+     *
+     * Until that exists, this path takes the conservative option: always
+     * claim a fresh slot. The cost is slot-space density -- deleted slots
+     * are no longer recycled by INSERT, so the slot array grows with total
+     * inserts rather than live rows, and reclamation waits for VACUUM's
+     * compaction / REINDEX. That is a bounded, self-healing space cost.
+     * The behaviour it replaces was unbounded, silent row loss.
+     *
+     * biscuit_push_free_slot() is left in place (biscuit_bulkdelete still
+     * calls it) so the durable free list keeps accumulating and a future
+     * shared-freelist implementation has the data it needs.
+     */
+    if (!found_existing)
     {
-        is_reusing_slot = true;
-        /* Un-tombstone the recycled slot so NOT LIKE inversion
-         * doesn't exclude a live record. */
-        biscuit_roaring_remove(idx->tombstones, slot);
-        if (idx->tombstone_count > 0)
-            idx->tombstone_count--;
-    }
-
-    if (!found_existing && !is_reusing_slot)
-    {
-        /* Append new slot */
-        if (idx->num_records >= idx->capacity)
-        {
-            int old_capacity = idx->capacity;
-            idx->capacity *= 2;
-            idx->tids = (ItemPointerData *) repalloc(idx->tids, idx->capacity * sizeof(ItemPointerData));
-            if (idx->num_columns == 1)
-            {
-                idx->data_cache       = (char **) repalloc(idx->data_cache,       idx->capacity * sizeof(char *));
-                idx->data_cache_lower = (char **) repalloc(idx->data_cache_lower, idx->capacity * sizeof(char *));
-                /*
-                 * FIX A: Zero-initialise the newly allocated tail so that
-                 * data_cache[slot] and data_cache_lower[slot] are reliably
-                 * NULL for fresh slots.  Without this, repalloc leaves the
-                 * memory uninitialised; the guard at "if (idx->data_cache_lower[slot])"
-                 * below may pass on garbage and strlen/utf8_char_count then
-                 * dereferences a wild pointer.
-                 */
-                memset(idx->data_cache       + old_capacity, 0,
-                       (idx->capacity - old_capacity) * sizeof(char *));
-                memset(idx->data_cache_lower  + old_capacity, 0,
-                       (idx->capacity - old_capacity) * sizeof(char *));
-            }
-            else
-            {
-                for (col = 0; col < idx->num_columns; col++)
-                {
-                    int old_cap = old_capacity;
-                    idx->column_data_cache[col] = (char **) repalloc(
-                        idx->column_data_cache[col], idx->capacity * sizeof(char *));
-                    /*
-                     * FIX B: Same zero-init requirement for the multi-column
-                     * cache arrays.  biscuit_bulkdelete reads column_data_cache[0][i]
-                     * to detect live records; uninitialised bytes here cause it to
-                     * treat garbage as a valid pointer and misclassify rows.
-                     */
-                    memset(idx->column_data_cache[col] + old_cap, 0,
-                           (idx->capacity - old_cap) * sizeof(char *));
-
-                    /*
-                     * FIX C: Grow and zero-init column_data_cache_lower in
-                     * lockstep.  Without this the array is shorter than
-                     * column_data_cache; fallback scans on newly-appended
-                     * slots read off the end of the allocation.
-                     */
-                    if (idx->column_data_cache_lower)
-                    {
-                        idx->column_data_cache_lower[col] = (char **) repalloc(
-                            idx->column_data_cache_lower[col], idx->capacity * sizeof(char *));
-                        memset(idx->column_data_cache_lower[col] + old_cap, 0,
-                               (idx->capacity - old_cap) * sizeof(char *));
-                    }
-                }
-            }
-        }
-        slot = idx->num_records++;
+        /*
+         * Claim the slot number atomically against every other backend,
+         * from the metapage, before touching anything else. See
+         * biscuit_claim_new_slot() for why this cannot read
+         * idx->num_records and why the lock must not be held across the
+         * row write below.
+         */
+        slot = biscuit_claim_new_slot(index, idx);
+        biscuit_ensure_slot_capacity(idx, slot);
     }
 
     ItemPointerCopy(ht_ctid, &idx->tids[slot]);
@@ -2390,7 +2597,7 @@ biscuit_insert(Relation index,
         }
     }
 
-    if (!found_existing && !is_reusing_slot)
+    if (!found_existing)
         idx->insert_count++;
 
     /*
@@ -2450,7 +2657,10 @@ biscuit_insert(Relation index,
      *     visible to a cold reader in another backend anyway (MVCC), and a
      *     warm reader in this backend uses the in-memory idx directly.
      */
-    biscuit_persist_row_identity_write_record(index, idx, (uint32) slot);
+    biscuit_persist_row_identity_write_record(index, idx, (uint32) slot,
+                                               found_existing
+                                                   ? BISCUIT_SLOT_WRITE_INPLACE
+                                                   : BISCUIT_SLOT_WRITE_FRESH);
 
     biscuit_mark_row_identity_dirty(RelationGetRelid(index));
 
@@ -2616,7 +2826,8 @@ biscuit_bulkdelete(IndexVacuumInfo *info,
             {
                 ItemPointerSetInvalid(&idx->tids[delete_indices[j]]);
                 biscuit_persist_row_identity_write_record(index, idx,
-                                                           (uint32) delete_indices[j]);
+                                                           (uint32) delete_indices[j],
+                                                           BISCUIT_SLOT_WRITE_INPLACE);
             }
 
             pfree(delete_indices);

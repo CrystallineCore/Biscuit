@@ -109,15 +109,20 @@ biscuit_pagedir_lookup(Relation index, BlockNumber root, uint32 logical)
  * corruption would surface far away from its cause (as garbage TIDs or
  * strings, not as an error).
  *
- * The invariant holds today because a new logical page is only ever needed
- * by the fresh-append insert path, where slot_idx == num_records++ is
- * strictly increasing; the freelist-reuse path can only produce a
- * slot_idx below num_records, whose logical page necessarily already
- * exists. That is a real property of the CRUD call sites rather than
- * something this layer can arrange for itself, which is exactly why it is
- * checked here instead of assumed -- it is the "new slot allocation as an
- * explicit third case" the implementation plan calls out, and the same
- * shape of implicit-assumption bug as the original NULL-guard crash.
+ * The invariant used to hold only "because a new logical page is only ever
+ * needed by the fresh-append insert path, where slot_idx == num_records++
+ * is strictly increasing". That reasoning was single-backend reasoning and
+ * it did not survive concurrency: two backends whose slots landed on the
+ * same not-yet-existing logical page both arrived here with the same
+ * expect_logical, and the loser got the error below instead of an insert.
+ *
+ * This function now has exactly one caller, biscuit_pagedir_ensure(),
+ * which computes expect_logical from the chain's live length while holding
+ * the per-index row-identity allocation lock. The two checks below are
+ * therefore unreachable by construction rather than merely unlikely, and
+ * are retained as assertions against a future caller reintroducing the old
+ * "caller supplies the number it thinks is next" contract. Do not call
+ * this directly; call biscuit_pagedir_ensure().
  *
  * Unlike TIDSLOT/STRPTR writes, this always walks from the root to find
  * the true last page. Directory-chain growth is bounded by
@@ -276,12 +281,173 @@ biscuit_pagedir_append(Relation index, BlockNumber *root,
 }
 
 /*
+ * biscuit_pagedir_count
+ * Total number of logical entries currently in the chain, i.e. the
+ * logical page number the next append would occupy.
+ */
+static uint32
+biscuit_pagedir_count(Relation index, BlockNumber root)
+{
+    BlockNumber cur   = root;
+    uint32      total = 0;
+
+    while (cur != InvalidBlockNumber)
+    {
+        Buffer                buf = ReadBuffer(index, cur);
+        Page                  page;
+        BiscuitPageDirHeader *hdr;
+        BiscuitPageOpaque     opaque;
+        BlockNumber           next;
+
+        LockBuffer(buf, BUFFER_LOCK_SHARE);
+        page   = BufferGetPage(buf);
+        hdr    = (BiscuitPageDirHeader *) BiscuitPageDataPtr(page);
+        total += hdr->num_entries;
+
+        opaque = (BiscuitPageOpaque) PageGetSpecialPointer(page);
+        next   = opaque->next;
+        UnlockReleaseBuffer(buf);
+        cur = next;
+    }
+
+    return total;
+}
+
+/*
+ * biscuit_pagedir_ensure
+ *
+ * "Give me the physical block backing logical page `logical`, allocating
+ * and linking a blank one of `page_kind` if it doesn't exist yet."
+ *
+ * This replaces the old lookup-then-allocate-then-append sequence that
+ * biscuit_rowstore_tid_write()/biscuit_strptr_write() each open-coded, and
+ * it exists because that sequence was not atomic across backends. Two
+ * backends whose freshly-claimed slots happened to land on the same
+ * not-yet-existing logical page would BOTH see InvalidBlockNumber from the
+ * lookup, BOTH allocate a physical page, and both then call
+ * biscuit_pagedir_append() with the same expect_logical. The first won;
+ * the second hit the dense-in-order check and raised
+ *
+ *     biscuit: row-identity page directory append out of order
+ *     (next logical page is 38, caller supplied 37)
+ *
+ * aborting an otherwise valid INSERT, and orphaning the slot page it had
+ * already allocated. Because the losing backends were consistently the
+ * same ones, this presented as writer starvation rather than as ordinary
+ * contention: retrying did not help, because the retry raced exactly the
+ * same way.
+ *
+ * Two things fix that, and both are needed:
+ *
+ *   1. Callers hold the per-index row-identity allocation lock (see
+ *      biscuit_persist.c's biscuit_rowstore_alloc_lock()), so only one
+ *      backend is ever inside this function for a given index at a time.
+ *      That is what actually eliminates the race.
+ *
+ *   2. This function does the lookup and the allocation together, so
+ *      "already exists" is a normal, silent return rather than a
+ *      collision. Even without (1) this degrades to "someone beat me to
+ *      it, use theirs" instead of an error plus a leaked page.
+ *
+ * The strict gap check is deliberately kept: `logical` beyond the end of
+ * the chain by more than one is still a hard ERROR, because the directory
+ * is a positional array and a gap really would silently mis-resolve every
+ * later logical page. What is no longer treated as an error is `logical`
+ * pointing at an entry that already exists -- that is now the expected
+ * outcome of a benign race, not corruption.
+ */
+static BlockNumber
+biscuit_pagedir_ensure(Relation index, BlockNumber *root,
+                        uint32 logical, uint16 page_kind)
+{
+    BlockNumber blkno;
+    uint32      have;
+    uint32      i;
+
+    blkno = biscuit_pagedir_lookup(index, *root, logical);
+    if (blkno != InvalidBlockNumber)
+        return blkno;
+
+    /*
+     * Fill forward from the chain's current length. Normally that means
+     * allocating exactly one page, because slot numbers are handed out
+     * contiguously by biscuit_claim_new_slot() and so logical pages are
+     * needed in order.
+     *
+     * The loop is not decoration, though. A slot claim is deliberately
+     * non-transactional -- the metapage counter advances at claim time and
+     * never retreats -- so a transaction that claims a slot and then aborts
+     * leaves that slot number permanently spoken for and never written.
+     * Enough consecutive aborted claims (a full page's worth, ~1300 slots
+     * at the default BLCKSZ) would skip a logical page entirely, and the
+     * next successful insert would then be asking for a page one beyond the
+     * end of the chain. The old code raised a hard error there, which would
+     * have wedged every subsequent insert into that index permanently.
+     * Allocating the skipped pages blank costs one page each and is
+     * self-healing: a zeroed TIDSLOT page reads as entirely unoccupied,
+     * which is exactly what those abandoned slots are.
+     */
+    have = biscuit_pagedir_count(index, *root);
+
+    if (logical < have)
+    {
+        /*
+         * The lookup missed but the entry is within the chain's length:
+         * that means the directory itself is damaged, not merely short.
+         */
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("biscuit: row-identity page directory in index \"%s\" has no block for logical page %u despite holding %u entries",
+                        RelationGetRelationName(index), logical, have)));
+    }
+
+    for (i = have; i <= logical; i++)
+    {
+        Buffer             buf;
+        GenericXLogState  *state;
+        Page               page;
+        Size               specialSize = MAXALIGN(sizeof(BiscuitPageOpaqueData));
+        BiscuitPageOpaque  opaque;
+
+        /*
+         * Allocate the slot page blank. Both callers then perform exactly
+         * the same in-place slot write they would perform on a pre-existing
+         * page, which is why this returns a zeroed page rather than taking
+         * the payload: it collapses the old "new logical page" and
+         * "existing logical page" branches into one code path per caller. A
+         * zeroed TIDSLOT page also reads as entirely unoccupied, which is
+         * what the BISCUIT_SLOT_WRITE_FRESH guard in
+         * biscuit_rowstore_tid_write() expects.
+         */
+        buf   = biscuit_page_alloc(index, page_kind);
+        state = GenericXLogStart(index);
+        page  = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
+
+        PageInit(page, BufferGetPageSize(buf), specialSize);
+
+        opaque              = (BiscuitPageOpaque) PageGetSpecialPointer(page);
+        opaque->next        = InvalidBlockNumber;
+        opaque->page_kind   = page_kind;
+        opaque->flags       = 0;
+        opaque->recycle_xid = InvalidTransactionId;
+
+        GenericXLogFinish(state);
+        blkno = BufferGetBlockNumber(buf);
+        UnlockReleaseBuffer(buf);
+
+        biscuit_pagedir_append(index, root, i, blkno);
+    }
+
+    /* blkno is the last one allocated, i.e. logical's. */
+    return blkno;
+}
+
+/*
  * biscuit_pagedir_free_all
  * Retire the PAGEDIR chain itself AND every page it points at (each
  * entry is a TIDSLOT or STRPTR page, depending on caller). Used only by
  * teardown (biscuit_rowstore_free_tid_chain/_free_str_chains).
- */
-static void
+ */static void
 biscuit_pagedir_free_all(Relation index, BlockNumber root)
 {
     BlockNumber cur = root;
@@ -320,7 +486,8 @@ biscuit_pagedir_free_all(Relation index, BlockNumber root)
 
 void
 biscuit_rowstore_tid_write(Relation index, BlockNumber *pagedir_root,
-                            uint32 slot_idx, const ItemPointerData *tid)
+                            uint32 slot_idx, const ItemPointerData *tid,
+                            BiscuitSlotWriteMode mode)
 {
     uint32      slots_per_page = BiscuitTidSlotsPerPage(BLCKSZ);
     uint32      logical        = slot_idx / slots_per_page;
@@ -329,48 +496,18 @@ biscuit_rowstore_tid_write(Relation index, BlockNumber *pagedir_root,
 
     biscuit_ensure_synchronous_commit();
 
-    blkno = biscuit_pagedir_lookup(index, *pagedir_root, logical);
+    /*
+     * Resolve (allocating and linking a blank page if this logical page
+     * doesn't exist yet) and then write the slot in place. There is no
+     * longer a separate "new logical page" branch here: allocation is a
+     * detail of biscuit_pagedir_ensure(), which is idempotent under a
+     * concurrent racer, whereas the old open-coded
+     * lookup-allocate-then-append could raise "page directory append out
+     * of order" and starve the losing backend. See that function.
+     */
+    blkno = biscuit_pagedir_ensure(index, pagedir_root, logical,
+                                    BISCUIT_PAGE_TIDSLOT);
 
-    if (blkno == InvalidBlockNumber)
-    {
-        /* New logical page: allocate, write the one slot, link into the
-         * directory. This is the "new slot allocation" case the
-         * implementation summary calls out as its own named case -- the
-         * only place this primitive allocates rather than purely
-         * overwrites. */
-        Buffer             buf = biscuit_page_alloc(index, BISCUIT_PAGE_TIDSLOT);
-        GenericXLogState  *state;
-        Page               page;
-        Size               specialSize = MAXALIGN(sizeof(BiscuitPageOpaqueData));
-        BiscuitPageOpaque  opaque;
-        ItemPointerData   *slots;
-
-        state = GenericXLogStart(index);
-        page  = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
-
-        PageInit(page, BufferGetPageSize(buf), specialSize);
-
-        opaque              = (BiscuitPageOpaque) PageGetSpecialPointer(page);
-        opaque->next        = InvalidBlockNumber;
-        opaque->page_kind   = BISCUIT_PAGE_TIDSLOT;
-        opaque->flags       = 0;
-        opaque->recycle_xid = InvalidTransactionId;
-
-        slots         = (ItemPointerData *) BiscuitPageDataPtr(page);
-        slots[offset] = *tid;
-
-        BiscuitPageSetLower(page, (Size) (offset + 1) * sizeof(ItemPointerData));
-
-        GenericXLogFinish(state);
-        blkno = BufferGetBlockNumber(buf);
-        UnlockReleaseBuffer(buf);
-
-        biscuit_pagedir_append(index, pagedir_root, logical, blkno);
-        return;
-    }
-
-    /* Existing logical page: single in-place write, fresh insert or
-     * freelist-slot reuse both land here identically. */
     {
         Buffer            buf = ReadBuffer(index, blkno);
         GenericXLogState *state;
@@ -378,6 +515,56 @@ biscuit_rowstore_tid_write(Relation index, BlockNumber *pagedir_root,
         ItemPointerData  *slots;
 
         LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+
+        /*
+         * DEFENSE IN DEPTH against a slot-allocation regression.
+         *
+         * The buffer lock we just took serializes concurrent writers to
+         * this page, but it cannot tell us whether two of them were handed
+         * the *same* slot number -- that decision was made further up, in
+         * biscuit_claim_new_slot(). Before this check existed, a duplicate
+         * claim reached exactly here and simply overwrote the previous
+         * occupant, losing a row with no error anywhere. The only guard in
+         * this file, biscuit_pagedir_append()'s dense-in-order check, fires
+         * only when a whole new logical page must be allocated, which is
+         * the rare case -- hence a loud failure in a minority of runs and
+         * silent loss in all of them.
+         *
+         * A caller claiming a fresh slot asserts the slot has never been
+         * written. A freshly PageInit'd TIDSLOT page is all zeroes and
+         * ItemPointerIsValid() is false for a zeroed pointer, so "occupied"
+         * is exactly ItemPointerIsValid(). Deleted slots are also cleared
+         * to invalid (biscuit_bulkdelete() calls ItemPointerSetInvalid()
+         * then rewrites the slot), so a recycled slot reads as free too.
+         *
+         * The read is done on the real buffer page before GenericXLogStart()
+         * so we never open a WAL transaction we are about to abort out of.
+         */
+        if (mode == BISCUIT_SLOT_WRITE_FRESH)
+        {
+            ItemPointerData *cur_slots =
+                (ItemPointerData *) BiscuitPageDataPtr(BufferGetPage(buf));
+
+            if (ItemPointerIsValid(&cur_slots[offset]))
+            {
+                ItemPointerData occupant = cur_slots[offset];
+
+                UnlockReleaseBuffer(buf);
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("biscuit: row slot %u in index \"%s\" was already occupied on a fresh claim",
+                                slot_idx, RelationGetRelationName(index)),
+                         errdetail("Slot holds TID (%u,%u); the insert tried to store TID (%u,%u). "
+                                   "Two writers were handed the same slot number.",
+                                   ItemPointerGetBlockNumber(&occupant),
+                                   ItemPointerGetOffsetNumber(&occupant),
+                                   ItemPointerGetBlockNumber((ItemPointer) tid),
+                                   ItemPointerGetOffsetNumber((ItemPointer) tid)),
+                         errhint("This indicates a slot-allocation defect, not on-disk damage. "
+                                 "REINDEX will restore the index; please report the occurrence.")));
+            }
+        }
+
         state = GenericXLogStart(index);
         page  = GenericXLogRegisterBuffer(state, buf, 0);
 
@@ -491,40 +678,13 @@ biscuit_strptr_write(Relation index, BlockNumber *pagedir_root,
     uint32      ptrs_per_page = BiscuitStrPtrSlotsPerPage(BLCKSZ);
     uint32      logical       = slot_idx / ptrs_per_page;
     uint32      offset        = slot_idx % ptrs_per_page;
-    BlockNumber blkno         = biscuit_pagedir_lookup(index, *pagedir_root, logical);
+    BlockNumber blkno;
 
-    if (blkno == InvalidBlockNumber)
-    {
-        Buffer             buf = biscuit_page_alloc(index, BISCUIT_PAGE_STRPTR);
-        GenericXLogState  *state;
-        Page               page;
-        Size               specialSize = MAXALIGN(sizeof(BiscuitPageOpaqueData));
-        BiscuitPageOpaque  opaque;
-        BiscuitStrPtr     *slots;
-
-        state = GenericXLogStart(index);
-        page  = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
-
-        PageInit(page, BufferGetPageSize(buf), specialSize);
-
-        opaque              = (BiscuitPageOpaque) PageGetSpecialPointer(page);
-        opaque->next        = InvalidBlockNumber;
-        opaque->page_kind   = BISCUIT_PAGE_STRPTR;
-        opaque->flags       = 0;
-        opaque->recycle_xid = InvalidTransactionId;
-
-        slots         = (BiscuitStrPtr *) BiscuitPageDataPtr(page);
-        slots[offset] = *sp;
-
-        BiscuitPageSetLower(page, (Size) (offset + 1) * sizeof(BiscuitStrPtr));
-
-        GenericXLogFinish(state);
-        blkno = BufferGetBlockNumber(buf);
-        UnlockReleaseBuffer(buf);
-
-        biscuit_pagedir_append(index, pagedir_root, logical, blkno);
-        return;
-    }
+    /* Same collapse as biscuit_rowstore_tid_write() above -- see
+     * biscuit_pagedir_ensure() for why the allocate-then-append branch
+     * had to go. */
+    blkno = biscuit_pagedir_ensure(index, pagedir_root, logical,
+                                    BISCUIT_PAGE_STRPTR);
 
     {
         Buffer            buf = ReadBuffer(index, blkno);
