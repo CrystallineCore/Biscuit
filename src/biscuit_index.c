@@ -2957,288 +2957,61 @@ biscuit_canreturn(Relation index, int attno)
     return false;
 }
 
-/*
- * biscuit_costestimate
- *
- * The previous version returned a constant (indexTotalCost = 0.01,
- * selectivity = 0.01) with the real computation commented out. That made
- * every Biscuit path look free and identical: three structurally different
- * queries all planned at cost=0.00..10.56, and the planner had no way to
- * avoid a scan measured at 378ms against a 7ms seqscan on the same table.
- *
- * The model below comes from measurement, not first principles. Biscuit's
- * matcher is positional: an anchored pattern tests one window, while an
- * unanchored infix must test every possible start offset, so the work is
- *
- *      windows x pattern_chars   bitmap intersections
- *
- * with windows = 1 when anchored and ~max_length when not, doubled for
- * ILIKE because the lowercase structure set is maintained and scanned in
- * parallel. Observed on a 5,508-row table (seqscan 1-7ms):
- *
- *      email  (short) infix        0.5 - 2 ms
- *      long_text      infix LIKE   35 - 42 ms
- *      long_text      infix ILIKE  188 ms
- *      long_text      infix (0 rows, common chars)  378 - 595 ms
- *
- * Note the worst cases RETURN NOTHING: a non-matching pattern has no early
- * exit and pays the full sweep, so cost must be driven by the scan shape,
- * never by estimated selectivity.
- *
- * On anchoring to other index types: an earlier plan here was to peg infix
- * costs above pg_trgm's. pg_trgm has no cost estimator -- it is an opclass;
- * the planner calls gincostestimate()/gistcostestimate(), whose GIN-specific
- * inputs come from ginGetStats() on a GIN metapage that a Biscuit relation
- * does not have. Pegging to a competitor would also be the wrong target:
- * the path Biscuit actually loses to on long columns is the SEQSCAN, and a
- * blanket infix penalty would discard the cases where Biscuit legitimately
- * wins (short-column infix beats both seqscan and trigram). Costing the
- * real work puts long-column infix above seqscan and GIN on its own merits
- * while leaving short-column and anchored scans cheap.
- */
- void
- biscuit_costestimate(PlannerInfo *root, IndexPath *path,
+void
+biscuit_costestimate(PlannerInfo *root, IndexPath *path,
                     double loop_count,
                     Cost *indexStartupCost, Cost *indexTotalCost,
-                    Selectivity *indexSelectivity, double *indexCorrelation,
-                    double *indexPages)
+                    Selectivity *indexSelectivity,
+                    double *indexCorrelation, double *indexPages)
 {
-    IndexOptInfo *indexinfo = path->indexinfo;
-    Relation      index;
-    BlockNumber   numPages     = 1;
-    int           num_records  = 0;
-    int           num_columns  = 0;
-    int           max_len      = 0;
-    uint64        gen          = 0;
-    bool          have_meta    = false;
+    Relation    index    = (path->indexinfo->indexoid != InvalidOid)
+                           ? index_open(path->indexinfo->indexoid, AccessShareLock)
+                           : NULL;
+    BlockNumber numPages = 1;
 
-    double        spc_random_page_cost;
-    double        spc_seq_page_cost;
-
-    double        total_windows   = 0.0;   /* summed over all clauses      */
-    double        total_bitmapops = 0.0;
-    double        selectivity     = 1.0;
-    int           nclauses        = 0;
-    bool          has_infix_clause = false;
-
-    ListCell     *lc;
-
+    (void) root;
     (void) loop_count;
 
-    /* ---- No usable quals: keep this path off the table entirely. ---- */
+    if (index)
+    {
+        numPages = RelationGetNumberOfBlocks(index);
+        if (numPages == 0) numPages = 1;
+        index_close(index, AccessShareLock);
+    }
+
     if (path->indexclauses == NIL)
     {
         /*
-         * Biscuit with zero scan keys returns 0 rows, so this is not merely
-         * expensive, it is wrong. Price it out of consideration.
+         * No usable quals (e.g. plain SELECT * with no WHERE). Make this
+         * path unattractive so the planner falls back to a seqscan instead
+         * of using Biscuit with zero scan keys, which would return 0 rows.
          */
         *indexStartupCost = 1.0e10;
         *indexTotalCost   = 1.0e10;
         *indexSelectivity = 1.0;
         *indexCorrelation = 0.0;
-        if (indexPages) *indexPages = 1;
+        if (indexPages) *indexPages = numPages;
         return;
     }
 
-    /* ---- Index-level facts. ---- */
-    if (OidIsValid(indexinfo->indexoid))
-    {
-        index = index_open(indexinfo->indexoid, AccessShareLock);
-        numPages = RelationGetNumberOfBlocks(index);
-        if (numPages == 0)
-            numPages = 1;
-        have_meta = biscuit_read_metadata_from_disk(index, &num_records,
-                                                     &num_columns, &max_len,
-                                                     &gen);
-        index_close(index, AccessShareLock);
-    }
-
-    if (!have_meta || num_records <= 0)
-        num_records = (int) Max(1.0, indexinfo->tuples);
-    if (max_len <= 0)
-        max_len = 32;   /* unknown column width: assume something modest
-                          * rather than something alarming, so a missing
-                          * metapage doesn't silently disable the index */
-
-    get_tablespace_page_costs(indexinfo->reltablespace,
-                               &spc_random_page_cost, &spc_seq_page_cost);
-
-    /* ---- Per-clause scan shape. ---- */
-    foreach(lc, path->indexclauses)
-    {
-        IndexClause  *iclause = (IndexClause *) lfirst(lc);
-        RestrictInfo *rinfo   = iclause->rinfo;
-        Expr         *clause  = rinfo ? rinfo->clause : NULL;
-        bool          is_ilike       = false;
-        bool          anchored_start = false;
-        bool          anchored_end   = false;
-        int           pattern_chars  = 0;
-        double        windows;
-        double        clause_sel;
-
-        nclauses++;
-
-        if (clause && IsA(clause, OpExpr))
-        {
-            OpExpr *op    = (OpExpr *) clause;
-            char   *opname = get_opname(op->opno);
-            Node   *rnode;
-
-            /*
-             * "~~" is LIKE, "~~*" is ILIKE. Matching on the operator name
-             * rather than a strategy number keeps this readable and avoids
-             * depending on the opclass's strategy numbering, which is
-             * private to biscuit.sql and has changed before.
-             */
-            if (opname != NULL)
-                is_ilike = (strcmp(opname, "~~*") == 0 ||
-                            strcmp(opname, "!~~*") == 0);
-
-            rnode = (list_length(op->args) >= 2) ? (Node *) lsecond(op->args) : NULL;
-            if (rnode && IsA(rnode, Const) && !((Const *) rnode)->constisnull)
-            {
-                Const *c = (Const *) rnode;
-                Oid    ctype = c->consttype;
-
-                if (ctype == TEXTOID || ctype == VARCHAROID || ctype == BPCHAROID)
-                {
-                    char *pat = TextDatumGetCString(c->constvalue);
-                    int   len = (int) strlen(pat);
-
-                    anchored_start = (len > 0 && pat[0] != '%');
-                    anchored_end   = (len > 0 && pat[len - 1] != '%');
-
-                    /*
-                     * Count matchable characters: wildcards drive the window
-                     * count, they are not themselves intersected. Counting
-                     * UTF-8 characters (not bytes) matters -- a Tamil or
-                     * kana pattern is far shorter in characters than bytes,
-                     * and the matcher works in characters.
-                     */
-                    pattern_chars = biscuit_utf8_char_count(pat, len);
-                    {
-                        int i;
-                        for (i = 0; i < len; i++)
-                            if (pat[i] == '%' || pat[i] == '_')
-                                pattern_chars--;
-                    }
-                    if (pattern_chars < 0)
-                        pattern_chars = 0;
-
-                    pfree(pat);
-                }
-            }
-        }
-
-        if (pattern_chars == 0)
-        {
-            /*
-             * Couldn't read the pattern (non-Const, e.g. a parameter, or an
-             * unexpected type). Assume the bad case rather than the good
-             * one: an unanchored scan of a short pattern is exactly the
-             * shape that blows up, and guessing "cheap" here is how the
-             * constant-cost version caused the problem this function exists
-             * to fix.
-             */
-            pattern_chars  = 2;
-            anchored_start = false;
-            anchored_end   = false;
-        }
-
-        /*
-         * Windows to test. Anchored at either end pins the offset, so one
-         * window suffices (prefix uses the positional bitmaps, suffix the
-         * negative-offset ones). Unanchored means every start offset.
-         */
-        if (anchored_start || anchored_end)
-            windows = 1.0;
-        else
-            windows = Max(1.0, (double) max_len - (double) pattern_chars + 1.0);
-
-        /*
-         * A clause anchored at neither end is a true infix match: there is
-         * no pinned offset for the matcher to exploit, so it has no
-         * locality to fall back on. Track this so the page-cost term below
-         * can price it like a near-full scan instead of "one structure per
-         * window" -- this is the lever that steers infix patterns toward a
-         * trigram (GIN) index while leaving prefix/suffix patterns on
-         * biscuit.
-         */
-        if (!anchored_start && !anchored_end)
-            has_infix_clause = true;
-
-        total_windows   += windows;
-        total_bitmapops += windows * (double) pattern_chars * (is_ilike ? 2.0 : 1.0);
-
-        /*
-         * Selectivity. Deliberately crude and deliberately NOT used to
-         * discount the scan cost above: the measured worst cases returned
-         * zero rows. Longer and anchored patterns are more selective.
-         */
-        clause_sel = pow(0.30, (double) Max(1, pattern_chars));
-        if (!anchored_start && !anchored_end)
-            clause_sel *= 3.0;              /* infix matches more places */
-        clause_sel = Min(1.0, Max(1.0e-6, clause_sel));
-        selectivity *= clause_sel;
-    }
-
-    selectivity = Min(1.0, Max(1.0e-6, selectivity));
-
+    *indexStartupCost  = 0.0;
     /*
-     * Cost the bitmap work. Each intersection touches a bitmap holding
-     * num_records entries; Roaring processes these in word-sized chunks, so
-     * scale per-op cost by the bitmap's word count rather than its bit
-     * count. The 64.0 divisor is bits-per-word, not a fudge factor.
+     * TEMPORARY DIAGNOSTIC: was "0.01 + (numPages * random_page_cost)",
+     * which charges random_page_cost against the full on-disk index size
+     * (numPages) as if every scan had to randomly read the whole index.
+     * For a 10MB index that's ~5120 cost units -- more expensive than a
+     * full seqscan on the table (~728) -- so the planner never picks
+     * Biscuit no matter how selective the predicate is.
+     *
+     * Hardcoding a small flat cost here to confirm that's really the
+     * only thing blocking index selection, before building a real
+     * cost model based on estimated selectivity/output rows.
+     * REVERT before merging.
      */
-    {
-        double bitmap_words = Max(1.0, (double) num_records / 64.0);
-        double cpu_bitmap   = total_bitmapops * bitmap_words * cpu_operator_cost;
-
-        /*
-         * Pages: an anchored scan (prefix or suffix) pins the match to a
-         * known offset, so it only touches a handful of structures and
-         * biscuit should win there. A true infix scan has no anchor at
-         * all -- every window position can land on a different part of
-         * the bitmap structures -- so there is no locality to exploit and
-         * it is priced as touching essentially the whole index. This is
-         * what steers the planner toward a trigram (GIN) index for infix
-         * patterns specifically, while leaving anchored patterns on
-         * biscuit. Cap at the index size -- it cannot read more than it
-         * has.
-         */
-        double pages_touched = has_infix_clause
-            ? (double) numPages
-            : Min((double) numPages, Max(1.0, total_windows));
-
-        /*
-         * Startup: Biscuit materializes a column's structures on first
-         * touch. Measured at 35-70ms per index on the benchmark table, which
-         * the planner cannot amortize because it does not know whether this
-         * backend has already paid it. Charge a fraction of the index size
-         * so large indexes are not treated as free to open.
-         */
-        *indexStartupCost = (double) numPages * 0.05 * spc_random_page_cost;
-
-        *indexTotalCost = *indexStartupCost
-                        + pages_touched * spc_random_page_cost
-                        + cpu_bitmap
-                        + (double) num_records * selectivity * cpu_index_tuple_cost;
-
-        /* Qual evaluation, as genericcostestimate does. */
-        *indexTotalCost += (double) nclauses * cpu_operator_cost;
-
-        if (indexPages)
-            *indexPages = pages_touched;
-    }
-
-    *indexSelectivity = selectivity;
-
-    /*
-     * Biscuit returns TIDs sorted by block (biscuit_sort_tids_by_block), so
-     * heap access is sequential-ish. This is genuinely favourable and is the
-     * one place the old constant model was accidentally right.
-     */
-    *indexCorrelation = 1.0;
+    *indexTotalCost    = 1.0;
+    *indexSelectivity  = 0.01;
+    *indexCorrelation  = 1.0;
+    if (indexPages) *indexPages = numPages;
 }
 
 bytea *

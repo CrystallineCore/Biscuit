@@ -30,8 +30,8 @@ $$;
 -- Master configuration table
 CREATE TEMP TABLE _cfg (key TEXT PRIMARY KEY, val TEXT);
 INSERT INTO _cfg VALUES
-  ('dataset_rows',      '5000'),   -- rows in main test table
-  ('unicode_rows',      '500'),    -- extra unicode-heavy rows
+  ('dataset_rows',      '500000'),  -- rows in main test table
+  ('unicode_rows',      '50000'),   -- extra unicode-heavy rows
   ('fuzz_iterations',   '50'),     -- randomised fuzz rounds
   ('enable_explain',    'true'),   -- capture EXPLAIN ANALYZE
   ('fail_fast',         'false');  -- stop on first failure
@@ -48,8 +48,25 @@ CREATE TEMP TABLE _results (
   biscuit_rows  BIGINT,
   seqscan_rows  BIGINT,
   row_match     BOOLEAN,
-  biscuit_ms    NUMERIC(12,3),
-  seqscan_ms    NUMERIC(12,3),
+  cold_biscuit_ms  NUMERIC(12,3),      -- first (untimed-cache) execution against Biscuit index
+  cold_seqscan_ms  NUMERIC(12,3),      -- first (untimed-cache) execution of the seqscan
+  biscuit_ms    NUMERIC(12,3),         -- steady-state (post-warmup) Biscuit timing -- USE THIS for perf comparisons
+  seqscan_ms    NUMERIC(12,3),         -- steady-state (post-warmup) seqscan timing
+  speedup_ratio NUMERIC(12,4) GENERATED ALWAYS AS (
+                  CASE WHEN biscuit_ms IS NOT NULL AND biscuit_ms > 0
+                       THEN ROUND(seqscan_ms / biscuit_ms, 4)
+                       ELSE NULL END
+                ) STORED,                            -- steady-state seqscan_ms / biscuit_ms; >1 means Biscuit was faster
+  cold_speedup_ratio NUMERIC(12,4) GENERATED ALWAYS AS (
+                  CASE WHEN cold_biscuit_ms IS NOT NULL AND cold_biscuit_ms > 0
+                       THEN ROUND(cold_seqscan_ms / cold_biscuit_ms, 4)
+                       ELSE NULL END
+                ) STORED,                            -- first-touch seqscan_ms / biscuit_ms
+  cold_penalty_ms NUMERIC(12,3) GENERATED ALWAYS AS (
+                  CASE WHEN cold_biscuit_ms IS NOT NULL AND biscuit_ms IS NOT NULL
+                       THEN ROUND(cold_biscuit_ms - biscuit_ms, 3)
+                       ELSE NULL END
+                ) STORED,                            -- how much slower the cold Biscuit run was vs warm
   index_used    BOOLEAN,
   status        TEXT    NOT NULL DEFAULT 'PENDING',  -- PASS / FAIL / SKIP
   detail        TEXT,
@@ -81,7 +98,9 @@ CREATE OR REPLACE FUNCTION _record_result(
     p_b_ms       NUMERIC,
     p_s_ms       NUMERIC,
     p_idx_used   BOOLEAN,
-    p_detail     TEXT DEFAULT NULL
+    p_detail     TEXT DEFAULT NULL,
+    p_cold_b_ms  NUMERIC DEFAULT NULL,
+    p_cold_s_ms  NUMERIC DEFAULT NULL
 ) RETURNS INT LANGUAGE plpgsql AS $$
 DECLARE
   v_id  INT;
@@ -90,10 +109,12 @@ BEGIN
   v_status := CASE WHEN p_match THEN 'PASS' ELSE 'FAIL' END;
   INSERT INTO _results
     (category, test_name, query_text, biscuit_rows, seqscan_rows,
-     row_match, biscuit_ms, seqscan_ms, index_used, status, detail)
+     row_match, biscuit_ms, seqscan_ms, index_used, status, detail,
+     cold_biscuit_ms, cold_seqscan_ms)
   VALUES
     (p_category, p_test_name, p_query, p_b_rows, p_s_rows,
-     p_match, p_b_ms, p_s_ms, p_idx_used, v_status, p_detail)
+     p_match, p_b_ms, p_s_ms, p_idx_used, v_status, p_detail,
+     p_cold_b_ms, p_cold_s_ms)
   RETURNING id INTO v_id;
   RETURN v_id;
 END;
@@ -111,6 +132,10 @@ CREATE OR REPLACE FUNCTION _run_comparison(
     p_id_col     TEXT DEFAULT 'id'
 ) RETURNS VOID LANGUAGE plpgsql AS $$
 DECLARE
+  v_cold_b_start TIMESTAMPTZ;
+  v_cold_b_end   TIMESTAMPTZ;
+  v_cold_s_start TIMESTAMPTZ;
+  v_cold_s_end   TIMESTAMPTZ;
   v_b_start     TIMESTAMPTZ;
   v_b_end       TIMESTAMPTZ;
   v_s_start     TIMESTAMPTZ;
@@ -125,11 +150,27 @@ DECLARE
   v_plan        TEXT;
   v_index_used  BOOLEAN := false;
 BEGIN
-  -- ---- BISCUIT RUN ----
+  -- =========================================================================
+  -- Biscuit has a known cold-load penalty (first touch after eviction pays
+  -- for page-in and/or the index's own internal warm-up), which is separate
+  -- from genuine query cost. We measure it explicitly instead of letting it
+  -- silently pollute the "optimal performance" number:
+  --   1. Run once, discarded -> cold_*_ms (the first-touch penalty, reported)
+  --   2. Run again immediately -> *_ms (steady-state, used for speedup_ratio)
+  -- =========================================================================
+
+  -- ---- BISCUIT RUN: cold pass (discarded, timed separately) ----
   EXECUTE 'SET enable_seqscan = on';
   EXECUTE 'SET enable_indexscan = on';
   EXECUTE 'SET enable_bitmapscan = on';
 
+  DROP TABLE IF EXISTS _biscuit_res;
+  v_cold_b_start := clock_timestamp();
+  EXECUTE 'CREATE TEMP TABLE _biscuit_res AS ' || p_select_sql;
+  v_cold_b_end   := clock_timestamp();
+  DROP TABLE _biscuit_res;
+
+  -- ---- BISCUIT RUN: warm pass (timed, used for correctness + speedup) ----
   v_b_start := clock_timestamp();
   EXECUTE 'CREATE TEMP TABLE _biscuit_res AS ' || p_select_sql;
   v_b_end   := clock_timestamp();
@@ -147,11 +188,18 @@ BEGIN
   -- Detect if biscuit index scan appears in plan
   v_index_used := (v_plan ILIKE '%biscuit%' OR v_plan ILIKE '%index%');
 
-  -- ---- SEQSCAN (GROUND TRUTH) RUN ----
+  -- ---- SEQSCAN (GROUND TRUTH) RUN: cold pass (discarded, timed separately) ----
   EXECUTE 'SET enable_seqscan = on';
   EXECUTE 'SET enable_indexscan = off';
   EXECUTE 'SET enable_bitmapscan = off';
 
+  DROP TABLE IF EXISTS _seqscan_res;
+  v_cold_s_start := clock_timestamp();
+  EXECUTE 'CREATE TEMP TABLE _seqscan_res AS ' || p_select_sql;
+  v_cold_s_end   := clock_timestamp();
+  DROP TABLE _seqscan_res;
+
+  -- ---- SEQSCAN (GROUND TRUTH) RUN: warm pass (timed, used for correctness) ----
   v_s_start := clock_timestamp();
   EXECUTE 'CREATE TEMP TABLE _seqscan_res AS ' || p_select_sql;
   v_s_end   := clock_timestamp();
@@ -175,8 +223,10 @@ BEGIN
   v_match := (v_missing = 0 AND v_extra = 0 AND v_b_rows = v_s_rows);
 
   v_detail := format(
-    'biscuit_rows=%s seqscan_rows=%s missing(FN)=%s extra(FP)=%s',
-    v_b_rows, v_s_rows, v_missing, v_extra
+    'biscuit_rows=%s seqscan_rows=%s missing(FN)=%s extra(FP)=%s cold_biscuit_ms=%s cold_seqscan_ms=%s',
+    v_b_rows, v_s_rows, v_missing, v_extra,
+    ROUND(EXTRACT(EPOCH FROM (v_cold_b_end - v_cold_b_start)) * 1000, 3),
+    ROUND(EXTRACT(EPOCH FROM (v_cold_s_end - v_cold_s_start)) * 1000, 3)
   );
 
   v_rid := _record_result(
@@ -184,7 +234,9 @@ BEGIN
     v_b_rows, v_s_rows, v_match,
     EXTRACT(EPOCH FROM (v_b_end - v_b_start)) * 1000,
     EXTRACT(EPOCH FROM (v_s_end - v_s_start)) * 1000,
-    v_index_used, v_detail
+    v_index_used, v_detail,
+    EXTRACT(EPOCH FROM (v_cold_b_end - v_cold_b_start)) * 1000,
+    EXTRACT(EPOCH FROM (v_cold_s_end - v_cold_s_start)) * 1000
   );
 
   IF NOT v_match THEN
@@ -584,6 +636,36 @@ BEGIN
   RAISE NOTICE 'Index count: %',
     (SELECT COUNT(*) FROM pg_indexes
       WHERE tablename = 'test_data' AND indexdef ILIKE '%biscuit%');
+END;
+$$;
+
+-- =============================================================================
+-- SECTION 5b: INDEX PREWARMING
+-- =============================================================================
+-- Load every Biscuit index into shared_buffers via pg_prewarm before any
+-- test queries run against it, so cold-cache effects don't skew timings
+-- or accidentally cause a plan to skip the index.
+-- =============================================================================
+
+CREATE EXTENSION IF NOT EXISTS pg_prewarm;
+
+DO $$
+DECLARE
+  r RECORD;
+  v_blocks BIGINT;
+BEGIN
+  RAISE NOTICE 'Prewarming Biscuit indexes...';
+  FOR r IN
+    SELECT indexname
+      FROM pg_indexes
+     WHERE tablename = 'test_data'
+       AND indexdef ILIKE '%biscuit%'
+     ORDER BY indexname
+  LOOP
+    SELECT pg_prewarm(r.indexname::regclass) INTO v_blocks;
+    RAISE NOTICE '  prewarmed % (% blocks)', r.indexname, v_blocks;
+  END LOOP;
+  RAISE NOTICE 'Prewarming complete.';
 END;
 $$;
 
@@ -1574,6 +1656,7 @@ DECLARE
   v_fp_total   BIGINT;
   v_fn_total   BIGINT;
   r            RECORD;
+  s            RECORD;  -- speedup stats
 BEGIN
   SELECT
     COUNT(*),
@@ -1609,6 +1692,106 @@ BEGIN
   LOOP
     RAISE NOTICE '    %-35s total=% pass=% fail=%',
       r.category, r.total, r.passed, r.failed;
+  END LOOP;
+
+  RAISE NOTICE '-------------------------------------------------------------';
+
+  -- ---------------------------------------------------------------------
+  -- Speedup statistics (seqscan_ms / biscuit_ms), computed over rows with
+  -- valid timings on both sides. > 1.0 means Biscuit beat the seq scan.
+  -- ---------------------------------------------------------------------
+  SELECT
+    COUNT(*)                                              AS n,
+    ROUND(AVG(speedup_ratio), 4)                          AS avg_speedup,
+    ROUND(MIN(speedup_ratio), 4)                          AS min_speedup,
+    ROUND(MAX(speedup_ratio), 4)                          AS max_speedup,
+    ROUND(STDDEV_SAMP(speedup_ratio), 4)                  AS stddev_speedup,
+    ROUND((PERCENTILE_CONT(0.5)
+            WITHIN GROUP (ORDER BY speedup_ratio))::numeric, 4)     AS median_speedup,
+    ROUND((PERCENTILE_CONT(0.25)
+            WITHIN GROUP (ORDER BY speedup_ratio))::numeric, 4)     AS p25_speedup,
+    ROUND((PERCENTILE_CONT(0.75)
+            WITHIN GROUP (ORDER BY speedup_ratio))::numeric, 4)     AS p75_speedup,
+    ROUND((PERCENTILE_CONT(0.90)
+            WITHIN GROUP (ORDER BY speedup_ratio))::numeric, 4)     AS p90_speedup,
+    ROUND((PERCENTILE_CONT(0.99)
+            WITHIN GROUP (ORDER BY speedup_ratio))::numeric, 4)     AS p99_speedup,
+    ROUND(AVG(biscuit_ms), 3)                             AS avg_biscuit_ms,
+    ROUND(AVG(seqscan_ms), 3)                             AS avg_seqscan_ms
+  INTO s
+  FROM _results
+  WHERE speedup_ratio IS NOT NULL;
+
+  RAISE NOTICE '  Speedup stats (seqscan_ms / biscuit_ms), n=%:', COALESCE(s.n, 0);
+  IF s.n IS NULL OR s.n = 0 THEN
+    RAISE NOTICE '    (no rows with valid timing data on both sides)';
+  ELSE
+    RAISE NOTICE '    avg    : %x', s.avg_speedup;
+    RAISE NOTICE '    median : %x', s.median_speedup;
+    RAISE NOTICE '    min    : %x', s.min_speedup;
+    RAISE NOTICE '    max    : %x', s.max_speedup;
+    RAISE NOTICE '    stddev : %x', s.stddev_speedup;
+    RAISE NOTICE '    p25    : %x', s.p25_speedup;
+    RAISE NOTICE '    p75    : %x', s.p75_speedup;
+    RAISE NOTICE '    p90    : %x', s.p90_speedup;
+    RAISE NOTICE '    p99    : %x', s.p99_speedup;
+    RAISE NOTICE '    avg biscuit_ms : % ms', s.avg_biscuit_ms;
+    RAISE NOTICE '    avg seqscan_ms : % ms', s.avg_seqscan_ms;
+  END IF;
+
+  RAISE NOTICE '-------------------------------------------------------------';
+
+  -- ---------------------------------------------------------------------
+  -- Cold-load penalty: how much slower Biscuit's first touch was vs its
+  -- own steady-state, and how that compares to the cold-vs-warm speedup.
+  -- This isolates the cache/warm-up cost so it doesn't get silently
+  -- baked into the "optimal performance" numbers above.
+  -- ---------------------------------------------------------------------
+  SELECT
+    COUNT(*)                                              AS n,
+    ROUND(AVG(cold_penalty_ms), 3)                        AS avg_penalty_ms,
+    ROUND((PERCENTILE_CONT(0.5)
+            WITHIN GROUP (ORDER BY cold_penalty_ms))::numeric, 3) AS median_penalty_ms,
+    ROUND(MAX(cold_penalty_ms), 3)                        AS max_penalty_ms,
+    ROUND(AVG(cold_biscuit_ms), 3)                        AS avg_cold_biscuit_ms,
+    ROUND(AVG(biscuit_ms), 3)                             AS avg_warm_biscuit_ms,
+    ROUND(AVG(cold_speedup_ratio), 4)                     AS avg_cold_speedup
+  INTO s
+  FROM _results
+  WHERE cold_penalty_ms IS NOT NULL;
+
+  RAISE NOTICE '  Cold-load penalty (first touch vs steady-state), n=%:', COALESCE(s.n, 0);
+  IF s.n IS NULL OR s.n = 0 THEN
+    RAISE NOTICE '    (no rows with valid cold timing data)';
+  ELSE
+    RAISE NOTICE '    avg cold_biscuit_ms : % ms', s.avg_cold_biscuit_ms;
+    RAISE NOTICE '    avg warm_biscuit_ms : % ms', s.avg_warm_biscuit_ms;
+    RAISE NOTICE '    avg penalty         : % ms', s.avg_penalty_ms;
+    RAISE NOTICE '    median penalty      : % ms', s.median_penalty_ms;
+    RAISE NOTICE '    max penalty         : % ms', s.max_penalty_ms;
+    RAISE NOTICE '    avg speedup (cold, i.e. if you DID NOT warm up): %x', s.avg_cold_speedup;
+    RAISE NOTICE '    (compare to steady-state avg speedup above — the gap is the cold-cache tax)';
+  END IF;
+
+  RAISE NOTICE '-------------------------------------------------------------';
+
+  -- Per-category speedup breakdown
+  RAISE NOTICE '  Per-category speedup (avg / median / min / max), n:';
+  FOR r IN
+    SELECT category,
+           COUNT(*) FILTER (WHERE speedup_ratio IS NOT NULL)          AS n,
+           ROUND(AVG(speedup_ratio), 3)                               AS avg_sp,
+           ROUND((PERCENTILE_CONT(0.5)
+                   WITHIN GROUP (ORDER BY speedup_ratio))::numeric, 3)          AS med_sp,
+           ROUND(MIN(speedup_ratio), 3)                               AS min_sp,
+           ROUND(MAX(speedup_ratio), 3)                               AS max_sp
+      FROM _results
+     WHERE speedup_ratio IS NOT NULL
+     GROUP BY category
+     ORDER BY category
+  LOOP
+    RAISE NOTICE '    %-35s n=%-5s avg=%-8sx med=%-8sx min=%-8sx max=%-8sx',
+      r.category, r.n, r.avg_sp, r.med_sp, r.min_sp, r.max_sp;
   END LOOP;
 
   RAISE NOTICE '-------------------------------------------------------------';
@@ -1655,12 +1838,59 @@ SELECT
   status,
   biscuit_rows,
   seqscan_rows,
-  ROUND(biscuit_ms,2) AS biscuit_ms,
+  ROUND(cold_biscuit_ms,2) AS cold_biscuit_ms,   -- first-touch (cache-cold) timing
+  ROUND(biscuit_ms,2) AS biscuit_ms,             -- steady-state timing (use for perf claims)
   ROUND(seqscan_ms,2) AS seqscan_ms,
+  cold_penalty_ms,                -- cold_biscuit_ms - biscuit_ms
+  speedup_ratio,                  -- seqscan_ms / biscuit_ms (steady-state); >1 = Biscuit faster
+  cold_speedup_ratio,             -- what speedup_ratio would look like if you never warmed up
   index_used,
   detail
 FROM _results
 ORDER BY id;
+
+-- Cold-vs-warm summary: quantifies Biscuit's cache/warm-up tax directly
+SELECT
+  COUNT(*) FILTER (WHERE cold_penalty_ms IS NOT NULL)                  AS n,
+  ROUND(AVG(cold_biscuit_ms), 3)                                       AS avg_cold_biscuit_ms,
+  ROUND(AVG(biscuit_ms), 3)                                            AS avg_warm_biscuit_ms,
+  ROUND(AVG(cold_penalty_ms), 3)                                       AS avg_penalty_ms,
+  ROUND((PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY cold_penalty_ms))::numeric, 3) AS median_penalty_ms,
+  ROUND(MAX(cold_penalty_ms), 3)                                       AS max_penalty_ms,
+  ROUND(AVG(speedup_ratio), 4)                                         AS avg_warm_speedup,
+  ROUND(AVG(cold_speedup_ratio), 4)                                    AS avg_cold_speedup
+FROM _results
+WHERE cold_penalty_ms IS NOT NULL;
+
+-- Speedup summary stats (overall), for quick ad-hoc querying without
+-- re-reading the NOTICE log
+SELECT
+  COUNT(*) FILTER (WHERE speedup_ratio IS NOT NULL)                    AS n,
+  ROUND(AVG(speedup_ratio), 4)                                         AS avg_speedup,
+  ROUND((PERCENTILE_CONT(0.5)  WITHIN GROUP (ORDER BY speedup_ratio))::numeric, 4) AS median_speedup,
+  ROUND(MIN(speedup_ratio), 4)                                         AS min_speedup,
+  ROUND(MAX(speedup_ratio), 4)                                         AS max_speedup,
+  ROUND(STDDEV_SAMP(speedup_ratio), 4)                                 AS stddev_speedup,
+  ROUND((PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY speedup_ratio))::numeric, 4) AS p25_speedup,
+  ROUND((PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY speedup_ratio))::numeric, 4) AS p75_speedup,
+  ROUND((PERCENTILE_CONT(0.90) WITHIN GROUP (ORDER BY speedup_ratio))::numeric, 4) AS p90_speedup,
+  ROUND((PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY speedup_ratio))::numeric, 4) AS p99_speedup
+FROM _results
+WHERE speedup_ratio IS NOT NULL;
+
+-- Speedup summary stats, broken down by category
+SELECT
+  category,
+  COUNT(*) FILTER (WHERE speedup_ratio IS NOT NULL)                    AS n,
+  ROUND(AVG(speedup_ratio), 3)                                         AS avg_speedup,
+  ROUND((PERCENTILE_CONT(0.5)  WITHIN GROUP (ORDER BY speedup_ratio))::numeric, 3) AS median_speedup,
+  ROUND(MIN(speedup_ratio), 3)                                         AS min_speedup,
+  ROUND(MAX(speedup_ratio), 3)                                         AS max_speedup,
+  ROUND(STDDEV_SAMP(speedup_ratio), 3)                                 AS stddev_speedup
+FROM _results
+WHERE speedup_ratio IS NOT NULL
+GROUP BY category
+ORDER BY category;
 
 -- Failure detail rows (empty if all pass)
 SELECT
