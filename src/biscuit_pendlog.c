@@ -812,7 +812,7 @@ pendlog_detach(Relation index)
     Page                 mpage, tpage;
     BiscuitMetaPageData *meta;
     GenericXLogState    *state;
-    BlockNumber          head, tail;
+    BlockNumber          head, tail, draining;
     BiscuitPageOpaque    topaque;
 
     if (RelationGetNumberOfBlocks(index) == 0)
@@ -820,21 +820,55 @@ pendlog_detach(Relation index)
 
     mbuf = ReadBuffer(index, BISCUIT_METAPAGE_BLKNO);
     LockBuffer(mbuf, BUFFER_LOCK_EXCLUSIVE);
-    meta = (BiscuitMetaPageData *) PageGetSpecialPointer(BufferGetPage(mbuf));
-    head = meta->pendlog_head;
-    tail = meta->pendlog_tail;
+    meta     = (BiscuitMetaPageData *) PageGetSpecialPointer(BufferGetPage(mbuf));
+    head     = meta->pendlog_head;
+    tail     = meta->pendlog_tail;
+    draining = meta->pendlog_draining;
+
+    /*
+     * An earlier drain already detached a chain (durably recorded in
+     * pendlog_draining) and then died -- crash, error, or backend kill --
+     * somewhere between that detach and pendlog_clear_draining(). That
+     * chain's deltas are only safe once some drain has ingested, merged
+     * and freed it. pendlog_draining is a single BlockNumber, not a list:
+     * it can only ever describe ONE outstanding chain at a time.
+     *
+     * Bug this fixes: this function used to only check pendlog_draining
+     * when head == InvalidBlockNumber, and otherwise fell through and
+     * unconditionally overwrote it with the newly detached head a few
+     * lines down (meta->pendlog_draining = head). That is safe within a
+     * single successful drain call -- the caller (biscuit_pendlog_drain_all)
+     * already captured the old value in its own local `abandoned` before
+     * calling this, and correctly ingests/frees both chains. But if a
+     * *second* drain then also died before finishing its merge, the
+     * on-disk marker by then pointed only at the second drain's chain --
+     * the first, still-unrecovered chain was silently orphaned: no longer
+     * referenced by pendlog_draining, never freed (biscuit_page_free_blob()
+     * is what stamps recycle_xid, and it never got to run on it), so
+     * biscuit_page_alloc() would never reclaim it either. Any structure
+     * whose deltas lived only in that first chain and hadn't yet been
+     * merged into a blob when the second drain died was permanently lost
+     * on recovery -- not corrupted, just silently gone.
+     *
+     * Fix: if a chain is already outstanding, adopt it and return
+     * immediately WITHOUT touching the live log at all, even if the live
+     * log also has pages. That guarantees pendlog_draining is only ever
+     * written while it is InvalidBlockNumber, so it can never be
+     * clobbered. The live log is left completely alone -- still reachable
+     * via meta->pendlog_head/tail, still growing if appenders keep
+     * writing to it -- and gets its own turn safely on a later call, once
+     * this one has cleared the marker.
+     */
+    if (draining != InvalidBlockNumber)
+    {
+        UnlockReleaseBuffer(mbuf);
+        return draining;
+    }
 
     if (head == InvalidBlockNumber)
     {
-        /*
-         * Live log is empty -- but an earlier drain may have died between
-         * detaching and finishing. If so, adopt its chain: we hold the
-         * drain lock, so no other drainer can be working on it.
-         */
-        BlockNumber abandoned = meta->pendlog_draining;
-
         UnlockReleaseBuffer(mbuf);
-        return abandoned;
+        return InvalidBlockNumber;
     }
 
     tbuf = ReadBuffer(index, tail);
@@ -856,6 +890,11 @@ pendlog_detach(Relation index)
      * Set in the SAME transaction that unlinks it from pendlog_head, so
      * there is no instant in which the chain is referenced by neither
      * field. See BiscuitMetaPageData.pendlog_draining.
+     *
+     * Safe to write unconditionally here: the guard above already
+     * established meta->pendlog_draining == InvalidBlockNumber before we
+     * got this far, so this cannot overwrite a still-outstanding marker
+     * from an earlier drain that hasn't been recovered yet.
      */
     meta->pendlog_draining = head;
 
