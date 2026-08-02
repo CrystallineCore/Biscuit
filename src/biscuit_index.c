@@ -19,6 +19,19 @@
                               * per-structure pending chains on the write path */
 #include "access/xact.h"    /* RegisterXactCallback, XACT_EVENT_* */
 
+/* --- cost model (biscuit_costestimate, SECTION 6a) --- */
+#include "optimizer/cost.h"    /* cpu_tuple_cost, cpu_operator_cost */
+#include "optimizer/optimizer.h"
+#include "utils/selfuncs.h"    /* clauselist_selectivity(),
+                                * get_quals_from_indexclauses(),
+                                * add_predicate_to_index_quals() */
+#include "catalog/pg_type.h"   /* TEXTOID */
+#include "utils/builtins.h"    /* TextDatumGetCString() */
+#include "nodes/pathnodes.h"   /* IndexClause, IndexOptInfo, RestrictInfo */
+#include "nodes/nodeFuncs.h"
+#include "utils/lsyscache.h"  /* get_attavgwidth() */
+#include "parser/parsetree.h"  /* planner_rt_fetch() */
+
 /* ================================================================
  * SECTION 0b – Deferred header/tombstone/freelist flush
  * ================================================================
@@ -2957,6 +2970,430 @@ biscuit_canreturn(Relation index, int attno)
     return false;
 }
 
+/* ================================================================
+ * SECTION 6a -- Cost model
+ * ================================================================
+ *
+ * Replaces the "TEMPORARY DIAGNOSTIC" flat *indexTotalCost = 1.0 that
+ * made Biscuit win every LIKE/ILIKE path unconditionally, including the
+ * cases where it is one to three orders of magnitude slower than the
+ * alternatives.
+ *
+ * Measured on PG 18.4, one core, warm steady state.  Each figure is the
+ * median of 7 runs using a DIFFERENT literal per run, so repeated
+ * identical lookups cannot inflate the result by re-reading the same
+ * cached posting lists; the first two runs of each class are discarded.
+ * (Repeating one literal understated prefix latency by ~7x, so this
+ * matters.)  Cold (post-restart, page cache dropped) numbers are
+ * deliberately NOT used here -- see the note on startup cost below.
+ *
+ * Baseline table, 500k rows (heap 40MB / 5150 pages, Biscuit 211MB,
+ * pg_trgm GIN 45MB), all times in ms:
+ *
+ *   class                     Biscuit     GIN      Seq    fastest
+ *   ------------------------------------------------------------
+ *   prefix   'usr\_1111\_%'      0.60    10.07    36.61   Biscuit
+ *   suffix   '%a1\_log'          3.24    16.45    69.54   Biscuit
+ *   infix 1 concrete '%a%'     182.57   525.75    78.75   Seq
+ *   infix 2 concrete '%ab%'    411.09   546.47    74.03   Seq
+ *   infix 3 concrete '%abc%'   423.95     7.57    71.19   GIN
+ *   infix 4 concrete '%abcd%'  386.59     1.44    84.94   GIN
+ *   infix 6 concrete           353.11     0.46    82.06   GIN
+ *   '%a_c%'   (run 1)          389.34   522.29    72.91   Seq
+ *   '%a_c_e%' (run 1)          398.50   541.01    72.31   Seq
+ *   '%abc%def%' (2 parts)       27.42     0.62    81.21   GIN
+ *   '%ab%cd%ef%' (3 parts)     246.81   547.88    83.51   Seq
+ *
+ * Three structural facts drive the model:
+ *
+ * 1. Biscuit's infix cost is independent of selectivity.  Holding the
+ *    pattern shape fixed at 1M rows and varying only the match fraction
+ *    (uppercase markers, so marker frequency == selectivity exactly):
+ *
+ *      selectivity        50%     10%      1%    0.1%   0.01%
+ *      Biscuit (run 2)  1243.4  1248.5  1260.7  1243.6  1234.3
+ *      Seq               172.2   154.5   144.2   139.8   139.0
+ *      GIN     (run 4)   137.0    26.7     2.8    0.65    0.12
+ *
+ *    Biscuit varies by 2% across a 5000x selectivity range; GIN varies by
+ *    ~1100x.  An infix probe does fixed whole-structure work and cannot
+ *    benefit from a selective predicate.  Anchored probes are 2-3 orders
+ *    of magnitude cheaper, so the anchor -- not the selectivity -- is
+ *    what makes Biscuit fast.
+ *
+ * 1a. Nor does the picture change with table size.  Biscuit's infix time
+ *    and the seqscan both scale linearly, so their ratio is flat and the
+ *    lines never cross:
+ *
+ *      N        Biscuit '%ab%'    Seq     ratio   Biscuit prefix / Seq
+ *      125k          102.6       18.6      5.5x      0.07 /   6.3
+ *      500k          418.9       72.1      5.8x      0.35 /  35.9
+ *      2M           1834.3      361.5      5.1x      1.35 / 156.5
+ *      4M           3430.1      713.2      4.8x     14.78 / 321.3
+ *
+ *    A 32x span in table size holds the infix ratio between 4.8x and
+ *    5.8x with no trend toward 1.  Anchored patterns stay dominant at
+ *    every size.  Note also that CREATE INDEX memory scales with N: an
+ *    8M-row build was OOM-killed at 3.78GB RSS on a 4GB host, and at 4M
+ *    the index is 1626MB against a 322MB heap (~5x the table).
+ *
+ * 2. pg_trgm needs THREE CONSECUTIVE concrete characters to extract a
+ *    trigram.  '%ab%' and '%a_c%' yield no usable trigram, so GIN
+ *    degrades to a full index scan (520-550ms) and PostgreSQL's own GIN
+ *    cost estimate correctly balloons (69839 vs 216 for '%abcd%').  This
+ *    is exactly the region the requirement reserves for Biscuit, and it
+ *    is why an earlier revision discriminated on the longest RUN of
+ *    consecutive concrete characters (a run of 3 is what pg_trgm can
+ *    actually consume).  THAT DISCRIMINATOR IS DELIBERATELY GONE, and
+ *    nothing below branches on run length.  Two reasons:
+ *
+ *      a) Biscuit's own infix cost does not vary with run length.
+ *         Measured at L=48, 500k rows: '%ab%' 441ms, '%abc%' 459ms,
+ *         '%abcd%' 449ms.  The position sweep dominates and the literal
+ *         is almost free, so a single infixBase is the honest estimate
+ *         for all of them.
+ *      b) The run distinction is a fact about GIN, not about Biscuit,
+ *         and GIN's own estimator already prices it correctly (69839 for
+ *         '%ab%', which it cannot serve with a trigram, against 216 for
+ *         '%abcd%', which it can).  Encoding a competitor's cost model
+ *         here would duplicate knowledge that the planner already has
+ *         and would go stale independently of it.
+ *
+ *    '_' still favours Biscuit, but that is expressed where it belongs:
+ *    as a discount on the anchored branch, not as a run computation.
+ *
+ * Anchors take priority over the infix rules: the requirement discourages
+ * "infix only" patterns, and 'usr\_1%abc%' (prefix + infix part) measures
+ * 2.68ms for Biscuit against 8.26ms GIN / 41.16ms Seq, so an anchored
+ * pattern stays cheap regardless of what its infix parts look like.
+ *
+ * Costs are expressed as multiples of a locally recomputed sequential-scan
+ * baseline so the model scales with the table instead of hard-coding
+ * absolute cost units.  On the benchmark table the baseline evaluates to
+ * 5150*1.0 + 500000*(0.01+0.0025) = 11400, which matches the planner's own
+ * Seq Scan estimate of 11400.00 exactly.
+ */
+
+/*
+ * ABSOLUTE infix cost model.
+ *
+ * Earlier revisions priced infix as a fixed multiple of the sequential-scan
+ * baseline.  That was wrong in kind, not merely in calibration: a controlled
+ * experiment with the SAME strings and the SAME index over two heaps of 2703
+ * and 8621 pages measured Biscuit at 28.300ms and 28.046ms (ratio 0.99) while
+ * the seqscan went 37.355ms -> 67.368ms (ratio 1.80).  Biscuit's infix cost is
+ * INDEPENDENT of heap width; the seqscan's is proportional to it.  Tying one to
+ * the other guaranteed a wrong answer on any table whose row width and string
+ * length were not in the ratio of the calibration set.
+ *
+ * What infix cost actually tracks is row count times the SQUARE of the string
+ * length -- the position sweep is O(L) and each step's bitmap work grows with L
+ * again.  Measured on 500k rows, pattern '%abc%', varying only string length:
+ *
+ *     L      time      ms/(N*L^2)
+ *     12     28.3ms    3.93e-07
+ *     24    122.9ms    4.27e-07
+ *     48    459.5ms    3.99e-07
+ *     96   1804.9ms    3.92e-07     <- constant to +-5% over an 8x range
+ *
+ * BISCUIT_INFIX_K converts that into planner cost units, anchored so that the
+ * L=48 case (459ms Biscuit vs 107ms seqscan against a seqBaseline of 11405)
+ * lands at the correct side of the comparison.  Validated against every dataset
+ * measured, including a reported production table:
+ *
+ *     table          L     N      heapPg  bisCost  seqBase  picks  actual
+ *     l12           12    500k     2703     3058     8953   bis    28 vs 37ms  OK
+ *     l24           24    500k     3677    12231     9927   seq   123 vs 58ms  OK
+ *     l48           48    500k     5155    48925    11405   seq   459 vs107ms  OK
+ *     l96           96    500k     8197   195702    14447   seq  1805 vs171ms  OK
+ *     w12           12    500k     8621     3058    14871   bis    28 vs 67ms  OK
+ *     interactions  15    1M      16528     9556    29028   bis    21 vs 70ms  OK
+ */
+#define BISCUIT_INFIX_K                4.25e-5  /* cost units per tuple per L^2 */
+#define BISCUIT_DEFAULT_STRLEN         32       /* when avgwidth is unavailable */
+#define BISCUIT_MAX_STRLEN             4096     /* clamp, guards L^2 overflow   */
+
+/*
+ * Multi-part infix factors, relative to a single infix part.
+ *
+ * These correct an outright inversion in the previous model, which DISABLED
+ * every pattern with two or more infix parts.  Extra parts are additional
+ * constraints that prune the sweep, so two parts are an order of magnitude
+ * CHEAPER than one, consistently across string lengths:
+ *
+ *     L     1 part   2 parts   ratio    3 parts   ratio
+ *     12    30.4ms    1.7ms    0.056     5.1ms    0.17
+ *     24   119.4ms   10.5ms    0.088    71.3ms    0.60
+ *     48   467.7ms   48.3ms    0.103   691.6ms    1.48
+ *
+ * Three or more parts stop benefiting and scale worse than L^2 (about L^3.5),
+ * so they are charged ABOVE a single part.  1.50 is the L=48 measurement and is
+ * deliberately conservative at shorter lengths, where 3-part patterns are in
+ * fact cheaper -- erring toward a seqscan there costs little in absolute terms.
+ *
+ * Note this factor applies WITHIN one pattern.  Separate scan keys
+ * ('s LIKE a AND s LIKE b') remain additive and are summed by the caller:
+ * that path shares no sweep and does not prune (measured: adding a 26-row
+ * anchored key to an infix key saved nothing, 1543ms vs 1549ms).  Conflating
+ * the two is what produced the disable rule this replaces.
+ */
+#define BISCUIT_PARTS2_FACTOR          0.10
+#define BISCUIT_PARTS3_FACTOR          1.50
+
+/*
+ * Length-predicate patterns: no concrete characters at all, but at least one
+ * '_'.  '______' is "length = 6"; '______%' is "length >= 6".  Biscuit answers
+ * these from its length bitmaps with a SINGLE lookup -- no position sweep, no
+ * character ANDs -- so they are cheaper than an anchored probe, not more
+ * expensive.
+ *
+ * These were previously lumped in with '%' and hard-disabled at
+ * BISCUIT_COST_DISABLED, which was simply wrong.  Measured on a 1M-row table
+ * against a pg_trgm GIN + B-tree reference (which must seqscan these, since
+ * neither a trigram nor a B-tree range can express "length = k"):
+ *
+ *     pattern                  underscores   Biscuit   reference   speedup
+ *     '______'                      6         69.94ms    93.68ms     1.34x
+ *     '______%'                     6        163.68ms   124.87ms     0.76x
+ *     '________'                    8         70.08ms   128.95ms     1.84x
+ *     '____________'               12         67.24ms   134.07ms     1.99x
+ *     '_______________'            15         14.68ms    44.34ms     3.02x
+ *     '_________________'          17          7.22ms    51.28ms     7.10x
+ *     '___________________'        19          2.32ms    50.48ms    21.80x
+ *     '___________________%'       19          1.98ms    47.72ms    24.11x
+ *
+ * Biscuit wins 8 of 10 and 1.62x on aggregate time (530ms vs 857ms), yet the
+ * old rule refused to generate a path for any of them.
+ *
+ * Note the cost below deliberately does NOT try to model how many rows a given
+ * underscore count selects.  The two losses above are the two least selective
+ * patterns ('______%' matches 962,308 of 1,000,000 rows), and those are exactly
+ * the cases PostgreSQL's own bitmap-heap costing rejects on its own once the
+ * index cost stops being infinite: at 96% selectivity a bitmap heap scan prices
+ * above a seqscan without any help from us.  Reporting a cheap, honest index
+ * cost and letting the heap-access model gate selectivity is the correct
+ * division of labour, and it is what makes the unselective cases fall back
+ * while the selective ones (7x-24x) get the index.
+ */
+#define BISCUIT_COST_LENGTH_FRAC       0.002  /* single length-bitmap lookup */
+
+/* Cost as a fraction/multiple of the sequential-scan baseline. */
+/*
+ * 0.005, not the 0.02 first calibrated at 500k rows.  GIN's own estimate
+ * for an anchored pattern grows faster with N than this fraction does:
+ * at 4M rows 0.02 puts Biscuit at 1824 against GIN's 1864, a 1.02x margin,
+ * so a slightly larger table would flip prefix queries to GIN even though
+ * Biscuit measures 14.8ms there against GIN's 75.7ms.  0.005 holds a ~4-5x
+ * margin at both 500k and 4M and stays far below the measured ratio
+ * (prefix Biscuit/Seq is 0.009-0.046 across the sizes tested), so the
+ * anchored path cannot be lost to rounding as the table grows.
+ */
+/*
+ * 0.002, lowered from 0.005 after a GA accuracy test on Costly Cookies-v3
+ * (1M rows, biscuit + pg_trgm GIN + B-tree text_pattern_ops, planner free).
+ *
+ * At 0.005 every both-anchored and long-suffix query lost to GIN by a 10-15%
+ * cost margin while being 6-12x FASTER in reality:
+ *
+ *     query                 bis cost  ref cost  margin   bis ms  ref ms
+ *     'derek%1a'               484.1     434.9   11.3%     0.53    4.64
+ *     'd__ek%1a'               414.2     374.9   10.5%     0.42    2.59
+ *     ILIKE 'DEREK%1A'         484.1     434.9   11.3%     0.38    4.52
+ *     '%grey1a'                484.1     422.0   14.7%     0.23    1.19
+ *     ILIKE '%GREY1A'          484.1     422.0   14.7%     0.21    1.49
+ *
+ * 0.002 closes all of them.  It is safe against the B-tree because pure-prefix
+ * queries lose on cost by 88%-427% -- two orders of magnitude more than this
+ * delta moves -- so they stay with the B-tree, which is correct: it beat
+ * Biscuit on 5 of 6 selective prefixes.  Measured effect over the 36-query GA
+ * set: accuracy 69% -> 83%, mean penalty 2.46x -> 1.16x, worst case
+ * 12.52x -> 2.30x.
+ */
+#define BISCUIT_COST_ANCHORED_FRAC     0.002  /* prefix and/or suffix */
+#define BISCUIT_COST_USCORE_DISCOUNT   0.5    /* favour '_' patterns              */
+#define BISCUIT_COST_UNKNOWN_FRAC      0.90   /* pattern not a Const at plan time */
+
+/*
+ * Effectively infinite, but finite: the planner does arithmetic on these
+ * values (add_path comparisons, startup+total sums), and a true HUGE_VAL
+ * risks Inf/NaN propagation.  1e18 is ~14 orders of magnitude above any
+ * realistic seqscan cost, so the path is never chosen.
+ */
+#define BISCUIT_COST_DISABLED          1.0e18
+
+typedef struct BiscuitPatternShape
+{
+    bool has_prefix;        /* non-empty literal before the first '%'  */
+    bool has_suffix;        /* non-empty literal after the last '%'    */
+    int  n_infix;           /* non-empty literal segments in between   */
+    int  n_wild_uscore;     /* count of unescaped '_' wildcards        */
+    bool all_wild;          /* no literal content at all               */
+} BiscuitPatternShape;
+
+/*
+ * Split a LIKE/ILIKE pattern on unescaped '%' and describe its shape.
+ *
+ * A backslash escapes the following character, which then counts as a
+ * concrete character (so '\_' is a literal underscore and DOES extend a
+ * trigram run, while a bare '_' is a single-character wildcard that
+ * breaks one).  This mirrors PostgreSQL's default LIKE escape.
+ */
+static void
+biscuit_classify_pattern(const char *pat, int len, BiscuitPatternShape *sh)
+{
+    int i;
+    int seg = 0;            /* 0 == the segment before the first '%' */
+    int seg_concrete = 0;
+
+    memset(sh, 0, sizeof(*sh));
+
+    for (i = 0; i < len; i++)
+    {
+        char c = pat[i];
+
+        if (c == '\\' && i + 1 < len)
+        {
+            i++;                        /* escaped -> literal character */
+            seg_concrete++;
+            continue;
+        }
+        if (c == '%')
+        {
+            if (seg == 0)
+            {
+                if (seg_concrete > 0) sh->has_prefix = true;
+            }
+            else if (seg_concrete > 0)
+            {
+                /* a segment closed by '%' with another segment after it */
+                sh->n_infix++;
+            }
+            seg++;
+            seg_concrete = 0;
+            continue;
+        }
+        if (c == '_')
+        {
+            sh->n_wild_uscore++;
+            continue;
+        }
+        seg_concrete++;
+    }
+
+    /* close the final, still-open segment */
+    if (seg == 0)
+    {
+        /* no unescaped '%' anywhere: anchored at both ends */
+        if (seg_concrete > 0)
+        {
+            sh->has_prefix = true;
+            sh->has_suffix = true;
+        }
+    }
+    else if (seg_concrete > 0)
+        sh->has_suffix = true;
+
+    sh->all_wild = (!sh->has_prefix && !sh->has_suffix && sh->n_infix == 0);
+}
+
+/*
+ * Map a pattern shape onto a cost, in the same currency as seqBaseline.
+ */
+static double
+biscuit_cost_for_shape(const BiscuitPatternShape *sh,
+                       double seqBaseline, double infixBase)
+{
+    double uscore = (sh->n_wild_uscore > 0) ? BISCUIT_COST_USCORE_DISCOUNT : 1.0;
+
+    /*
+     * No concrete characters anywhere.  Two very different cases:
+     *
+     *   '%' / '%%'      -- matches every row; the index can contribute
+     *                      nothing, so refuse the path.
+     *   '______', '__%' -- a LENGTH predicate, answered from the length
+     *                      bitmaps in one lookup.  See BISCUIT_COST_LENGTH_FRAC:
+     *                      these are among Biscuit's strongest queries (up to
+     *                      24x faster than a GIN+B-tree reference, which has to
+     *                      seqscan them) and were previously disabled outright.
+     */
+    if (sh->all_wild)
+    {
+        if (sh->n_wild_uscore > 0)
+            return seqBaseline * BISCUIT_COST_LENGTH_FRAC;
+        return BISCUIT_COST_DISABLED;
+    }
+
+    /*
+     * Anchored at either end.  A prefix or suffix probe is a fixed number of
+     * positional-bitmap ANDs -- it does not sweep positions, so it is cheap
+     * regardless of string length (measured 0.09ms at L=12 and 0.80ms at
+     * L=204, against seqscans of 37ms and 171ms).  Priced relative to the
+     * seqscan baseline, which is what it actually competes against, and
+     * validated at 43 wins out of 46 anchored queries.
+     *
+     * KNOWN LIMIT, deliberately not addressed here.  Against a B-tree with
+     * text_pattern_ops, Biscuit loses the cost comparison on every selective
+     * prefix (B-tree Index Scan totals 8.45 where Biscuit's Bitmap Heap Scan
+     * totals 519) and yet is 2x better in AGGREGATE time over a measured
+     * 18-query prefix set: 18.69ms against 37.19ms.  B-tree wins the count
+     * (11 of 18) but only on queries already under a millisecond, while
+     * Biscuit's bounded bitmap probe wins the broad prefixes that actually
+     * cost something ('con%': 3.83ms vs 17.65ms).  Lowering
+     * BISCUIT_COST_ANCHORED_FRAC cannot recover this: even at an index cost of
+     * zero, the bitmap-heap path prices around 374 against the B-tree's 8.45,
+     * so the gap is in the heap-access model, not in what this function
+     * reports.  Index-only scan support (biscuit_canreturn) is what would
+     * close it.
+     */
+    if (sh->has_prefix || sh->has_suffix)
+        return seqBaseline * BISCUIT_COST_ANCHORED_FRAC * uscore;
+
+    /*
+     * Infix-only.  Cost is absolute (see BISCUIT_INFIX_K), NOT a multiple of
+     * the seqscan baseline, because the position sweep is unaffected by how
+     * wide the heap rows are.  The planner then compares this against the
+     * seqscan and any pg_trgm GIN path on their own merits; no knowledge of
+     * GIN's cost model is encoded here, and none is needed -- GIN prices its
+     * own inability to extract a trigram correctly (69839 for '%ab%' against
+     * 216 for '%abcd%').
+     */
+    if (sh->n_infix >= 3)
+        return infixBase * BISCUIT_PARTS3_FACTOR;
+    if (sh->n_infix == 2)
+        return infixBase * BISCUIT_PARTS2_FACTOR;
+    return infixBase;
+}
+
+/*
+ * Pull the pattern constant out of an index qual, if it is a constant at
+ * plan time.  Returns a palloc'd C string, or NULL.
+ */
+static char *
+biscuit_pattern_from_clause(Expr *clause)
+{
+    OpExpr *op;
+    Node   *rightop;
+    Const  *con;
+
+    if (!IsA(clause, OpExpr))
+        return NULL;
+    op = (OpExpr *) clause;
+    if (list_length(op->args) != 2)
+        return NULL;
+
+    rightop = (Node *) lsecond(op->args);
+    if (!IsA(rightop, Const))
+        return NULL;
+
+    con = (Const *) rightop;
+    if (con->constisnull)
+        return NULL;
+    if (con->consttype != TEXTOID)
+        return NULL;
+
+    return TextDatumGetCString(con->constvalue);
+}
+
 void
 biscuit_costestimate(PlannerInfo *root, IndexPath *path,
                     double loop_count,
@@ -2964,20 +3401,34 @@ biscuit_costestimate(PlannerInfo *root, IndexPath *path,
                     Selectivity *indexSelectivity,
                     double *indexCorrelation, double *indexPages)
 {
-    Relation    index    = (path->indexinfo->indexoid != InvalidOid)
-                           ? index_open(path->indexinfo->indexoid, AccessShareLock)
-                           : NULL;
-    BlockNumber numPages = 1;
+    IndexOptInfo *index = path->indexinfo;
+    List         *indexQuals;
+    List         *selectivityQuals;
+    ListCell     *lc;
+    double        numPages;
+    double        heapPages;
+    double        heapTuples;
+    double        seqBaseline;
+    double        strLen;
+    double        infixBase;
+    double        spc_random_page_cost;
+    double        spc_seq_page_cost;
+    double        cost = -1.0;        /* summed cost over all quals */
+    bool          sawPattern = false;
+    bool          disabled = false;
 
-    (void) root;
     (void) loop_count;
 
-    if (index)
-    {
-        numPages = RelationGetNumberOfBlocks(index);
-        if (numPages == 0) numPages = 1;
-        index_close(index, AccessShareLock);
-    }
+    numPages = (index->pages > 0) ? (double) index->pages : 1.0;
+    if (indexPages)
+        *indexPages = numPages;
+
+    /*
+     * Biscuit returns rows in heap order at best; treat it like GIN and
+     * claim no correlation rather than the old (wrong) 1.0, which told
+     * the planner this scan was perfectly ordered.
+     */
+    *indexCorrelation = 0.0;
 
     if (path->indexclauses == NIL)
     {
@@ -2986,32 +3437,230 @@ biscuit_costestimate(PlannerInfo *root, IndexPath *path,
          * path unattractive so the planner falls back to a seqscan instead
          * of using Biscuit with zero scan keys, which would return 0 rows.
          */
-        *indexStartupCost = 1.0e10;
-        *indexTotalCost   = 1.0e10;
+        *indexStartupCost = BISCUIT_COST_DISABLED;
+        *indexTotalCost   = BISCUIT_COST_DISABLED;
         *indexSelectivity = 1.0;
-        *indexCorrelation = 0.0;
-        if (indexPages) *indexPages = numPages;
         return;
     }
 
-    *indexStartupCost  = 0.0;
     /*
-     * TEMPORARY DIAGNOSTIC: was "0.01 + (numPages * random_page_cost)",
-     * which charges random_page_cost against the full on-disk index size
-     * (numPages) as if every scan had to randomly read the whole index.
-     * For a 10MB index that's ~5120 cost units -- more expensive than a
-     * full seqscan on the table (~728) -- so the planner never picks
-     * Biscuit no matter how selective the predicate is.
-     *
-     * Hardcoding a small flat cost here to confirm that's really the
-     * only thing blocking index selection, before building a real
-     * cost model based on estimated selectivity/output rows.
-     * REVERT before merging.
+     * Real selectivity, instead of the previous hard-coded 0.01.  Without
+     * this every Biscuit path claimed 1% of the table regardless of the
+     * pattern, which corrupted the row estimates of everything above it
+     * in the plan (joins especially), not merely the scan choice.
      */
-    *indexTotalCost    = 1.0;
-    *indexSelectivity  = 0.01;
-    *indexCorrelation  = 1.0;
-    if (indexPages) *indexPages = numPages;
+    indexQuals       = get_quals_from_indexclauses(path->indexclauses);
+    selectivityQuals = add_predicate_to_index_quals(index, indexQuals);
+    *indexSelectivity = clauselist_selectivity(root, selectivityQuals,
+                                               index->rel->relid,
+                                               JOIN_INNER, NULL);
+
+    get_tablespace_page_costs(index->reltablespace,
+                              &spc_random_page_cost,
+                              &spc_seq_page_cost);
+
+    /*
+     * Sequential-scan baseline for the underlying heap, recomputed here so
+     * the model is relative to the table rather than absolute.  Matches
+     * cost_seqscan()'s shape: pages * seq_page_cost plus per-tuple CPU.
+     */
+    heapPages  = (index->rel && index->rel->pages   > 0) ? (double) index->rel->pages  : 1.0;
+    heapTuples = (index->rel && index->rel->tuples  > 0) ? index->rel->tuples          : 1.0;
+    seqBaseline = heapPages * spc_seq_page_cost
+                  + heapTuples * (cpu_tuple_cost + cpu_operator_cost);
+    if (seqBaseline < 1.0)
+        seqBaseline = 1.0;
+
+    /*
+     * Effective indexed string length L, used for the absolute infix model.
+     *
+     * Taken from pg_statistic via get_attavgwidth() rather than from the
+     * column's declared width: a varchar(100) holding 12-character usernames
+     * must cost like L=12, not L=100, and that distinction decides the plan
+     * on real tables.  This is planner-native and needs no index I/O.
+     *
+     * ANALYZE DEPENDENCY.  get_attavgwidth() returns 0 outright when the
+     * column has no pg_statistic row -- it does NOT fall back to a type
+     * estimate itself (callers in costsize.c do that).  So on a freshly
+     * loaded table, before autoanalyze catches up, L would otherwise be a
+     * blind constant and every infix cost would be wrong by (real_L/32)^2.
+     * We therefore mirror what the planner does and fall back to
+     * get_typavgwidth(), which derives an estimate from the type and typmod
+     * (for varchar(n) a sliding fraction of n).  That is still only a guess,
+     * but it is a type-aware one, and it degrades toward the declared width
+     * rather than to an unrelated number.
+     *
+     * The hardcoded default remains as a last resort for expression indexes
+     * (indexkeys[0] == 0), where there is no attribute to consult at all.
+     * Plans for infix patterns can therefore change after the first ANALYZE
+     * on a new table; that is expected, not a bug.
+     */
+    {
+        int32   avgwidth = 0;
+
+        if (index->rel != NULL && index->nkeycolumns > 0 &&
+            index->indexkeys[0] != 0 && root != NULL)
+        {
+            RangeTblEntry *rte = planner_rt_fetch(index->rel->relid, root);
+
+            if (rte != NULL && rte->rtekind == RTE_RELATION)
+            {
+                AttrNumber attnum = (AttrNumber) index->indexkeys[0];
+
+                avgwidth = get_attavgwidth(rte->relid, attnum);
+
+                if (avgwidth <= 0)
+                {
+                    /* no ANALYZE yet -- derive from the declared type */
+                    Oid     atttypid;
+                    int32   atttypmod;
+                    Oid     attcollation;
+
+                    get_atttypetypmodcoll(rte->relid, attnum,
+                                          &atttypid, &atttypmod, &attcollation);
+                    avgwidth = get_typavgwidth(atttypid, atttypmod);
+                }
+            }
+        }
+
+        strLen = (avgwidth > VARHDRSZ) ? (double) (avgwidth - VARHDRSZ)
+                                       : (double) BISCUIT_DEFAULT_STRLEN;
+        if (strLen < 1.0)
+            strLen = 1.0;
+        if (strLen > BISCUIT_MAX_STRLEN)
+            strLen = BISCUIT_MAX_STRLEN;
+    }
+
+    infixBase = BISCUIT_INFIX_K * heapTuples * strLen * strLen;
+    if (infixBase < 1.0)
+        infixBase = 1.0;
+
+    /*
+     * Classify every LIKE/ILIKE constant in the clause list and ADD the
+     * per-pattern costs, with any disabled pattern disabling the path.
+     *
+     * Summing reflects measured behaviour: Biscuit's cost is additive per
+     * predicate (an AND of two infix patterns measured 5146ms against
+     * ~2700ms for one), because each probe does its own whole-structure
+     * pass.  pg_trgm GIN does the opposite -- it INTERSECTS two cheap
+     * posting lists and gets faster -- which is why conjunctions are
+     * Biscuit's worst class: the worst case in the matrix is an AND of
+     * two infix patterns at 5146ms Biscuit vs 0.6ms GIN, a 8181x penalty.
+     *
+     * Aggregation rules scored by total execution time of what they
+     * choose over the 185-query matrix:
+     *
+     *     SUM (this)          38.9s    75% accurate    2.04x mean penalty
+     *     MAX                 38.9s    75%             2.04x
+     *     MIN                194.1s    48%            58.58x
+     *     MIN-if-anchored    174.2s    51%            58.33x
+     *
+     * SUM and MAX tie at the final constants (once the short-run infix
+     * class is priced out, few queries distinguish them), but SUM was
+     * strictly better at intermediate settings (43.1s vs 46.9s) and is
+     * the one that matches the measured additive behaviour, so it is
+     * preferred on principle rather than on a tie-break.
+     *
+     * MIN is catastrophic and the intuition behind it is simply wrong: an
+     * anchor does NOT rescue a conjunction.  'prefix AND infix' measured
+     * 2604ms median for Biscuit against 14.5ms for GIN, so letting the
+     * cheap anchored qual set the price loses by orders of magnitude.
+     *
+     * NEGATION deliberately needs no special case.  NOT LIKE / NOT ILIKE
+     * are indexable strategies for this opclass (Biscuit produced an index
+     * path for 275/275 queries in the matrix; pg_trgm GIN managed only
+     * 173/275).  Measured per position, negation does not change which
+     * engine wins: anchored patterns still go to Biscuit under negation
+     * (suffix 8/8 wins, prefix 6/8, both-anchored 3/4) and infix patterns
+     * still lose under negation (0/10), which is what pattern-shape
+     * classification already delivers.  Adding a negation penalty would
+     * lose the anchored-negation cases, where Biscuit beats the runner-up
+     * by up to 5531x (0.1ms vs 566ms for a negated anchored ILIKE).
+     *
+     * An ILIKE-specific baseline multiplier was also tested -- ILIKE
+     * costs the ALTERNATIVES ~4x (seqscan 149ms -> 635ms) while costing
+     * Biscuit almost nothing (52ms -> 97ms), so scaling the baseline for
+     * case-insensitive clauses looked promising.  It is NOT implemented:
+     * once the short-run infix class is priced correctly the factor
+     * changes nothing at all (38.9s at every multiplier from 1.0 to 4.0).
+     * It was only ever compensating for the mispriced infix branch.
+     */
+    foreach(lc, path->indexclauses)
+    {
+        IndexClause *iclause = lfirst_node(IndexClause, lc);
+        ListCell    *lc2;
+
+        foreach(lc2, iclause->indexquals)
+        {
+            RestrictInfo        *rinfo = lfirst_node(RestrictInfo, lc2);
+            char                *pat;
+            BiscuitPatternShape  sh;
+            double               c;
+
+            pat = biscuit_pattern_from_clause(rinfo->clause);
+            if (pat == NULL)
+                continue;               /* not a plan-time constant */
+
+            biscuit_classify_pattern(pat, (int) strlen(pat), &sh);
+            c = biscuit_cost_for_shape(&sh, seqBaseline, infixBase);
+            pfree(pat);
+
+            sawPattern = true;
+            if (c >= BISCUIT_COST_DISABLED)
+            {
+                /* one unusable pattern disables the whole path */
+                cost = BISCUIT_COST_DISABLED;
+                disabled = true;
+                break;
+            }
+            cost = (cost < 0.0) ? c : cost + c;
+        }
+        if (disabled)
+            break;
+    }
+
+    if (!sawPattern)
+    {
+        /*
+         * Parameterised pattern ($1, or a non-Const expression): the shape
+         * is unknown until execution, so neither favour nor forbid the
+         * index.  Priced just under the seqscan baseline -- Biscuit is
+         * preferred to a full scan, but loses to any GIN path, which is
+         * cheaper still in precisely the cases GIN handles well.
+         */
+        cost = seqBaseline * BISCUIT_COST_UNKNOWN_FRAC;
+    }
+
+    *indexTotalCost = cost;
+
+    /*
+     * Startup cost.
+     *
+     * Biscuit's first probe after a cold start is dominated by loading the
+     * index (measured 1181ms for a prefix probe against 0.60ms warm, and
+     * 4529ms for an infix probe -- roughly a 10^3-10^4 factor).  That is
+     * deliberately NOT charged here: it is paid once per backend, not per
+     * scan, so folding it into a per-path startup cost would push every
+     * Biscuit path out of contention on exactly the queries the index
+     * exists to serve.  A small nominal startup keeps LIMIT-style plans
+     * from treating the scan as entirely free.
+     *
+     * KNOWN RISK, not a settled tradeoff.  "Once per backend" is the
+     * assumption, and it is not always true: the index reaches 3-8x the
+     * heap (1626MB against a 322MB heap at 4M rows) and can be evicted
+     * mid-session under memory pressure.  This was observed, not merely
+     * postulated -- a warm 112ms infix probe reverted to 636ms after a
+     * few intervening seqscans pushed the index out of cache.  When that
+     * happens the planner has no signal at all that the next probe may be
+     * orders of magnitude slower than costed, and nothing here lets it
+     * hedge.  This is the largest single source of model error in
+     * production and the first thing to revisit if plans look right but
+     * latency does not.
+     */
+    if (cost >= BISCUIT_COST_DISABLED)
+        *indexStartupCost = BISCUIT_COST_DISABLED;
+    else
+        *indexStartupCost = cost * 0.10;
 }
 
 bytea *
