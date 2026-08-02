@@ -176,9 +176,22 @@ biscuit_rescan_multicolumn(IndexScanDesc scan,
         if (pred->column_index < 0 || pred->column_index >= so->index->num_columns)
             continue;
 
+        /*
+         * FIX 1: pass the running row-candidate set as a mask. Row
+         * indices are shared across columns in this index, so a mask
+         * built from an earlier predicate on a *different* column is
+         * still a valid restriction here -- only the rows still alive
+         * in `candidates` can possibly survive the final AND anyway.
+         * (For NOT LIKE/NOT ILIKE this computes the *positive* match
+         * restricted to the mask, which is inverted below; that's still
+         * correct since a positive match outside the mask would only
+         * ever get discarded, not added, by the subsequent AND.)
+         */
         col_result = pred_is_ilike
-            ? biscuit_query_column_pattern_ilike(scan->indexRelation, so->index, pred->column_index, pred->pattern)
-            : biscuit_query_column_pattern(scan->indexRelation, so->index, pred->column_index, pred->pattern);
+            ? biscuit_query_column_pattern_ilike_masked(scan->indexRelation, so->index,
+                                                          pred->column_index, pred->pattern, candidates)
+            : biscuit_query_column_pattern_masked(scan->indexRelation, so->index,
+                                                    pred->column_index, pred->pattern, candidates);
 
         if (!col_result)
             col_result = biscuit_roaring_create();
@@ -303,59 +316,71 @@ biscuit_rescan(IndexScanDesc scan,
     }
     else
     {
-            /* ---- Single-column: AND all key results ---- */
-            RoaringBitmap *result = NULL;
+            /*
+             * ---- Single-column: AND all key results ----
+             *
+             * FIX 3: reuse the same cost-based ordering as the
+             * multi-column path (biscuit_build_query_plan() sorts
+             * predicates by selectivity_score, most selective first) so
+             * an anchored key (usr\_1234\_%, ~26 rows) runs before an
+             * infix key (%abcdef%) rather than in whatever order
+             * Postgres happened to hand us the keys.
+             *
+             * FIX 1: thread the running candidate set into each
+             * subsequent key evaluation via *_masked() instead of
+             * computing every key's full-table result and ANDing
+             * afterward. After the first (cheapest) key narrows the
+             * candidate set to ~26 rows, every later key -- including an
+             * infix key that would otherwise sweep/verify against the
+             * full table -- only has to consider those 26 rows.
+             */
+            QueryPlan     *plan;
+            RoaringBitmap *mask = NULL;   /* running candidate set; NULL == unrestricted */
             int            i;
 
-            for (i = 0; i < nkeys; i++)
+            plan = biscuit_build_query_plan(so->index, keys, nkeys);
+            if (!plan || plan->count == 0)
             {
-                ScanKey        key = &keys[i];
-                text          *pattern_text;
-                char          *pattern;
-                RoaringBitmap *key_result;
-                bool           is_not;
+                if (plan) biscuit_free_query_plan(plan);
+                return;
+            }
 
-                if (key->sk_flags & SK_ISNULL)
-                    continue;
-
-                
-
-                pattern_text = DatumGetTextPP(key->sk_argument);
-                pattern      = text_to_cstring(pattern_text);
+            for (i = 0; i < plan->count; i++)
+            {
+                QueryPredicate *pred = &plan->predicates[i];
+                ScanKey         key  = pred->scan_key;
+                RoaringBitmap  *key_result;
+                bool            is_not;
 
                 switch (key->sk_strategy)
                 {
                     case BISCUIT_LIKE_STRATEGY:
-                        key_result = biscuit_query_pattern(scan->indexRelation, so->index, pattern);
-                        break;
                     case BISCUIT_NOT_LIKE_STRATEGY:
-                        key_result = biscuit_query_pattern(scan->indexRelation, so->index, pattern);
+                        key_result = biscuit_query_pattern_masked(scan->indexRelation, so->index,
+                                                                    pred->pattern, mask);
                         break;
                     case BISCUIT_ILIKE_STRATEGY:
-                        key_result = biscuit_query_pattern_ilike(scan->indexRelation, so->index, pattern);
-                        break;
                     case BISCUIT_NOT_ILIKE_STRATEGY:
-                        key_result = biscuit_query_pattern_ilike(scan->indexRelation, so->index, pattern);
+                        key_result = biscuit_query_pattern_ilike_masked(scan->indexRelation, so->index,
+                                                                          pred->pattern, mask);
                         break;
 
                     default:
                         elog(ERROR, "Biscuit: unsupported scan strategy %d",
                              key->sk_strategy);
-                        pfree(pattern);
                         continue;
                 }
 
-                pfree(pattern);
-
                 if (!key_result)
                 {
-                    if (result) biscuit_roaring_free(result);
+                    if (mask) biscuit_roaring_free(mask);
+                    biscuit_free_query_plan(plan);
                     return;
                 }
-                
+
                 is_not = (key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY ||
                           key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
-                          
+
                 if (is_not)
                 {
                     /*
@@ -378,6 +403,13 @@ biscuit_rescan(IndexScanDesc scan,
                      * the non-null live rows), otherwise fall back to a
                      * record-by-record scan over data_cache, which is
                      * always populated regardless of case mode.
+                     *
+                     * key_result above was computed restricted to `mask`
+                     * (positive matches only need to be found within the
+                     * current candidate set -- anything outside mask is
+                     * discarded by the final AND regardless), so the base
+                     * set is restricted to `mask` too before subtracting,
+                     * keeping the two sides consistent.
                      */
                     bool           is_ilike_strategy = (key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
                     RoaringBitmap *all;
@@ -389,27 +421,45 @@ biscuit_rescan(IndexScanDesc scan,
 
                     if (so->index->tombstone_count > 0 && so->index->tombstones)
                         biscuit_roaring_andnot_inplace(all, so->index->tombstones);
+                    if (mask)
+                        biscuit_roaring_and_inplace(all, mask);
                     biscuit_roaring_andnot_inplace(all, key_result);
                     biscuit_roaring_free(key_result);
                     key_result = all;
                 }
-                if (!result)
-                    result = key_result;
-                else
-                {
-                    biscuit_roaring_and_inplace(result, key_result);
-                    biscuit_roaring_free(key_result);
 
-                    if (biscuit_roaring_is_empty(result))
-                    {
-                        biscuit_roaring_free(result);
-                        return;
-                    }
+                /*
+                 * Defensive AND: *_masked() only guarantees the mask was
+                 * applied in the two expensive branches (see
+                 * biscuit_query_pattern_masked()'s header comment), so
+                 * enforce it here regardless of which branch ran.
+                 */
+                if (mask)
+                {
+                    biscuit_roaring_and_inplace(key_result, mask);
+                    biscuit_roaring_free(mask);
+                }
+                mask = key_result;
+
+                if (biscuit_roaring_is_empty(mask))
+                {
+                    biscuit_roaring_free(mask);
+                    biscuit_free_query_plan(plan);
+                    return;
                 }
             }
 
-            if (!result)
-                return;
+            biscuit_free_query_plan(plan);
+
+            {
+            RoaringBitmap *result = mask;
+
+            /*
+             * result is never NULL here: plan->count > 0 is guaranteed
+             * above, every loop iteration either assigns mask (this
+             * variable) or returns early, and the unsupported-strategy
+             * default case elog(ERROR)s rather than falling through.
+             */
 
             /* Filter tombstones (for non-NOT-LIKE keys that may remain) */
             if (so->index->tombstone_count > 0)
@@ -454,6 +504,7 @@ biscuit_rescan(IndexScanDesc scan,
             }
 
             biscuit_roaring_free(result);
+            }
         }
     }
 

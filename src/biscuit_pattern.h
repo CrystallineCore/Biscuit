@@ -109,6 +109,34 @@ extern RoaringBitmap *biscuit_query_pattern(Relation index, BiscuitIndex *idx, c
 /* Case-insensitive ILIKE */
 extern RoaringBitmap *biscuit_query_pattern_ilike(Relation index, BiscuitIndex *idx, const char *pattern);
 
+/*
+ * Mask-aware variants of the two functions above.
+ *
+ * mask, when non-NULL, is the running candidate set from any cheaper
+ * scan keys already evaluated for this AND-conjunction (see
+ * biscuit_build_query_plan() below and biscuit_rescan() in
+ * biscuit_scan.c, which threads the shrinking result of each predicate
+ * into the next one). An empty mask short-circuits immediately. Where
+ * it's cheap to do so (the char_cache+scalar-verify branch for a pure
+ * single-segment infix pattern, and the windowed-match sweep's initial
+ * candidate set) the mask is intersected in *before* the expensive work
+ * runs, not after -- that's the whole point: a 26-row mask means the
+ * scalar verify touches 26 strings and the windowed sweep's per-position
+ * bitmap ANDs touch a 26-row container, not the full row set.
+ *
+ * This is NOT a guarantee that the returned bitmap is fully ANDed with
+ * mask on every code path -- masking above is a performance shortcut
+ * applied only in the two expensive branches described above. Callers
+ * must still AND the result with their own mask afterward for
+ * correctness, exactly as they would with the unmasked functions'
+ * results; biscuit_query_pattern()/biscuit_query_pattern_ilike() are
+ * thin mask=NULL wrappers around these for every existing caller.
+ */
+extern RoaringBitmap *biscuit_query_pattern_masked(Relation index, BiscuitIndex *idx,
+                                                    const char *pattern, const RoaringBitmap *mask);
+extern RoaringBitmap *biscuit_query_pattern_ilike_masked(Relation index, BiscuitIndex *idx,
+                                                          const char *pattern, const RoaringBitmap *mask);
+
 /* ==================== MULTI-COLUMN QUERY ==================== */
 
 /* Per-column case-sensitive LIKE */
@@ -122,6 +150,13 @@ extern RoaringBitmap *biscuit_query_column_pattern_ilike(Relation index,
                                                          BiscuitIndex *idx,
                                                          int col_idx,
                                                          const char *pattern);
+
+/* Mask-aware variants -- see biscuit_query_pattern_masked()'s comment
+ * above for the mask contract, which applies identically here. */
+extern RoaringBitmap *biscuit_query_column_pattern_masked(Relation index, BiscuitIndex *idx, int col_idx,
+                                                           const char *pattern, const RoaringBitmap *mask);
+extern RoaringBitmap *biscuit_query_column_pattern_ilike_masked(Relation index, BiscuitIndex *idx, int col_idx,
+                                                                 const char *pattern, const RoaringBitmap *mask);
 
 /* ==================== QUERY PLAN / OPTIMIZER ==================== */
 

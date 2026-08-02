@@ -1388,6 +1388,20 @@ biscuit_recursive_windowed_match(
     int i;
     WMFrame *stack     = (WMFrame *) palloc(WM_MAX_STACK * sizeof(WMFrame));
     int      stack_top = 0;
+    /* FIX 5 (position-loop half): once `result` already contains every
+     * candidate row, no further position/part probe can add anything
+     * back -- stop draining the stack instead of continuing to probe. */
+    uint64_t total_candidates = biscuit_roaring_count(current_candidates);
+    /*
+     * Upper bound on result's cardinality, cheap to maintain (just an
+     * addition) vs. calling biscuit_roaring_count(result) -- itself
+     * O(containers), not O(1) -- on every single OR in a wide sweep.
+     * cands frames can overlap (the same row can satisfy the pattern at
+     * more than one position), so this sum can overcount the true
+     * result cardinality; that's fine, it's only used to skip the exact
+     * check below until saturation is actually plausible.
+     */
+    uint64_t result_count_upper_bound = 0;
     int *pcl = (int *) palloc(part_count * sizeof(int));
     int *suf = (int *) palloc(part_count * sizeof(int));
     for (i = 0; i < part_count; i++)
@@ -1417,7 +1431,36 @@ biscuit_recursive_windowed_match(
         if (pidx >= part_count)
         {
             biscuit_roaring_or_inplace(result, cands);
+            result_count_upper_bound += biscuit_roaring_count(cands);
             biscuit_roaring_free(cands);
+            if (total_candidates > 0 && result_count_upper_bound >= total_candidates &&
+                biscuit_roaring_count(result) == total_candidates)
+            {
+#ifdef USE_ASSERT_CHECKING
+                /*
+                 * Cardinality equality only implies set equality under
+                 * result ⊆ current_candidates. That containment holds
+                 * because every frame's candidate set is derived from
+                 * current_candidates by intersection only (never OR'd
+                 * with anything external) before landing in `result` --
+                 * but that's an invariant of the code around this loop,
+                 * not something this check can see, so verify it
+                 * explicitly rather than trusting the count alone.
+                 */
+                {
+                    RoaringBitmap *escapees = biscuit_roaring_copy(result);
+                    biscuit_roaring_andnot_inplace(escapees, current_candidates);
+                    Assert(biscuit_roaring_is_empty(escapees));
+                    biscuit_roaring_free(escapees);
+                }
+#endif
+                while (stack_top > 0)
+                {
+                    stack_top--;
+                    biscuit_roaring_free(stack[stack_top].candidates);
+                }
+                break;
+            }
             continue;
         }
 
@@ -1493,6 +1536,20 @@ biscuit_recursive_windowed_match_ilike(
     int i;
     WMFrame *stack     = (WMFrame *) palloc(WM_MAX_STACK * sizeof(WMFrame));
     int      stack_top = 0;
+    /* FIX 5 (position-loop half): once `result` already contains every
+     * candidate row, no further position/part probe can add anything
+     * back -- stop draining the stack instead of continuing to probe. */
+    uint64_t total_candidates = biscuit_roaring_count(current_candidates);
+    /*
+     * Upper bound on result's cardinality, cheap to maintain (just an
+     * addition) vs. calling biscuit_roaring_count(result) -- itself
+     * O(containers), not O(1) -- on every single OR in a wide sweep.
+     * cands frames can overlap (the same row can satisfy the pattern at
+     * more than one position), so this sum can overcount the true
+     * result cardinality; that's fine, it's only used to skip the exact
+     * check below until saturation is actually plausible.
+     */
+    uint64_t result_count_upper_bound = 0;
     int *pcl = (int *) palloc(part_count * sizeof(int));
     int *suf = (int *) palloc(part_count * sizeof(int));
     for (i = 0; i < part_count; i++)
@@ -1522,7 +1579,36 @@ biscuit_recursive_windowed_match_ilike(
         if (pidx >= part_count)
         {
             biscuit_roaring_or_inplace(result, cands);
+            result_count_upper_bound += biscuit_roaring_count(cands);
             biscuit_roaring_free(cands);
+            if (total_candidates > 0 && result_count_upper_bound >= total_candidates &&
+                biscuit_roaring_count(result) == total_candidates)
+            {
+#ifdef USE_ASSERT_CHECKING
+                /*
+                 * Cardinality equality only implies set equality under
+                 * result ⊆ current_candidates. That containment holds
+                 * because every frame's candidate set is derived from
+                 * current_candidates by intersection only (never OR'd
+                 * with anything external) before landing in `result` --
+                 * but that's an invariant of the code around this loop,
+                 * not something this check can see, so verify it
+                 * explicitly rather than trusting the count alone.
+                 */
+                {
+                    RoaringBitmap *escapees = biscuit_roaring_copy(result);
+                    biscuit_roaring_andnot_inplace(escapees, current_candidates);
+                    Assert(biscuit_roaring_is_empty(escapees));
+                    biscuit_roaring_free(escapees);
+                }
+#endif
+                while (stack_top > 0)
+                {
+                    stack_top--;
+                    biscuit_roaring_free(stack[stack_top].candidates);
+                }
+                break;
+            }
             continue;
         }
 
@@ -1802,6 +1888,20 @@ biscuit_recursive_windowed_match_col(
     int i;
     WMFrame *stack     = (WMFrame *) palloc(WM_MAX_STACK * sizeof(WMFrame));
     int      stack_top = 0;
+    /* FIX 5 (position-loop half): once `result` already contains every
+     * candidate row, no further position/part probe can add anything
+     * back -- stop draining the stack instead of continuing to probe. */
+    uint64_t total_candidates = biscuit_roaring_count(current_candidates);
+    /*
+     * Upper bound on result's cardinality, cheap to maintain (just an
+     * addition) vs. calling biscuit_roaring_count(result) -- itself
+     * O(containers), not O(1) -- on every single OR in a wide sweep.
+     * cands frames can overlap (the same row can satisfy the pattern at
+     * more than one position), so this sum can overcount the true
+     * result cardinality; that's fine, it's only used to skip the exact
+     * check below until saturation is actually plausible.
+     */
+    uint64_t result_count_upper_bound = 0;
     int *pcl = (int *) palloc(part_count * sizeof(int));
     int *suf = (int *) palloc(part_count * sizeof(int));
     for (i = 0; i < part_count; i++)
@@ -1831,7 +1931,36 @@ biscuit_recursive_windowed_match_col(
         if (pidx >= part_count)
         {
             biscuit_roaring_or_inplace(result, cands);
+            result_count_upper_bound += biscuit_roaring_count(cands);
             biscuit_roaring_free(cands);
+            if (total_candidates > 0 && result_count_upper_bound >= total_candidates &&
+                biscuit_roaring_count(result) == total_candidates)
+            {
+#ifdef USE_ASSERT_CHECKING
+                /*
+                 * Cardinality equality only implies set equality under
+                 * result ⊆ current_candidates. That containment holds
+                 * because every frame's candidate set is derived from
+                 * current_candidates by intersection only (never OR'd
+                 * with anything external) before landing in `result` --
+                 * but that's an invariant of the code around this loop,
+                 * not something this check can see, so verify it
+                 * explicitly rather than trusting the count alone.
+                 */
+                {
+                    RoaringBitmap *escapees = biscuit_roaring_copy(result);
+                    biscuit_roaring_andnot_inplace(escapees, current_candidates);
+                    Assert(biscuit_roaring_is_empty(escapees));
+                    biscuit_roaring_free(escapees);
+                }
+#endif
+                while (stack_top > 0)
+                {
+                    stack_top--;
+                    biscuit_roaring_free(stack[stack_top].candidates);
+                }
+                break;
+            }
             continue;
         }
 
@@ -1901,6 +2030,20 @@ biscuit_recursive_windowed_match_col_ilike(
     int i;
     WMFrame *stack     = (WMFrame *) palloc(WM_MAX_STACK * sizeof(WMFrame));
     int      stack_top = 0;
+    /* FIX 5 (position-loop half): once `result` already contains every
+     * candidate row, no further position/part probe can add anything
+     * back -- stop draining the stack instead of continuing to probe. */
+    uint64_t total_candidates = biscuit_roaring_count(current_candidates);
+    /*
+     * Upper bound on result's cardinality, cheap to maintain (just an
+     * addition) vs. calling biscuit_roaring_count(result) -- itself
+     * O(containers), not O(1) -- on every single OR in a wide sweep.
+     * cands frames can overlap (the same row can satisfy the pattern at
+     * more than one position), so this sum can overcount the true
+     * result cardinality; that's fine, it's only used to skip the exact
+     * check below until saturation is actually plausible.
+     */
+    uint64_t result_count_upper_bound = 0;
     int *pcl = (int *) palloc(part_count * sizeof(int));
     int *suf = (int *) palloc(part_count * sizeof(int));
     for (i = 0; i < part_count; i++)
@@ -1930,7 +2073,36 @@ biscuit_recursive_windowed_match_col_ilike(
         if (pidx >= part_count)
         {
             biscuit_roaring_or_inplace(result, cands);
+            result_count_upper_bound += biscuit_roaring_count(cands);
             biscuit_roaring_free(cands);
+            if (total_candidates > 0 && result_count_upper_bound >= total_candidates &&
+                biscuit_roaring_count(result) == total_candidates)
+            {
+#ifdef USE_ASSERT_CHECKING
+                /*
+                 * Cardinality equality only implies set equality under
+                 * result ⊆ current_candidates. That containment holds
+                 * because every frame's candidate set is derived from
+                 * current_candidates by intersection only (never OR'd
+                 * with anything external) before landing in `result` --
+                 * but that's an invariant of the code around this loop,
+                 * not something this check can see, so verify it
+                 * explicitly rather than trusting the count alone.
+                 */
+                {
+                    RoaringBitmap *escapees = biscuit_roaring_copy(result);
+                    biscuit_roaring_andnot_inplace(escapees, current_candidates);
+                    Assert(biscuit_roaring_is_empty(escapees));
+                    biscuit_roaring_free(escapees);
+                }
+#endif
+                while (stack_top > 0)
+                {
+                    stack_top--;
+                    biscuit_roaring_free(stack[stack_top].candidates);
+                }
+                break;
+            }
             continue;
         }
 
@@ -1994,8 +2166,32 @@ biscuit_recursive_windowed_match_col_ilike(
  * SECTION 8 – Public query entry points (single-column)
  * ================================================================ */
 
+/*
+ * biscuit_query_pattern_masked
+ *
+ * Same as biscuit_query_pattern(), but accepts an optional candidate
+ * mask -- the intersection of every cheaper scan key already evaluated
+ * for this AND-conjunction (see biscuit_rescan() / biscuit_rescan_multicolumn()
+ * in biscuit_scan.c). When mask is non-NULL:
+ *
+ *   - An empty mask short-circuits immediately (no cheap key survived,
+ *     so this key can't add anything back).
+ *   - The two expensive branches -- the char_cache+scalar-verify path
+ *     for pure single-segment infix patterns ('%abc%'), and the
+ *     multi-segment windowed sweep (biscuit_recursive_windowed_match)
+ *     -- intersect their candidate set with mask *before* doing the
+ *     expensive work, instead of computing the full-table result and
+ *     relying on the caller to AND it down afterward. That's the whole
+ *     fix: a 26-row mask means the scalar verify touches 26 strings and
+ *     the windowed sweep's per-position bitmap ANDs touch a 26-row
+ *     roaring container, not the full row set.
+ *
+ * biscuit_query_pattern() below is now a thin mask=NULL wrapper so every
+ * existing caller keeps working unchanged.
+ */
 RoaringBitmap *
-biscuit_query_pattern(Relation index, BiscuitIndex *idx, const char *pattern)
+biscuit_query_pattern_masked(Relation index, BiscuitIndex *idx, const char *pattern,
+                              const RoaringBitmap *mask)
 {
     int            plen = strlen(pattern);
     ParsedPattern *parsed = NULL;
@@ -2003,6 +2199,12 @@ biscuit_query_pattern(Relation index, BiscuitIndex *idx, const char *pattern)
     RoaringBitmap *result = NULL;
     int            wildcard_count = 0, percent_count = 0;
     bool           only_wildcards = true;
+
+    /* A mask restricts what this key can possibly add back; an empty
+     * mask means every cheaper co-predicate already eliminated every
+     * row, so there is nothing left to compute. */
+    if (mask && biscuit_roaring_is_empty(mask))
+        return biscuit_roaring_create();
 
     /*
      * Defensive gate: an index built with biscuit_ilike_ops never
@@ -2123,6 +2325,11 @@ biscuit_query_pattern(Relation index, BiscuitIndex *idx, const char *pattern)
                         int part_char_len = parsed->part_lens[0];
                         RoaringBitmap *lf = biscuit_get_length_ge(index, idx, part_char_len);
                         if (lf) { biscuit_roaring_and_inplace(candidates, lf); biscuit_roaring_free(lf); }
+                        /* FIX 1: shrink the verify set with the caller's
+                         * mask before the O(candidates x string_length)
+                         * scalar substring scan below, instead of
+                         * scanning every char_cache hit in the table. */
+                        if (mask) biscuit_roaring_and_inplace(candidates, mask);
 
                         #ifdef HAVE_ROARING
                         {
@@ -2190,6 +2397,12 @@ biscuit_query_pattern(Relation index, BiscuitIndex *idx, const char *pattern)
             RoaringBitmap *candidates;
             result = biscuit_roaring_create();
             candidates = biscuit_get_length_ge(index, idx, min_len);
+            /* FIX 1: seed the sweep from the caller's mask too, so a
+             * small mask (e.g. from a cheap sibling predicate already
+             * evaluated in biscuit_rescan()) collapses the per-position
+             * bitmap ANDs in biscuit_recursive_windowed_match() to a
+             * handful of rows instead of the full table. */
+            if (mask && candidates) biscuit_roaring_and_inplace(candidates, mask);
             if (candidates && !biscuit_roaring_is_empty(candidates)) {
                 if (!parsed->starts_percent) {
                     RoaringBitmap *first = biscuit_match_part_at_pos(index, idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
@@ -2218,14 +2431,34 @@ biscuit_query_pattern(Relation index, BiscuitIndex *idx, const char *pattern)
     return result ? result : biscuit_roaring_create();
 }
 
+/*
+ * biscuit_query_pattern -- unchanged public signature, kept for every
+ * existing caller. Note this does NOT guarantee the returned bitmap is
+ * fully ANDed with a mask on every code path (masking above is a
+ * performance shortcut applied only in the two expensive branches);
+ * callers that pass a mask via biscuit_query_pattern_masked() directly
+ * must still AND the result with their mask afterward, same as they
+ * would with the unmasked result today.
+ */
+RoaringBitmap *
+biscuit_query_pattern(Relation index, BiscuitIndex *idx, const char *pattern)
+{
+    return biscuit_query_pattern_masked(index, idx, pattern, NULL);
+}
+
 /* ILIKE single-column: lower-case the pattern first, then reuse logic */
 
+/* See biscuit_query_pattern_masked() above for the mask contract. */
 RoaringBitmap *
-biscuit_query_pattern_ilike(Relation index, BiscuitIndex *idx, const char *pattern)
+biscuit_query_pattern_ilike_masked(Relation index, BiscuitIndex *idx, const char *pattern,
+                                    const RoaringBitmap *mask)
 {
     int            plen = strlen(pattern);
     char          *pl;
     RoaringBitmap *result;
+
+    if (mask && biscuit_roaring_is_empty(mask))
+        return biscuit_roaring_create();
 
     /*
      * Defensive gate: an index built with biscuit_like_ops never
@@ -2364,6 +2597,8 @@ biscuit_query_pattern_ilike(Relation index, BiscuitIndex *idx, const char *patte
                     int pcl = parsed->part_lens[0];
                     RoaringBitmap *lf = biscuit_get_length_ge_lower(index, idx, pcl);
                     if (lf) { biscuit_roaring_and_inplace(candidates, lf); biscuit_roaring_free(lf); }
+                    /* FIX 1 */
+                    if (mask) biscuit_roaring_and_inplace(candidates, mask);
                     #ifdef HAVE_ROARING
                     { roaring_uint32_iterator_t *iter = roaring_iterator_create(candidates);
                       while (iter->has_value) { uint32_t rec = iter->current_value;
@@ -2413,6 +2648,8 @@ biscuit_query_pattern_ilike(Relation index, BiscuitIndex *idx, const char *patte
             RoaringBitmap *candidates;
             result = biscuit_roaring_create();
             candidates = biscuit_get_length_ge_lower(index, idx, min_len);
+            /* FIX 1 */
+            if (mask && candidates) biscuit_roaring_and_inplace(candidates, mask);
             if (candidates && !biscuit_roaring_is_empty(candidates)) {
                 if (!parsed->starts_percent) { RoaringBitmap *first = biscuit_match_part_at_pos_ilike(index, idx, parsed->parts[0], parsed->part_byte_lens[0], 0); if (first) { biscuit_roaring_and_inplace(first, candidates); biscuit_roaring_free(candidates); candidates = first; } }
                 if (!biscuit_roaring_is_empty(candidates))
@@ -2437,12 +2674,20 @@ biscuit_query_pattern_ilike(Relation index, BiscuitIndex *idx, const char *patte
     return result ? result : biscuit_roaring_create();
 }
 
+RoaringBitmap *
+biscuit_query_pattern_ilike(Relation index, BiscuitIndex *idx, const char *pattern)
+{
+    return biscuit_query_pattern_ilike_masked(index, idx, pattern, NULL);
+}
+
 /* ================================================================
  * SECTION 9 – Public multi-column query entry points
  * ================================================================ */
 
+/* See biscuit_query_pattern_masked() above for the mask contract. */
 RoaringBitmap *
-biscuit_query_column_pattern(Relation index, BiscuitIndex *idx, int col_idx, const char *pattern)
+biscuit_query_column_pattern_masked(Relation index, BiscuitIndex *idx, int col_idx,
+                                     const char *pattern, const RoaringBitmap *mask)
 {
     ColumnIndex   *col;
     int            plen = strlen(pattern);
@@ -2453,6 +2698,9 @@ biscuit_query_column_pattern(Relation index, BiscuitIndex *idx, int col_idx, con
     bool           only_wildcards = true;
 
     if (!idx || col_idx < 0 || col_idx >= idx->num_columns || !idx->column_indices)
+        return biscuit_roaring_create();
+
+    if (mask && biscuit_roaring_is_empty(mask))
         return biscuit_roaring_create();
 
     /*
@@ -2579,6 +2827,8 @@ biscuit_query_column_pattern(Relation index, BiscuitIndex *idx, int col_idx, con
                     RoaringBitmap *lf    = biscuit_get_col_length_ge(index, col, col_idx, pcl);
 
                     if (lf) { biscuit_roaring_and_inplace(cands, lf); biscuit_roaring_free(lf); }
+                    /* FIX 1 */
+                    if (mask) biscuit_roaring_and_inplace(cands, mask);
 
 #ifdef HAVE_ROARING
                     {
@@ -2643,6 +2893,8 @@ biscuit_query_column_pattern(Relation index, BiscuitIndex *idx, int col_idx, con
             RoaringBitmap *cands;
             result = biscuit_roaring_create();
             cands = biscuit_get_col_length_ge(index, col, col_idx, min_len);
+            /* FIX 1 */
+            if (mask && cands) biscuit_roaring_and_inplace(cands, mask);
             if (cands && !biscuit_roaring_is_empty(cands)) {
                 if (!parsed->starts_percent) { RoaringBitmap *first = biscuit_match_col_part_at_pos(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0); if (first) { biscuit_roaring_and_inplace(first, cands); biscuit_roaring_free(cands); cands = first; } }
                 if (!biscuit_roaring_is_empty(cands))
@@ -2664,9 +2916,17 @@ biscuit_query_column_pattern(Relation index, BiscuitIndex *idx, int col_idx, con
     return result ? result : biscuit_roaring_create();
 }
 
-/* ILIKE variant for multi-column: lowercase pattern first */
 RoaringBitmap *
-biscuit_query_column_pattern_ilike(Relation index, BiscuitIndex *idx, int col_idx, const char *pattern)
+biscuit_query_column_pattern(Relation index, BiscuitIndex *idx, int col_idx, const char *pattern)
+{
+    return biscuit_query_column_pattern_masked(index, idx, col_idx, pattern, NULL);
+}
+
+/* ILIKE variant for multi-column: lowercase pattern first. See
+ * biscuit_query_pattern_masked() above for the mask contract. */
+RoaringBitmap *
+biscuit_query_column_pattern_ilike_masked(Relation index, BiscuitIndex *idx, int col_idx,
+                                           const char *pattern, const RoaringBitmap *mask)
 {
     char          *pl;
     RoaringBitmap *result;
@@ -2674,6 +2934,9 @@ biscuit_query_column_pattern_ilike(Relation index, BiscuitIndex *idx, int col_id
     int            plen = strlen(pattern);
 
     if (!idx || col_idx < 0 || col_idx >= idx->num_columns || !idx->column_indices)
+        return biscuit_roaring_create();
+
+    if (mask && biscuit_roaring_is_empty(mask))
         return biscuit_roaring_create();
 
     /*
@@ -2801,6 +3064,8 @@ biscuit_query_column_pattern_ilike(Relation index, BiscuitIndex *idx, int col_id
                     RoaringBitmap *lf    = biscuit_get_col_length_ge_lower(index, col, col_idx, pcl);
 
                     if (lf) { biscuit_roaring_and_inplace(cands, lf); biscuit_roaring_free(lf); }
+                    /* FIX 1 */
+                    if (mask) biscuit_roaring_and_inplace(cands, mask);
 
 #ifdef HAVE_ROARING
                     {
@@ -2870,6 +3135,8 @@ biscuit_query_column_pattern_ilike(Relation index, BiscuitIndex *idx, int col_id
             RoaringBitmap *cands;
             result = biscuit_roaring_create();
             cands = biscuit_get_col_length_ge_lower(index, col, col_idx, min_len);
+            /* FIX 1 */
+            if (mask && cands) biscuit_roaring_and_inplace(cands, mask);
             if (cands && !biscuit_roaring_is_empty(cands)) {
                 if (!parsed->starts_percent) { RoaringBitmap *first = biscuit_match_col_part_at_pos_ilike(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0); if (first) { biscuit_roaring_and_inplace(first, cands); biscuit_roaring_free(cands); cands = first; } }
                 if (!biscuit_roaring_is_empty(cands))
@@ -2894,6 +3161,12 @@ biscuit_query_column_pattern_ilike(Relation index, BiscuitIndex *idx, int col_id
     } /* end parsed block */
 }
 
+RoaringBitmap *
+biscuit_query_column_pattern_ilike(Relation index, BiscuitIndex *idx, int col_idx, const char *pattern)
+{
+    return biscuit_query_column_pattern_ilike_masked(index, idx, col_idx, pattern, NULL);
+}
+
 /* ================================================================
  * SECTION 10 – Query plan / optimizer
  * ================================================================ */
@@ -2908,6 +3181,24 @@ calculate_anchor_strength(const char *pattern, bool is_prefix, bool is_suffix)
     return Min(strength, 100);
 }
 
+/*
+ * KNOWN OPEN ISSUE (not fixed in this changeset): this is a second,
+ * independent implementation of "how selective/anchored is this LIKE
+ * pattern" alongside biscuit_classify_pattern()/BiscuitPatternShape in
+ * biscuit_index.c, which feeds costestimate. The two can disagree about
+ * which key is cheap -- costestimate might tell the planner one key is
+ * cheaper while this function orders rescan's evaluation the other way.
+ * One concrete symptom of the divergence was fixed directly below (NOT
+ * LIKE/NOT ILIKE scoring, see the comment at the end of this function) --
+ * but that's a patch on this classifier, not a fix to the underlying
+ * duplication. Consolidating the two into one shared classifier is still
+ * recommended; now that biscuit_index.h and biscuit_pattern.h are both
+ * available, the header-plumbing obstacle that used to block that is
+ * gone, but the merge itself is a real design decision (the two
+ * classifiers compute different things -- BiscuitPatternShape is built
+ * for cost-model math, QueryPredicate for ordering) that deserves its
+ * own reviewed change rather than being folded in here unrequested.
+ */
 static void
 analyze_pattern(QueryPredicate *pred)
 {
@@ -2940,6 +3231,29 @@ analyze_pattern(QueryPredicate *pred)
     pred->selectivity_score -= (pred->concrete_chars * 0.05);
     if (pred->selectivity_score < 0.0) pred->selectivity_score = 0.01;
     if (pred->selectivity_score > 1.0) pred->selectivity_score = 1.0;
+
+    /*
+     * FIX 3b: this score measures how selective the *pattern* is, not
+     * how selective the *predicate* is. For NOT LIKE / NOT ILIKE the
+     * predicate returns the complement of the pattern match, so a
+     * strongly-anchored pattern ('usr\_1234\_%', score ~0.0, "looks
+     * cheap") is actually the LEAST selective predicate available --
+     * NOT LIKE 'usr\_1234\_%' returns ~99.99% of the table. Evaluating
+     * it first would seed the mask with almost every row, defeating the
+     * whole point of ordering by cost. Invert the score for negated
+     * strategies so the sort reflects what the predicate actually
+     * returns, not what its pattern looks like in isolation.
+     *
+     * This is a symptom of the classifier divergence documented above
+     * analyze_pattern() and on biscuit_classify_pattern() in
+     * biscuit_index.c -- consolidating the two would fix this as a
+     * side effect, but until then this predicate-level correction is
+     * applied here directly.
+     */
+    if (pred->scan_key &&
+        (pred->scan_key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY ||
+         pred->scan_key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY))
+        pred->selectivity_score = 1.0 - pred->selectivity_score;
 }
 
 static int
