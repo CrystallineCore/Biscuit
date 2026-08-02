@@ -3221,6 +3221,18 @@ biscuit_canreturn(Relation index, int attno)
  */
 #define BISCUIT_COST_DISABLED          1.0e18
 
+/*
+ * One index qual's contribution to a conjunction's cost: its own cost if
+ * it ran first, and its selectivity (how much of the row set it leaves
+ * for the keys evaluated after it).  See the aggregation comment in
+ * biscuit_costestimate().
+ */
+typedef struct BiscuitKeyCost
+{
+    double cost;
+    double sel;
+} BiscuitKeyCost;
+
 typedef struct BiscuitPatternShape
 {
     bool has_prefix;        /* non-empty literal before the first '%'  */
@@ -3536,46 +3548,62 @@ biscuit_costestimate(PlannerInfo *root, IndexPath *path,
         infixBase = 1.0;
 
     /*
-     * Classify every LIKE/ILIKE constant in the clause list and ADD the
-     * per-pattern costs, with any disabled pattern disabling the path.
+     * Conjunction cost: cheapest key at full price, every later key
+     * scaled by the selectivity of the keys before it.
      *
-     * Summing reflects measured behaviour: Biscuit's cost is additive per
-     * predicate (an AND of two infix patterns measured 5146ms against
-     * ~2700ms for one), because each probe does its own whole-structure
-     * pass.  pg_trgm GIN does the opposite -- it INTERSECTS two cheap
-     * posting lists and gets faster -- which is why conjunctions are
-     * Biscuit's worst class: the worst case in the matrix is an AND of
-     * two infix patterns at 5146ms Biscuit vs 0.6ms GIN, a 8181x penalty.
+     * THIS REPLACES A SUM, AND THE CHANGE IS FORCED BY AN EXECUTOR
+     * CHANGE, NOT A RECALIBRATION.  Before candidate-mask threading
+     * landed in biscuit_rescan(), each scan key was evaluated to
+     * completion over the whole table and the results ANDed afterward,
+     * so conjunction cost really was additive: an AND of two infix keys
+     * measured 5146ms against ~2700ms for either alone.  Summing was
+     * correct for that executor.
      *
-     * Aggregation rules scored by total execution time of what they
-     * choose over the 185-query matrix:
+     * The executor now sorts keys by selectivity, evaluates the cheapest
+     * first, and threads the surviving row set into every later key as a
+     * mask -- so a later key only examines rows that are still alive.
+     * Re-measured on 500k rows, warm (A,B anchored; C,D,E infix, with
+     * C leaving 2 rows and D leaving 250k):
      *
-     *     SUM (this)          38.9s    75% accurate    2.04x mean penalty
-     *     MAX                 38.9s    75%             2.04x
-     *     MIN                194.1s    48%            58.58x
-     *     MIN-if-anchored    174.2s    51%            58.33x
+     *   conjunction        alone         together   vs cheapest
+     *   A AND B          0.845 / 65.8     0.503        0.60x
+     *   A AND C          0.845 / 1522     0.442        0.52x
+     *   C AND D          1522  / 1590     1518         1.00x
+     *   C AND E          1522  / 1621     1623         1.07x
+     *   D AND E          1590  / 1621     2523         1.59x
+     *   A AND B AND C         --          0.630        0.75x
+     *   C AND D AND E         --          1530         1.01x
      *
-     * SUM and MAX tie at the final constants (once the short-run infix
-     * class is priced out, few queries distinguish them), but SUM was
-     * strictly better at intermediate settings (43.1s vs 46.9s) and is
-     * the one that matches the measured additive behaviour, so it is
-     * preferred on principle rather than on a tie-break.
+     * That is neither SUM nor MAX nor MIN.  D AND E is the tell: it is
+     * the only expensive pair, and the only one whose first key leaves a
+     * large mask (250k rows) for the second to work through.  Cost
+     * tracks how much the earlier keys PRUNE, so:
      *
-     * MIN is catastrophic and the intuition behind it is simply wrong: an
-     * anchor does NOT rescue a conjunction.  'prefix AND infix' measured
-     * 2604ms median for Biscuit against 14.5ms for GIN, so letting the
-     * cheap anchored qual set the price loses by orders of magnitude.
+     *     cost = sum over keys, cheapest first, of
+     *              cost(key) * (product of sel of all earlier keys)
+     *
+     * which predicts 1.00x for every row above except D AND E, where it
+     * predicts 1.50x against 1.59x measured.
+     *
+     * Practical effect: an anchored key next to an infix key now prices
+     * at roughly the anchored key alone, which is what the executor
+     * actually does (0.442ms measured, against 1543ms before the mask
+     * fix).  Under the old SUM this conjunction was priced at the sum of
+     * both and lost to GIN despite being ~9x faster.
      *
      * NEGATION deliberately needs no special case.  NOT LIKE / NOT ILIKE
      * are indexable strategies for this opclass (Biscuit produced an index
-     * path for 275/275 queries in the matrix; pg_trgm GIN managed only
-     * 173/275).  Measured per position, negation does not change which
-     * engine wins: anchored patterns still go to Biscuit under negation
-     * (suffix 8/8 wins, prefix 6/8, both-anchored 3/4) and infix patterns
-     * still lose under negation (0/10), which is what pattern-shape
-     * classification already delivers.  Adding a negation penalty would
-     * lose the anchored-negation cases, where Biscuit beats the runner-up
-     * by up to 5531x (0.1ms vs 566ms for a negated anchored ILIKE).
+     * path for 275/275 queries in a combinatorial matrix; pg_trgm GIN
+     * managed only 173/275).  Measured per position, negation does not
+     * change which engine wins: anchored patterns still go to Biscuit
+     * under negation (suffix 8/8 wins, prefix 6/8, both-anchored 3/4) and
+     * infix patterns still lose under negation (0/10), which is what
+     * pattern-shape classification already delivers.  Adding a negation
+     * penalty would lose the anchored-negation cases, where Biscuit beats
+     * the runner-up by up to 5531x (0.1ms vs 566ms for a negated anchored
+     * ILIKE).  Note the executor separately inverts its OWN ordering score
+     * for negated strategies (a strongly-anchored NOT pattern returns
+     * ~99.99% of the table); that is an ordering concern, not a cost one.
      *
      * An ILIKE-specific baseline multiplier was also tested -- ILIKE
      * costs the ALTERNATIVES ~4x (seqscan 149ms -> 635ms) while costing
@@ -3585,38 +3613,85 @@ biscuit_costestimate(PlannerInfo *root, IndexPath *path,
      * changes nothing at all (38.9s at every multiplier from 1.0 to 4.0).
      * It was only ever compensating for the mispriced infix branch.
      */
-    foreach(lc, path->indexclauses)
     {
-        IndexClause *iclause = lfirst_node(IndexClause, lc);
-        ListCell    *lc2;
+        BiscuitKeyCost *kc = NULL;
+        int             nkc = 0;
+        int             kcmax = 0;
+        int             a, b;
+        double          running_sel = 1.0;
 
-        foreach(lc2, iclause->indexquals)
+        /* upper bound on how many quals we might collect */
+        foreach(lc, path->indexclauses)
+            kcmax += list_length(((IndexClause *) lfirst(lc))->indexquals);
+        if (kcmax > 0)
+            kc = (BiscuitKeyCost *) palloc(kcmax * sizeof(BiscuitKeyCost));
+
+        foreach(lc, path->indexclauses)
         {
-            RestrictInfo        *rinfo = lfirst_node(RestrictInfo, lc2);
-            char                *pat;
-            BiscuitPatternShape  sh;
-            double               c;
+            IndexClause *iclause = lfirst_node(IndexClause, lc);
+            ListCell    *lc2;
 
-            pat = biscuit_pattern_from_clause(rinfo->clause);
-            if (pat == NULL)
-                continue;               /* not a plan-time constant */
-
-            biscuit_classify_pattern(pat, (int) strlen(pat), &sh);
-            c = biscuit_cost_for_shape(&sh, seqBaseline, infixBase);
-            pfree(pat);
-
-            sawPattern = true;
-            if (c >= BISCUIT_COST_DISABLED)
+            foreach(lc2, iclause->indexquals)
             {
-                /* one unusable pattern disables the whole path */
-                cost = BISCUIT_COST_DISABLED;
-                disabled = true;
-                break;
+                RestrictInfo        *rinfo = lfirst_node(RestrictInfo, lc2);
+                char                *pat;
+                BiscuitPatternShape  sh;
+                double               c;
+
+                pat = biscuit_pattern_from_clause(rinfo->clause);
+                if (pat == NULL)
+                    continue;           /* not a plan-time constant */
+
+                biscuit_classify_pattern(pat, (int) strlen(pat), &sh);
+                c = biscuit_cost_for_shape(&sh, seqBaseline, infixBase);
+                pfree(pat);
+
+                sawPattern = true;
+                if (c >= BISCUIT_COST_DISABLED)
+                {
+                    /* one unusable pattern disables the whole path */
+                    cost = BISCUIT_COST_DISABLED;
+                    disabled = true;
+                    break;
+                }
+
+                kc[nkc].cost = c;
+                kc[nkc].sel  = clause_selectivity(root, (Node *) rinfo,
+                                                  index->rel->relid,
+                                                  JOIN_INNER, NULL);
+                if (kc[nkc].sel < 0.0)  kc[nkc].sel = 0.0;
+                if (kc[nkc].sel > 1.0)  kc[nkc].sel = 1.0;
+                nkc++;
             }
-            cost = (cost < 0.0) ? c : cost + c;
+            if (disabled)
+                break;
         }
-        if (disabled)
-            break;
+
+        if (!disabled && nkc > 0)
+        {
+            /*
+             * Cheapest key first (insertion sort: nkc is the number of
+             * index quals on one column, in practice 1-3).
+             */
+            for (a = 1; a < nkc; a++)
+            {
+                BiscuitKeyCost t = kc[a];
+
+                for (b = a - 1; b >= 0 && kc[b].cost > t.cost; b--)
+                    kc[b + 1] = kc[b];
+                kc[b + 1] = t;
+            }
+
+            cost = 0.0;
+            for (a = 0; a < nkc; a++)
+            {
+                cost += kc[a].cost * running_sel;
+                running_sel *= kc[a].sel;
+            }
+        }
+
+        if (kc)
+            pfree(kc);
     }
 
     if (!sawPattern)
