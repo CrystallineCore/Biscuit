@@ -1,53 +1,232 @@
 # Biscuit Index Extension – Changelog
 
-## Version 3.0.0
+## Version 3.0.0 — Costly Cookies
+
+First release intended for production use, within the workload profile
+described in the README. This is a breaking on-disk format change: indexes
+built under 2.x must be `REINDEX`ed.
 
 ### New Features
 
-* **WAL-logged, crash-safe on-disk storage.** Replaces the external-file snapshot mechanism (temp-file-then-rename, CRC32C checksum) introduced in 2.5.0 with fully in-relation, `GenericXLog`-protected page storage. Every persistent structure — per-character/length bitmaps, the TID array, tombstones, the free-slot list, and per-record string caches — now lives in one of two page-chain types:
-  * a **compacted-blob chunk chain** (`biscuit_blob.c`/`.h`) storing a structure's serialized bytes across as many pages as needed, and
-  * an **append-only pending-delta list chain**, mirroring GIN's pending-list design.
+* **WAL-logged, crash-safe on-disk storage.** Replaces the external-file
+  snapshot mechanism (temp-file-then-rename, CRC32C checksum) introduced in
+  2.5.0 with fully in-relation, `GenericXLog`-protected page storage. Every
+  persistent structure — per-character and length bitmaps, the TID array,
+  tombstones, the free-slot list, and per-record string caches — now lives in
+  one of two page-chain types:
+  * a **compacted-blob chunk chain** (`biscuit_blob.c`/`.h`), storing a
+    structure's serialized bytes across as many pages as needed, and
+  * an **append-only pending-delta list chain**, following GIN's pending-list
+    design.
 
-  A new per-column **directory** (`biscuit_dir.c`/`.h`) maps each structure's identity — `(col, is_lower, kind, char, position)` — to its blob-chain and pending-chain heads. Because every mutation goes through ordinary WAL-logged buffer writes, index state now survives a crash and replicates correctly, which the old flat-file snapshot never did.
+  A new per-column **directory** (`biscuit_dir.c`/`.h`) maps each structure's
+  identity — `(col, is_lower, kind, char, position)` — to its blob-chain and
+  pending-chain heads, and a new **row store** (`biscuit_rowstore.c`/`.h`)
+  holds TID slots and cached strings in their own page kinds. Because every
+  mutation goes through ordinary WAL-logged buffer writes, index state now
+  survives a crash and replicates correctly, which the flat-file snapshot did
+  not.
 
-* **Pending-list write path with opportunistic draining.** Steady-state `INSERT`/`UPDATE`/`DELETE` no longer rewrites a whole snapshot; each touched structure durably appends a small delta record to its own pending chain. Once a structure's pending chain exceeds `pending_list_limit` (default 64 KB, tunable via the metapage), it is opportunistically re-serialized ("drained") into a fresh compacted blob and its old blob/pending chains are retired to a deferred-recycle freelist. `VACUUM` (`biscuit_vacuumcleanup()`) additionally performs an unconditional full drain pass over every structure with outstanding pending records, and records lifetime `total_drains` / `total_pending_bytes` counters in the metapage.
+  Verified against crash recovery following an abrupt server termination, and
+  against physical streaming replication, including index scans served from a
+  hot standby.
 
-* **Read-time pending-list reconciliation.** Query evaluation (`biscuit_pattern.c`) transparently merges any not-yet-drained pending records into the bitmap it reads, so a backend always sees a consistent view of a structure regardless of whether another backend's mutations have been drained yet — without ever triggering a drain itself.
+* **Pending-list write path with opportunistic draining.** Steady-state
+  `INSERT`, `UPDATE` and `DELETE` no longer rewrite a whole snapshot; each
+  touched structure durably appends a small delta record to its own pending
+  chain. Once a structure's pending chain exceeds the drain threshold (fixed in
+  the metapage; no SQL-level setting yet), it is re-serialized into a fresh
+  compacted blob and its previous chains are retired to a deferred-recycle
+  freelist. `VACUUM` (`biscuit_vacuumcleanup()`) additionally performs an
+  unconditional full drain pass and records lifetime `total_drains` and
+  `total_pending_bytes` counters in the metapage.
 
-* **New `biscuit_like_ops` / `biscuit_ilike_ops` operator classes.** In addition to the existing default `biscuit_ops` (which builds both case-sensitive and case-insensitive structures), a column can now be indexed with `biscuit_like_ops` (LIKE / NOT LIKE only) or `biscuit_ilike_ops` (ILIKE / NOT ILIKE only), skipping the build/maintenance cost of the structure set it will never be queried with. The mode is derived from the column's opfamily at build/load time and is never itself persisted, so it can't go stale across a `REINDEX` under a different opclass.
+* **Read-time pending-list reconciliation.** Query evaluation
+  (`biscuit_pattern.c`) transparently merges not-yet-drained pending records
+  into the bitmap it reads, so a backend sees a consistent view of a structure
+  regardless of whether another backend's mutations have been drained, without
+  triggering a drain itself.
+
+* **Cross-backend cache coherency.** The per-session index copy now lives in
+  `rd_amcache` and carries the generation it was loaded at; each scan compares
+  that generation against the metapage and reloads on mismatch. This corrects a
+  pre-release defect in which a backend that had already used an index would
+  not observe other backends' committed `INSERT`s through that index, returning
+  results that did not reflect them. Deletes had propagated; inserts had not.
+
+  Verified with a long-lived reader tracking another backend's `INSERT`,
+  `UPDATE` and `DELETE` activity across transaction boundaries, on both primary
+  and hot standby. See [Known Limitations](#known-limitations) for the reload
+  cost this introduces.
+
+* **Candidate-mask threading across scan keys.** `biscuit_rescan()` now sorts
+  scan keys by estimated selectivity, evaluates the cheapest first, and threads
+  the surviving row set into each later key as a mask
+  (`biscuit_query_pattern_masked()` and its ILIKE and multi-column variants).
+  Later keys examine only rows still under consideration, rather than computing
+  a full-table result that is subsequently intersected. Queries combining an
+  anchored predicate with an unanchored one benefit substantially; conjunctions
+  in which no key is selective are unchanged.
+
+* **Rewritten cost model.** `biscuit_costestimate()` replaces a placeholder flat
+  cost with a model derived from pattern shape, column statistics and relation
+  size. Anchored and length-predicate patterns are priced as a small fraction of
+  the sequential-scan baseline; unanchored patterns scale with row count and the
+  square of average string length, taken from `pg_statistic`; multi-part
+  patterns are discounted relative to a single part; and conjunction cost is the
+  cheapest key at full price plus each later key scaled by the selectivity of
+  those preceding it. Real `clauselist_selectivity()` replaces a hardcoded
+  constant, and index correlation is reported as `0.0` rather than `1.0`.
+
+  In testing with Biscuit, `pg_trgm` GIN and a `text_pattern_ops` B-tree all
+  present, the planner selected the fastest available access path for the
+  large majority of a mixed query suite.
+
+* **Length-predicate support.** Patterns consisting only of `_` wildcards
+  (`'______'`, `'______%'`) are recognised as length predicates and answered
+  from the length bitmaps in a single lookup, rather than being treated as
+  unusable.
+
+* **New `biscuit_like_ops` / `biscuit_ilike_ops` operator classes.** In addition
+  to the default `biscuit_ops`, which builds both case-sensitive and
+  case-insensitive structures, a column may be indexed with `biscuit_like_ops`
+  (LIKE and NOT LIKE only) or `biscuit_ilike_ops` (ILIKE and NOT ILIKE only),
+  skipping the build and maintenance cost of the structure set it will never be
+  queried with. The mode is derived from the column's opfamily at build and load
+  time and is never persisted, so it cannot go stale across a `REINDEX` under a
+  different opclass.
 
 ### Bug Fixes
 
-* **Fixed off-by-one boundary reads in multi-column length-bitmap lookups.** Several `<=`-against-`max_length`/`max_length_lower` comparisons could read one `RoaringBitmap*` past the end of a palloc'd array on an ordinary LIKE/ILIKE query whose pattern length equaled the column's maximum indexed length. Tightened to `<` throughout.
+* **Cross-backend invisibility of committed `INSERT`s.** See *Cross-backend
+  cache coherency* above. This was the most significant defect addressed in
+  this release, as it produced incorrect results without raising an error.
 
-* **Fixed `NOT LIKE` / `NOT ILIKE` inversion in multi-column scans.** The "all non-null rows" set used to build the inverted result always consulted the case-sensitive length-≥ bitmap, even for `NOT ILIKE`. It now selects the case-matching (`_lower` vs. non-`_lower`) array, consistent with each column's actual case-mode gating.
+* **Off-by-one boundary reads in multi-column length-bitmap lookups.** Several
+  `<=` comparisons against `max_length` / `max_length_lower` could read one
+  `RoaringBitmap*` past the end of a palloc'd array when a pattern's length
+  equalled the column's maximum indexed length. Tightened to `<` throughout.
 
-* **Fixed wildcard-unaware substring matching in multi-column `%needle%` queries.** Candidate verification used a literal `strstr()`, which treated `_` as an ordinary byte rather than a single-character wildcard. Replaced with the wildcard-aware `biscuit_wildcard_contains()`.
+* **`NOT LIKE` / `NOT ILIKE` inversion in multi-column scans.** The set of all
+  non-null rows used to build the inverted result always consulted the
+  case-sensitive length-≥ bitmap, even for `NOT ILIKE`. It now selects the
+  case-matching array.
+
+* **Wildcard-unaware substring matching in multi-column `%needle%` queries.**
+  Candidate verification used a literal `strstr()`, treating `_` as an ordinary
+  byte rather than a single-character wildcard. Replaced with the
+  wildcard-aware `biscuit_wildcard_contains()`.
+
+* **Length-only patterns excluded from index paths.** Patterns with no concrete
+  characters were priced as unusable and never produced an index path.
 
 ### Internal Changes
 
-* **Removed the background preload worker entirely.** `biscuit_preload.c`/`.h` (skeleton loading, the shared-memory ring buffer, the background worker, and the `strstr`/`strcasestr` fallback scan used during warm-up) have been deleted. `beginscan()` now always resolves the index through the session cache or loads it — fully built, every bitmap included — synchronously from its on-disk directory via `biscuit_persist_load()`. There is no more warm-up window or degraded-scan period after a restart.
+* **Removed the background preload worker.** `biscuit_preload.c`/`.h` —
+  skeleton loading, the shared-memory ring buffer, the background worker, and
+  the `strstr`/`strcasestr` fallback scan used during warm-up — has been
+  deleted. `beginscan()` resolves the index through the session cache or loads
+  it synchronously from its on-disk directory. There is no warm-up window or
+  degraded-scan period after a restart.
 
-* **`biscuit_persist_save()` / `biscuit_persist_load()` / `biscuit_persist_drop()` rewritten** against the directory + blob/pending-chain machinery; the 2.5.0 flat-file-per-index snapshot mechanism is deleted outright, not version-gated. There is no dual-format reader — existing indexes must be `REINDEX`ed after upgrading.
+* **`biscuit_persist_save()`, `biscuit_persist_load()` and
+  `biscuit_persist_drop()` rewritten** against the directory and blob/pending
+  chain machinery. The 2.5.0 flat-file snapshot mechanism is removed outright
+  rather than version-gated; there is no dual-format reader.
 
-* **Metapage format bumped (`BISCUIT_VERSION` 1 → 3).** Adds per-column directory roots, a deferred-recycle FSM freelist root, and pending-list tuning/observability fields. A new, independently-tracked `page_format_version` covers the binary layout of the individual page structs, separate from the extension-level format version.
+* **Metapage format bumped (`BISCUIT_VERSION` 1 → 3).** Adds per-column
+  directory roots, a deferred-recycle freelist root, and pending-list tuning and
+  observability fields. A separate `page_format_version` tracks the binary
+  layout of individual page structs.
 
-* **New monotonic generation counter** (`idx->gen`, mirrored in the metapage) is bumped non-transactionally on every successful `INSERT`/`bulkdelete`, replacing the old `preload_state`-based staleness tracking.
+* **Monotonic generation counter** (`idx->gen`, mirrored in the metapage) is
+  bumped non-transactionally on every successful `INSERT` and `bulkdelete`,
+  replacing `preload_state`-based staleness tracking. Over-invalidation is
+  harmless — it costs an additional reload — whereas under-invalidation would be
+  a correctness problem, so the counter errs toward invalidating.
 
-* **`bulkdelete()` and the `UPDATE`-as-delete path now remove records one at a time** through `biscuit_remove_from_all_indices()`, each durably recording its removal via a pending-list append, in place of the old bulk `andnot_inplace()` sweep that depended on an eager whole-index resave for durability.
+* **`bulkdelete()` and the `UPDATE`-as-delete path remove records individually**
+  through `biscuit_remove_from_all_indices()`, each durably recording its
+  removal via a pending-list append, replacing the previous bulk
+  `andnot_inplace()` sweep that depended on an eager whole-index resave.
 
-* **`biscuit_cache.c`'s proc-exit callback simplified.** Every mutation is now durable at the moment it's WAL-logged, so there is nothing left to flush at backend shutdown; the callback just drops the process-local cache. (It can no longer call `biscuit_persist_save()`, since that now requires opening a real `Relation`, which isn't safe this late in shutdown — the proc-exit-flush design itself is slated for removal in a later change.)
+* **`biscuit_cache.c`'s proc-exit callback simplified.** Mutations are durable
+  when WAL-logged, so nothing remains to flush at backend shutdown; the callback
+  now only drops the process-local cache.
 
-* Simplified `biscuit_costestimate()`.
+* Unused constants and an unreferenced pattern-classification field removed from
+  the cost model.
+
+### Known Limitations
+
+These follow from the design and should be planned for. Figures observed during
+testing will vary with hardware, data and workload.
+
+* **Write amplification.** Because one indexed string touches many
+  per-character structures, `INSERT` and `UPDATE` against a live index generate
+  considerably more WAL than the corresponding heap writes — in testing, by
+  roughly two orders of magnitude. `DELETE` is much cheaper, recording a
+  tombstone rather than rewriting structures. Size `pg_wal` accordingly, monitor
+  free space, and where replication slots are in use consider setting
+  `max_slot_wal_keep_size`.
+
+* **Bulk-load before indexing.** Creating the index after a load is
+  substantially faster, and generates far less WAL, than inserting the same
+  rows into an already-indexed table.
+
+* **Per-connection memory.** Each backend holds its own copy of the index in
+  session-local memory for the life of the connection, loaded lazily as
+  patterns are queried. Memory therefore scales with concurrent connections;
+  `biscuit_index_memory_size()` reports the current session's copy.
+
+* **Cache reload on invalidation.** A committed write by any backend
+  invalidates cached copies, which are then reloaded in full rather than
+  refreshed incrementally. Read latency rises for a period after each write, and
+  the effect is more pronounced with many concurrent readers. Incremental
+  refresh is planned.
+
+* **Build cost and index size.** Biscuit indexes are larger and slower to build
+  than comparable `pg_trgm` or B-tree indexes on the same column. `VACUUM` does
+  not reduce index size; use `REINDEX`. Build memory scales with row count.
+
+* **Unanchored query cost grows with the square of string length**, so a small
+  number of unusually long values can affect query cost across the table.
+
+* **No ordered, backward, index-only or unique scans**, and Biscuit indexes are
+  not clusterable.
 
 ### Testing
 
-* Added `tests/crud.sql`, an end-to-end CRUD maintenance test that compares sequential-scan and Biscuit-index-scan row counts across INSERT, UPDATE, and DELETE phases.
-* Benchmark scripts (`tests/forced_index_usage.sh`, `tests/planner_usage.sh`) now target an explicit PostgreSQL port/cluster instead of the system default, and report index size via `pg_relation_size()`.
+* Added `tests/crud.sql`, an end-to-end CRUD maintenance test comparing
+  sequential-scan and Biscuit index-scan row counts across INSERT, UPDATE and
+  DELETE phases.
+* Benchmark scripts (`tests/forced_index_usage.sh`, `tests/planner_usage.sh`)
+  now target an explicit PostgreSQL port and cluster rather than the system
+  default, and report index size via `pg_relation_size()`.
+* Recommended addition: a two-session concurrency test in which one session
+  queries the index, a second commits a change, and the first must observe it.
+  The cross-backend visibility defect corrected in this release was not
+  detectable by single-session tests.
 
 ### Upgrade Notes
 
-**This is a breaking on-disk format change.** Indexes built under 2.x must be `REINDEX`ed after upgrading — there is no automatic migration or dual-format reader.
+**This is a breaking on-disk format change.** Indexes built under 2.x must be
+`REINDEX`ed after upgrading; there is no automatic migration and no dual-format
+reader. Until an index is rebuilt, its first cold load under 3.0.0 fails with an
+error referring to this note.
+
+```sql
+ALTER EXTENSION biscuit UPDATE TO '3.0.0';
+
+-- Identify indexes requiring a rebuild
+SELECT schema_name, index_name FROM biscuit_indexes;
+
+-- Rebuild each one; CONCURRENTLY avoids a write lock
+REINDEX INDEX CONCURRENTLY <index_name>;
+```
+
+Plan a maintenance window sized for the rebuild: index build is slower than for
+`pg_trgm` GIN on the same data and generates substantial WAL.
 
 ---
 

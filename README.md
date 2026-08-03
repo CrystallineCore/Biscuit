@@ -1,98 +1,100 @@
-# Biscuit - High-Performance Pattern Matching Index for PostgreSQL
+# Biscuit — Positional Pattern-Matching Index for PostgreSQL
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PostgreSQL: 16+](https://img.shields.io/badge/PostgreSQL-16%2B-blue.svg)](https://www.postgresql.org/)
 [![Read the Docs](https://img.shields.io/badge/Read%20the%20Docs-8CA1AF?logo=readthedocs&logoColor=fff)](https://biscuit.readthedocs.io/)
 
+**Biscuit** is a PostgreSQL index access method for `LIKE` and `ILIKE` pattern
+matching, with native multi-column support. It evaluates patterns by
+intersecting bitmaps that record which character occurs at which position in
+each indexed string. Matches are therefore exact, and PostgreSQL does not need
+to recheck candidates against the heap (`xs_recheck = false`).
 
-**Biscuit** is a PostgreSQL index access method (IAM) for `LIKE` and `ILIKE` pattern matching, with native support for multi-column indexes. It matches patterns using bitmap intersections over per-character position indices rather than trigram approximation, so results are exact and PostgreSQL does not need to recheck candidates against the heap (`xs_recheck = false`). Whether this is faster than a trigram (`pg_trgm`) index for a given workload depends on the data and query patterns involved — see [Comparison with pg_trgm](#comparison-with-pg_trgm) and benchmark it against your own data before relying on either. It stands for _**B**itmap **I**ndexed **S**earching with **C**omprehensive **U**nion and **I**ntersection **T**echniques_.
+The name stands for _**B**itmap **I**ndexed **S**earching with
+**C**omprehensive **U**nion and **I**ntersection **T**echniques_.
 
----
-## Stability Notice
-
-This extension is currently under active development and has not yet received the level of testing and operational experience expected of production-ready software.
-
-Users are encouraged to evaluate the extension thoroughly in development and staging environments before considering deployment in production systems. In particular, testing should include representative datasets, workloads, upgrade procedures, backup and recovery workflows, and performance validation.
-
-Although the extension is intended to operate safely and reliably, defects or unexpected behavior may still be present. As with any new database component, appropriate backups and validation procedures should be maintained before use.
-
-At this stage, the extension is best suited for evaluation, experimentation, and non-critical workloads. Production deployment should be undertaken only after careful testing and assessment of its suitability for the intended environment.
-
----
-
-## What's new in Version 3.0.0?
-
-### New Features
-
-* **WAL-logged, crash-safe on-disk storage.** Replaces the external-file snapshot mechanism (temp-file-then-rename, CRC32C checksum) introduced in 2.5.0 with fully in-relation, `GenericXLog`-protected page storage. Every persistent structure — per-character/length bitmaps, the TID array, tombstones, the free-slot list, and per-record string caches — now lives in one of two page-chain types:
-  * a **compacted-blob chunk chain** (`biscuit_blob.c`/`.h`) storing a structure's serialized bytes across as many pages as needed, and
-  * an **append-only pending-delta list chain**, mirroring GIN's pending-list design.
-
-  A new per-column **directory** (`biscuit_dir.c`/`.h`) maps each structure's identity — `(col, is_lower, kind, char, position)` — to its blob-chain and pending-chain heads. Because every mutation goes through ordinary WAL-logged buffer writes, index state now survives a crash and replicates correctly, which the old flat-file snapshot never did.
-
-* **Pending-list write path with opportunistic draining.** Steady-state `INSERT`/`UPDATE`/`DELETE` no longer rewrites a whole snapshot; each touched structure durably appends a small delta record to its own pending chain. Once a structure's pending chain exceeds `pending_list_limit` (a fixed 64 KB default stored in the metapage — there is currently no SQL-level setting to change it), it is opportunistically re-serialized ("drained") into a fresh compacted blob and its old blob/pending chains are retired to a deferred-recycle freelist. `VACUUM` (`biscuit_vacuumcleanup()`) additionally performs an unconditional full drain pass over every structure with outstanding pending records, and records lifetime `total_drains` / `total_pending_bytes` counters in the metapage, queryable via `biscuit_pending_list_stats()`.
-
-* **Read-time pending-list reconciliation.** Query evaluation (`biscuit_pattern.c`) transparently merges any not-yet-drained pending records into the bitmap it reads, so a backend always sees a consistent view of a structure regardless of whether another backend's mutations have been drained yet — without ever triggering a drain itself.
-
-* **New `biscuit_like_ops` / `biscuit_ilike_ops` operator classes.** In addition to the existing default `biscuit_ops` (which builds both case-sensitive and case-insensitive structures), a column can now be indexed with `biscuit_like_ops` (LIKE / NOT LIKE only) or `biscuit_ilike_ops` (ILIKE / NOT ILIKE only), skipping the build/maintenance cost of the structure set it will never be queried with. The mode is derived from the column's opfamily at build/load time and is never itself persisted, so it can't go stale across a `REINDEX` under a different opclass.
-
-### Bug Fixes
-
-* **Fixed off-by-one boundary reads in multi-column length-bitmap lookups.** Several `<=`-against-`max_length`/`max_length_lower` comparisons could read one `RoaringBitmap*` past the end of a palloc'd array on an ordinary LIKE/ILIKE query whose pattern length equaled the column's maximum indexed length. Tightened to `<` throughout.
-
-* **Fixed `NOT LIKE` / `NOT ILIKE` inversion in multi-column scans.** The "all non-null rows" set used to build the inverted result always consulted the case-sensitive length-≥ bitmap, even for `NOT ILIKE`. It now selects the case-matching (`_lower` vs. non-`_lower`) array, consistent with each column's actual case-mode gating.
-
-* **Fixed wildcard-unaware substring matching in multi-column `%needle%` queries.** Candidate verification used a literal `strstr()`, which treated `_` as an ordinary byte rather than a single-character wildcard. Replaced with the wildcard-aware `biscuit_wildcard_contains()`.
-
-### Internal Changes
-
-* **Removed the background preload worker entirely.** `biscuit_preload.c`/`.h` (skeleton loading, the shared-memory ring buffer, the background worker, and the `strstr`/`strcasestr` fallback scan used during warm-up) have been deleted. `beginscan()` now always resolves the index through the session cache or loads it — fully built, every bitmap included — synchronously from its on-disk directory via `biscuit_persist_load()`. There is no more warm-up window or degraded-scan period after a restart.
-
-* **`biscuit_persist_save()` / `biscuit_persist_load()` / `biscuit_persist_drop()` rewritten** against the directory + blob/pending-chain machinery; the 2.5.0 flat-file-per-index snapshot mechanism is deleted outright, not version-gated. There is no dual-format reader — existing indexes must be `REINDEX`ed after upgrading.
-
-* **Metapage format bumped (`BISCUIT_VERSION` 1 → 3).** Adds per-column directory roots, a deferred-recycle FSM freelist root, and pending-list tuning/observability fields. A new, independently-tracked `page_format_version` covers the binary layout of the individual page structs, separate from the extension-level format version.
-
-* **New monotonic generation counter** (`idx->gen`, mirrored in the metapage) is bumped non-transactionally on every successful `INSERT`/`bulkdelete`, replacing the old `preload_state`-based staleness tracking.
-
-* **`bulkdelete()` and the `UPDATE`-as-delete path now remove records one at a time** through `biscuit_remove_from_all_indices()`, each durably recording its removal via a pending-list append, in place of the old bulk `andnot_inplace()` sweep that depended on an eager whole-index resave for durability.
-
-* **`biscuit_cache.c`'s proc-exit callback simplified.** Every mutation is now durable at the moment it's WAL-logged, so there is nothing left to flush at backend shutdown; the callback just drops the process-local cache. (It can no longer call `biscuit_persist_save()`, since that now requires opening a real `Relation`, which isn't safe this late in shutdown — the proc-exit-flush design itself is slated for removal in a later change.)
-
-* Simplified `biscuit_costestimate()`.
-
-### Testing
-
-* Added `tests/crud.sql`, an end-to-end CRUD maintenance test that compares sequential-scan and Biscuit-index-scan row counts across INSERT, UPDATE, and DELETE phases.
-* Benchmark scripts (`tests/forced_index_usage.sh`, `tests/planner_usage.sh`) now target an explicit PostgreSQL port/cluster instead of the system default, and report index size via `pg_relation_size()`.
-
-### Upgrade Notes
-
-**This is a breaking on-disk format change.** Indexes built under 2.x must be `REINDEX`ed after upgrading — there is no automatic migration or dual-format reader.
+Biscuit indexes *position* rather than *content*. This shapes its performance
+profile: it is strongest where the position of characters forms part of the
+predicate — anchored patterns, `_` wildcards, and string length — and less
+suited to unanchored substring search, which is well served by existing options
+such as `pg_trgm`.
 
 ---
 
-##  **Installation**
+## Suitability
 
-### **Requirements**
+Biscuit is designed for **read-mostly, analytical workloads**: load data, build
+the index, then query. Within that pattern it performs well, and as of 3.0.0 it
+is crash-safe and replicates correctly.
+
+Before deploying, please review [Operational
+Considerations](#operational-considerations). In summary:
+
+* Writes against a live index generate substantially more WAL than the
+  underlying heap writes alone. Bulk loading before index creation is strongly
+  recommended.
+* Each backend maintains its own in-memory copy of the index for the life of
+  the connection, so memory use scales with the number of concurrent
+  connections.
+* A committed write by any backend invalidates cached copies, which are
+  reloaded on next use.
+
+Biscuit is not currently recommended for OLTP tables, tables under continuous
+write load, or deployments with large connection pools.
+
+---
+
+## What's new in 3.0.0 — "Costly Cookies"
+
+This is the first release intended for production use, within the workload
+profile described above. It is a **breaking on-disk format change**: indexes
+built under 2.x must be `REINDEX`ed. See
+[Upgrade Notes](CHANGELOG.md#upgrade-notes).
+
+* **WAL-logged, crash-safe on-disk storage.** All index state now lives in the
+  index relation's own pages and is WAL-logged, replacing the external-file
+  snapshot mechanism used in 2.5.0. Verified against crash recovery and
+  physical streaming replication, including index scans served from a hot
+  standby.
+* **Cross-backend cache coherency.** Cached index copies are validated against
+  the metapage generation and reloaded when stale. This corrects a pre-release
+  defect in which a backend could continue to serve results that did not
+  reflect other backends' committed inserts.
+* **Candidate-mask threading across scan keys.** Conjunctive queries evaluate
+  the most selective key first and restrict subsequent keys to the surviving
+  rows, rather than evaluating each key independently. This is a substantial
+  improvement for queries combining an anchored predicate with an unanchored
+  one.
+* **Rewritten cost model.** Costs are derived from pattern shape, column
+  statistics and relation size, allowing the planner to choose sensibly among
+  Biscuit, `pg_trgm` and a sequential scan.
+* **Length-predicate support.** Patterns consisting only of `_` wildcards are
+  recognised as length predicates and answered directly from the length
+  bitmaps.
+* **`biscuit_like_ops` / `biscuit_ilike_ops` operator classes**, to avoid
+  building the case-mode structures a column will never use.
+
+---
+
+## Installation
+
+### Requirements
+
 - Build tools: `gcc`, `make`, `pg_config`
-- Recommended: CRoaring library for enhanced performance
+- PostgreSQL 16 or later
+- Recommended: the CRoaring library, for faster bitmap operations
 
-### **From Source**
+### From source
 
 ```bash
-# Clone repository
 git clone https://github.com/Crystallinecore/biscuit.git
 cd biscuit
-
-# Build and install
 make
 sudo make install
-
-# Enable in PostgreSQL
 psql -d your_database -c "CREATE EXTENSION biscuit;"
 ```
 
-### **From PGXN**
+### From PGXN
 
 ```bash
 pgxn install biscuit
@@ -101,55 +103,61 @@ psql -d your_database -c "CREATE EXTENSION biscuit;"
 
 ---
 
-##  **Quick Start**
+## Quick start
 
-### **Basic Usage**
+Load data first, then build the index. This ordering is significantly more
+efficient than inserting into an already-indexed table — see
+[Operational Considerations](#operational-considerations).
 
 ```sql
--- Create a Biscuit index
-CREATE INDEX idx_users_name ON users USING biscuit(name);
-
--- Query with wildcard patterns
-SELECT * FROM users WHERE name LIKE '%john%';
-SELECT * FROM users WHERE name NOT LIKE 'a%b%c';
-SELECT COUNT(*) FROM users WHERE name LIKE '%test%';
+CREATE TABLE users(id bigserial, name text);
+INSERT INTO users(name) SELECT ...;                        -- load
+CREATE INDEX idx_users_name ON users USING biscuit(name);  -- then index
+ANALYZE users;
 ```
 
-### **Multi-Column Indexes**
+```sql
+SELECT * FROM users WHERE name LIKE 'john%';     -- prefix
+SELECT * FROM users WHERE name LIKE '%son';      -- suffix
+SELECT * FROM users WHERE name LIKE 'j_hn%';     -- wildcard position
+SELECT * FROM users WHERE name LIKE '________';  -- length predicate
+```
+
+### Multi-column indexes
 
 ```sql
--- Create multi-column index
-CREATE INDEX idx_products_search 
+CREATE INDEX idx_products_search
 ON products USING biscuit(name, description, category);
 
--- Multi-column query (optimized automatically)
-SELECT * FROM products 
-WHERE name LIKE '%widget%' 
+SELECT * FROM products
+WHERE name LIKE '%widget%'
   AND description LIKE '%blue%'
   AND category LIKE 'electronics%'
 LIMIT 10;
 ```
 
-### **Operator Classes**
+Predicates are evaluated in order of estimated selectivity, and each restricts
+the candidate set passed to the next.
 
-Biscuit ships three operator classes. The default, `biscuit_ops`, builds both the case-sensitive and case-insensitive structures for a column, so it supports `LIKE`/`NOT LIKE` and `ILIKE`/`NOT ILIKE` on the same index. If a column only ever needs one case mode, `biscuit_like_ops` or `biscuit_ilike_ops` build only the structure set that operator class needs, reducing build time and memory for that column:
+### Operator classes
+
+The default `biscuit_ops` builds both case-sensitive and case-insensitive
+structures. Where a column requires only one case mode, the narrower classes
+reduce build time and index size:
 
 ```sql
--- Default: supports both LIKE and ILIKE
-CREATE INDEX idx_name ON users USING biscuit (name);
-
--- LIKE / NOT LIKE only (skips building the case-insensitive structures)
-CREATE INDEX idx_name_like ON users USING biscuit (name biscuit_like_ops);
-
--- ILIKE / NOT ILIKE only (skips building the case-sensitive structures)
-CREATE INDEX idx_name_ilike ON users USING biscuit (name biscuit_ilike_ops);
+CREATE INDEX idx_name       ON users USING biscuit (name);                   -- LIKE and ILIKE
+CREATE INDEX idx_name_like  ON users USING biscuit (name biscuit_like_ops);  -- LIKE only
+CREATE INDEX idx_name_ilike ON users USING biscuit (name biscuit_ilike_ops); -- ILIKE only
 ```
 
-Querying an index with an operator it wasn't built for (e.g. `ILIKE` against a `biscuit_like_ops` column) raises an error rather than silently falling back to a full scan.
+Querying an index with an operator it was not built for raises an error rather
+than silently falling back to a full scan.
 
-### **Supported Data Types**
+### Supported data types
 
-Biscuit indexes `text`, `varchar`, and `char`/`bpchar` columns directly. Other column types are not supported natively; index them via an expression that casts to text:
+`text`, `varchar` and `char`/`bpchar` are indexed directly. Other types can be
+indexed through an expression that casts to text:
 
 ```sql
 CREATE INDEX idx_expr ON events ((code::text));
@@ -157,612 +165,307 @@ CREATE INDEX idx_expr ON events ((code::text));
 
 ---
 
-##  **How It Works**
+## Choosing an index
 
-### **Core Concept: Bitmap Position Indices**
+The characterisations below reflect testing on a single environment. Index
+selection is workload-dependent; please benchmark against your own data and
+query mix.
 
-Biscuit builds the following bitmaps for every string:
+| Query shape | Biscuit | `pg_trgm` (GIN) | B-tree (`text_pattern_ops`) |
+|---|---|---|---|
+| Prefix `abc%` | Effective | Applicable | Typically fastest |
+| Suffix `%abc` | Typically fastest | Applicable | Requires a `reverse()` expression index |
+| Both-anchored `a%z` | Typically fastest | Applicable | Not applicable |
+| Unanchored infix `%abc%` | Applicable | Typically fastest | Not applicable |
+| Wildcard position `a_c` | Typically fastest | Limited | Not applicable |
+| Length only `______` | Supported | Not applicable | Not applicable |
+| `ILIKE` | Effective | Applicable | Requires a `lower()` expression index |
+| Regular expressions | Not supported | Supported | Not applicable |
+| Similarity / fuzzy search | Not supported | Supported | Not applicable |
 
-#### **1. Positive Indices (Forward)**
-Tracks which records have character `c` at position `p`:
+**Biscuit is a good fit for** anchored patterns, patterns containing `_`
+wildcards, length predicates, `ILIKE`-heavy workloads, and queries where exact
+results without a heap recheck are valuable — `COUNT(*)` in particular.
 
-```
-String: "Hello"
-Bitmaps:
-  H@0 → {record_ids...}
-  e@1 → {record_ids...}
-  l@2 → {record_ids...}
-  l@3 → {record_ids...}
-  o@4 → {record_ids...}
-```
+**Other options are often preferable for** selective prefix lookups, where a
+B-tree is smaller and quicker to build; unanchored substring search, for which
+`pg_trgm` is purpose-built; and regular-expression or similarity matching,
+which Biscuit does not support.
 
-#### **2. Negative Indices (Backward)**
-Tracks which records have character `c` at position `-p` from the end:
-
-```
-String: "Hello"
-Bitmaps:
-  o@-1 → {record_ids...}  (last char)
-  l@-2 → {record_ids...}  (second to last)
-  l@-3 → {record_ids...}
-  e@-4 → {record_ids...}
-  H@-5 → {record_ids...}
-```
-
-#### **3. Positive Indices (Case-insensitive)**
-Tracks which records have character `c` at position `p`:
-
-```
-String: "Hello"
-Bitmaps:
-  h@0 → {record_ids...}
-  e@1 → {record_ids...}
-  l@2 → {record_ids...}
-  l@3 → {record_ids...}
-  o@4 → {record_ids...}
-```
-
-#### **4. Negative Indices (Case-insensitive)**
-Tracks which records have character `c` at position `-p` from the end:
-
-```
-String: "Hello"
-Bitmaps:
-  o@-1 → {record_ids...}  (last char)
-  l@-2 → {record_ids...}  (second to last)
-  l@-3 → {record_ids...}
-  e@-4 → {record_ids...}
-  h@-5 → {record_ids...}
-```
-
-#### **5. Length Bitmaps**
-Two types for fast length filtering:
-- **Exact length**: `length[5]` → all 5-character strings
-- **Minimum length**: `length_ge[3]` → all strings ≥ 3 characters
+Running Biscuit alongside a `pg_trgm` GIN index and letting the planner select
+between them is a practical arrangement, and the 3.0.0 cost model is calibrated
+with it in mind.
 
 ---
 
-### **Pattern Matching Algorithm**
+## How it works
 
-#### **Example: `LIKE 'abc%def'`**
+### Positional bitmaps
 
-**Step 1: Parse pattern into parts**
+For each indexed string, Biscuit records which record has which character at
+which position, both forward and backward, together with length bitmaps.
+
 ```
-Parts: ["abc", "def"]
-Starts with %: NO
-Ends with %: NO
-```
+String: "Hello"
 
-**Step 2: Match first part as prefix**
-```sql
--- "abc" must start at position 0
-Candidates = pos[a@0] ∩ pos[b@1] ∩ pos[c@2]
-```
+Forward index                    Backward index
+  H@0  → {record ids}              o@-1 → {record ids}   (last character)
+  e@1  → {record ids}              l@-2 → {record ids}
+  l@2  → {record ids}              l@-3 → {record ids}
+  l@3  → {record ids}              e@-4 → {record ids}
+  o@4  → {record ids}              H@-5 → {record ids}
 
-**Step 3: Match last part at end (negative indexing)**
-```sql
--- "def" must end at string end
-Candidates = Candidates ∩ neg[f@-1] ∩ neg[e@-2] ∩ neg[d@-3]
-```
-
-**Step 4: Apply length constraint**
-```sql
--- String must be at least 6 chars (abc + def)
-Candidates = Candidates ∩ length_ge[6]
+Length bitmaps
+  length[5]    → strings of exactly 5 characters
+  length_ge[3] → strings of at least 3 characters
 ```
 
-**Result: Exact matches, zero false positives**
+Case-insensitive variants of both are built unless the column uses
+`biscuit_like_ops`.
+
+### Evaluating `LIKE 'abc%def'`
+
+```
+1. Parse into parts:       ["abc", "def"], anchored at both ends
+2. Prefix, forward index:  C = pos[a@0] ∩ pos[b@1] ∩ pos[c@2]
+3. Suffix, backward index: C = C ∩ neg[f@-1] ∩ neg[e@-2] ∩ neg[d@-3]
+4. Length constraint:      C = C ∩ length_ge[6]
+→ exact matches, with no heap recheck
+```
+
+An anchored pattern resolves to a fixed number of bitmap intersections. An
+unanchored pattern has no known position and must consider every candidate
+position, so its cost grows with row count and string length and is largely
+independent of how selective the pattern is. This asymmetry explains most of
+Biscuit's behaviour.
+
+### Wildcards
+
+* `_` is inexpensive: the position is skipped in the intersection chain.
+* `%` divides the pattern into parts. Additional parts act as further
+  constraints and generally reduce rather than increase evaluation cost.
+
+### Query planning
+
+`biscuit_costestimate()` prices a pattern by its shape:
+
+| Shape | Basis |
+|---|---|
+| Anchored (prefix and/or suffix) | Small fraction of the sequential-scan baseline |
+| Length predicate (`_` only) | Single bitmap lookup |
+| Unanchored infix | Scales with row count and the square of average string length |
+| Multi-part infix | Discounted relative to a single part |
+| All-wildcard (`%`) | No index path offered |
+
+Average string length is taken from `pg_statistic`, so plans for unanchored
+patterns may change after the first `ANALYZE` on a newly loaded table.
+
+For conjunctions, the cheapest key is priced in full and each subsequent key is
+scaled by the selectivity of those preceding it, matching the executor's
+evaluation order.
 
 ---
 
-### **Why It's Fast**
-
-#### **1. Pure Bitmap Operations**
-```c
-// Traditional approach (pg_trgm)
-for each trigram in pattern:
-    candidates = scan_trigram_index(trigram)
-    for each candidate:
-        if !heap_fetch_and_recheck(candidate):  // SLOW: Random I/O
-            remove candidate
-
-// Biscuit approach
-for each character at position:
-    candidates &= bitmap[char][pos]  // FAST: In-memory AND
-// No recheck needed!
-```
-
-#### **2. Roaring Bitmaps**
-Compressed bitmap representation:
-- Sparse data: array of integers
-- Dense data: bitset
-- Automatic conversion for optimal memory
-
-#### **3. Negative Indexing Optimization**
-```sql
--- Pattern: '%xyz'
--- Traditional: Scan all strings, check suffix
--- Biscuit: Direct lookup in neg[z@-1] ∩ neg[y@-2] ∩ neg[x@-3]
-```
-
----
-
-##  **12 Performance Optimizations**
-
-### **1. Skip Wildcard Intersections**
-```c
-// Pattern: "a_c" (underscore = any char)
-// OLD: Intersect all 256 chars at position 1
-// NEW: Skip position 1 entirely, only check a@0 and c@2
-```
-
-### **2. Early Termination on Empty**
-```c
-result = bitmap[a][0];
-result &= bitmap[b][1];
-if (result.empty()) return empty;  // Don't process remaining chars
-```
-
-### **3. Avoid Redundant Bitmap Copies**
-```c
-// OLD: Copy bitmap for every operation
-// NEW: Operate in-place, copy only when branching
-```
-
-### **4. Optimized Single-Part Patterns**
-Fast paths for common cases:
-- **Exact**: `'abc'` → Check position 0-2 and length = 3
-- **Prefix**: `'abc%'` → Check position 0-2 and length ≥ 3
-- **Suffix**: `'%xyz'` → Check negative positions -3 to -1 and length ≥ 3
-- **Substring**: `'%abc%'` → Check all positions, OR results
-
-### **5. Skip Unnecessary Length Operations**
-```c
-// Pure wildcard patterns
-if (pattern == "%%%___%%")  // 3 underscores
-    return length_ge[3];     // No character checks needed!
-```
-
-### **6. TID Sorting for Sequential Heap Access**
-```c
-// Sort TIDs by (block_number, offset) before returning
-// Converts random I/O into sequential I/O
-// Uses radix sort for >5000 TIDs, quicksort for smaller sets
-```
-
-### **7. Batch TID Insertion**
-```c
-// For bitmap scans, insert TIDs in chunks
-for (i = 0; i < num_results; i += 10000) {
-    tbm_add_tuples(tbm, &tids[i], batch_size, false);
-}
-```
-
-### **8. Direct Roaring Iteration**
-```c
-// OLD: Convert bitmap to array, then iterate
-// NEW: Direct iterator, no intermediate allocation
-roaring_uint32_iterator_t *iter = roaring_create_iterator(bitmap);
-while (iter->has_value) {
-    process(iter->current_value);
-    roaring_advance_uint32_iterator(iter);
-}
-```
-
-
-### **9. Batch Cleanup on Threshold**
-```c
-// After 1000 deletes, clean tombstones from all bitmaps
-if (tombstone_count >= 1000) {
-    for each bitmap:
-        bitmap &= ~tombstones;  // Batch operation
-    tombstones.clear();
-}
-```
-
-### **10. Aggregate Query Detection**
-```c
-// COUNT(*), EXISTS, etc. don't need sorted TIDs
-if (!scan->xs_want_itup) {
-    skip_sorting = true;  // Save sorting time
-}
-```
-
-### **11. LIMIT-Aware TID Collection**
-```c
-// If LIMIT 10 in query, don't collect more than needed
-if (limit_hint > 0 && collected >= limit_hint)
-    break;  // Early termination
-```
-
-### **12. Multi-Column Query Optimization**
-
-#### **Predicate Reordering**
-Analyzes each column's pattern and executes in order of selectivity:
+## Diagnostics
 
 ```sql
--- Query:
-WHERE name LIKE '%common%'           -- Low selectivity
-  AND sku LIKE 'PROD-2024-%'         -- High selectivity (prefix)
-  AND description LIKE '%rare_word%' -- Medium selectivity
-
--- Execution order (Biscuit automatically reorders):
-1. sku LIKE 'PROD-2024-%'         (PREFIX, priority=20, selectivity=0.02)
-2. description LIKE '%rare_word%' (SUBSTRING, priority=35, selectivity=0.15)
-3. name LIKE '%common%'           (SUBSTRING, priority=55, selectivity=0.60)
-```
-
-**Selectivity scoring (lower runs first):** an exact match (no wildcards) scores `0.0`; a prefix or suffix pattern (`abc%` / `%abc`) starts at `0.1 + 0.1` per additional `%`; a substring pattern (`%abc%`) starts at `0.5`; anything else starts at `0.8`. Every concrete (non-wildcard) character in the pattern then reduces the score by `0.05`, and the result is clamped to `[0.01, 1.0]`. Predicates are evaluated in ascending score order, so the most selective predicate runs first and can shrink the candidate set before less selective ones are applied.
-
----
-
-##  **Benchmarking**
-
-### **Setup Test Data**
-
-```sql
--- Create 1M row test table
-CREATE TABLE benchmark (
-    id SERIAL PRIMARY KEY,
-    name TEXT,
-    description TEXT,
-    category TEXT,
-    score FLOAT
-);
-
-INSERT INTO benchmark (name, description, category, score)
-SELECT 
-    'Name_' || md5(random()::text),
-    'Description_' || md5(random()::text),
-    'Category_' || (random() * 100)::int,
-    random() * 1000
-FROM generate_series(1, 1000000);
-
--- Create indexes
-CREATE INDEX idx_trgm ON benchmark 
-    USING gin(name gin_trgm_ops, description gin_trgm_ops);
-
-CREATE INDEX idx_biscuit ON benchmark 
-    USING biscuit(name, description, category);
-
-ANALYZE benchmark;
-```
-
-### **Run Benchmarks**
-
-```sql
--- Single column, simple pattern
-EXPLAIN ANALYZE
-SELECT * FROM benchmark WHERE name LIKE '%abc%' LIMIT 100;
-
--- Multi-column, complex pattern
-EXPLAIN ANALYZE
-SELECT * FROM benchmark 
-WHERE name LIKE '%a%b' 
-  AND description LIKE '%bc%cd%'
-ORDER BY score DESC 
-LIMIT 10;
-
--- Aggregate query (COUNT)
-EXPLAIN ANALYZE
-SELECT COUNT(*) FROM benchmark 
-WHERE name LIKE 'a%l%' 
-  AND category LIKE 'f%d';
-
--- Complex multi-part pattern
-EXPLAIN ANALYZE
-SELECT * FROM benchmark 
-WHERE description LIKE 'u%dc%x'
-LIMIT 50;
-```
-
-### **Index Statistics and Diagnostics**
-
-```sql
--- Human-readable report
+-- Human-readable report for one index
 SELECT biscuit_index_stats('idx_biscuit'::regclass);
 
--- Estimated size of this backend's in-memory copy of the index, in bytes
+-- Size of the current backend's in-memory copy, in bytes
 SELECT biscuit_index_memory_size('idx_biscuit'::regclass);
 
--- Structured pending-list drain statistics (per-structure write buffer)
+-- Unmerged write volume (pending-list) statistics
 SELECT * FROM biscuit_pending_list_stats('idx_biscuit'::regclass);
+SELECT * FROM biscuit_pending_list_usage;
+
+-- All Biscuit indexes in the database
+SELECT * FROM biscuit_indexes;
+SELECT * FROM biscuit_status;
 ```
 
-`biscuit_index_stats()` output (values below are illustrative, not measured):
-```
-Biscuit Index Statistics
-==========================================
-Index: idx_biscuit
-Active records: 1000002
-Total slots: 1000002
-Free slots: 0
-Tombstones: 0
-Max length: 44
-------------------------
-CRUD Statistics:
-  Inserts: 0
-  Updates: 0
-  Deletes: 0
-------------------------
-Pending-List Statistics (unmerged write volume):
-  Drain threshold (bytes/structure): 65536
-  Total pending bytes (approx, as of last VACUUM): 0
-  Lifetime drains performed: 0
-------------------------
-Active Optimizations:
-  ✓ 1. Skip wildcard intersections
-  ✓ 2. Early termination on empty
-  ✓ 3. Avoid redundant copies
-  ✓ 4. Optimized single-part patterns
-  ✓ 5. Skip unnecessary length ops
-  ✓ 6. TID sorting for sequential I/O
-  ✓ 7. Batch TID insertion
-  ✓ 8. Direct bitmap iteration
-  ✓ 9. Parallel bitmap scan support (PostgreSQL 18+ only)
-  ✓ 10. Batch cleanup on threshold
-  ✓ 11. Skip sorting for bitmap scans
-  ✓ 12. LIMIT-aware TID collection
-```
-
-`total_pending_bytes` is refreshed once per `VACUUM`, not on every write, so it can lag actual unmerged write volume by up to one `VACUUM` cycle.
-
-
+`total_pending_bytes` is refreshed during `VACUUM` rather than on every write,
+so it may lag actual unmerged write volume by up to one `VACUUM` cycle.
 
 ---
 
-##  **Use Cases**
+## Operational Considerations
 
-### **1. Full-Text Search Applications**
-```sql
--- E-commerce product search
-CREATE INDEX idx_products ON products 
-    USING biscuit(name, brand, description);
+The behaviours below were observed during testing on a single environment.
+Exact figures will vary with hardware, data and workload; the characteristics
+themselves follow from the design and should be planned for.
 
-SELECT * FROM products 
-WHERE name LIKE '%laptop%' 
-  AND brand LIKE 'ABC%'
-  AND description LIKE '%gaming%'
-ORDER BY price DESC 
-LIMIT 20;
-```
+### Write amplification
 
-### **2. Log Analysis**
-```sql
--- Search error logs
-CREATE INDEX idx_logs ON logs 
-    USING biscuit(message, source, level);
+A single indexed string touches many per-character structures, so an `INSERT`
+or `UPDATE` against a live Biscuit index generates considerably more WAL than
+the corresponding heap write — in testing, by roughly two orders of magnitude.
+`DELETE` is much cheaper, as it records a tombstone rather than rewriting
+structures.
 
-SELECT * FROM logs 
-WHERE message LIKE '%ERROR%connection%timeout%'
-  AND source LIKE 'api.%'
-  AND timestamp > NOW() - INTERVAL '1 hour'
-LIMIT 100;
-```
+Sustained inserts against a live index can therefore consume WAL space quickly.
+Size `pg_wal` accordingly and monitor free space. Where replication slots are in
+use, consider setting `max_slot_wal_keep_size` so a lagging or disconnected
+standby cannot retain WAL indefinitely.
 
-### **3. Customer Support / CRM**
-```sql
--- Search tickets by multiple fields
-CREATE INDEX idx_tickets ON tickets 
-    USING biscuit(subject, description, customer_name);
+### Build the index after loading
 
-SELECT * FROM tickets 
-WHERE subject LIKE '%refund%'
-  AND customer_name LIKE 'John%'
-  AND status = 'open';
-```
+Creating the index after a bulk load is substantially faster than inserting the
+same rows into an already-indexed table, and generates far less WAL. For large
+periodic loads, consider dropping and rebuilding the index around the load.
 
-### **4. Code Search / Documentation**
-```sql
--- Search code repositories
-CREATE INDEX idx_files ON code_files 
-    USING biscuit(filename, content, author);
+### Memory scales with connections
 
-SELECT * FROM code_files 
-WHERE filename LIKE '%.py'
-  AND content LIKE '%def%parse%json%'
-  AND author LIKE 'team-%';
-```
+Each backend holds a copy of the index in session-local memory for the life of
+the connection, loaded lazily as patterns are queried. Total memory therefore
+scales with the number of concurrent connections using the index. Use
+`biscuit_index_memory_size()` to inspect the current session's copy, and size
+connection pools accordingly.
 
-### **5. Analytics with Aggregates**
-```sql
--- Fast COUNT queries (no sorting overhead)
-CREATE INDEX idx_events ON events 
-    USING biscuit(event_type, user_agent, referrer);
+### Cache reload after writes
 
-SELECT COUNT(*) FROM events 
-WHERE event_type LIKE 'click%'
-  AND user_agent LIKE '%Mobile%'
-  AND referrer LIKE '%google%';
-```
+A committed write by any backend invalidates cached copies; the next use
+reloads the index rather than applying the change incrementally. Read latency
+therefore increases for a period after each write, and the effect is more
+pronounced with many concurrent readers. Interleaving frequent writes with a
+read-heavy query load on the same index is best avoided. Incremental refresh is
+planned.
+
+### Index size and build cost
+
+Biscuit indexes are larger than comparable `pg_trgm` or B-tree indexes on the
+same column, and take longer to build. `VACUUM` does not reduce index size; use
+`REINDEX` to reclaim space. Build memory scales with row count, so very large
+tables may require additional working memory.
+
+### String length
+
+The cost of unanchored patterns grows with the square of string length, so a
+small number of unusually long values can affect query cost across the table.
+Where practical, consider limiting or bucketing indexed length.
 
 ---
 
-##  **Configuration**
+## Compatibility
 
-### **Build Options**
+| Capability | Supported | Notes |
+|---|---|---|
+| WAL logging and crash recovery | Yes | |
+| Physical streaming replication | Yes | Standby serves index scans |
+| Hot standby reads | Yes | |
+| MVCC / cross-backend visibility | Yes | |
+| Index Scan and Bitmap Scan | Yes | |
+| Multi-column indexes | Yes | |
+| Exclusion constraints | Yes | |
+| Partitioned tables | Yes | |
+| `REINDEX CONCURRENTLY` | Yes | |
+| `pg_dump` / restore | Yes | |
+| Expression indexes | Yes | Cast to a supported text type |
+| Ordered scans (`amcanorder`) | No | |
+| Backward scans | No | |
+| Index-only scans | No | |
+| Unique constraints | No | |
+| `CLUSTER` on a Biscuit index | No | |
+| Regular expressions | No | `LIKE` / `ILIKE` only |
+| Similarity / fuzzy search | No | |
+| Locale-aware collation | No | Comparisons are byte-based |
 
-Enable CRoaring for better performance.
+Parallel-scan callbacks are registered only on PostgreSQL 18 and later; on
+earlier supported versions scans are always serial. For large scans the planner
+may still prefer a parallel sequential scan, which the cost model is designed to
+allow.
 
+### `ORDER BY` with `LIMIT`
 
-### **Index Options**
+Biscuit does not produce sorted output, so PostgreSQL sorts above the scan:
 
-Currently, Biscuit doesn't expose tunable options. All optimizations are automatic.
+```
+Limit → Sort → Biscuit Index Scan
+```
+
+For selective patterns the intermediate result is small and the sort cost is
+minor. For broad patterns, review the plan — a sequential scan may be the
+better choice, and the cost model is designed to select it where appropriate.
 
 ---
 
-##  **Limitations and Trade-offs**
+## Configuration
 
-### **What Biscuit Does NOT Support**
+### Build options
 
-1. **Regular expressions** - Only `LIKE` / `ILIKE` patterns with `%` and `_`
-2. **Locale-specific collations** - String comparisons are byte-based
-3. **Amcanorder = false** - Cannot provide ordered scans directly (but see below)
-4. **Non-text column types** - Only `text`, `varchar`, and `char`/`bpchar` are indexed directly; other types need an expression index that casts to text (see [Supported Data Types](#supported-data-types))
-5. **Parallel index scans on PostgreSQL < 18** - the AM only registers parallel-scan callbacks on PostgreSQL 18 and later; earlier supported versions (16, 17) always scan serially
+Enabling CRoaring is recommended for better bitmap performance.
 
-### **ORDER BY + LIMIT Behavior**
+### Index options
 
-Biscuit doesn't support ordered index scans (`amcanorder = false`), BUT:
-
-**PostgreSQL's planner handles this efficiently:**
-```sql
-SELECT * FROM table WHERE col LIKE '%pattern%' ORDER BY score LIMIT 10;
-```
-
-**Execution plan:**
-```
-Limit
-  -> Sort (cheap, small result set)
-    -> Biscuit Index Scan (fast filtering)
-```
-
-**Why this works:**
-- Biscuit filters candidates extremely fast 
-- Result set is small after filtering
-- Sorting 100-1000 rows in memory is negligible (<1ms)
-- **Net result**: Still much faster than pg_trgm with recheck overhead in many cases
-
-### **Storage and Memory Usage**
-
-The index's durable state — every bitmap, the TID array, tombstones, and string caches — lives in the index relation's own pages on disk and is WAL-logged like any other index. Separately, each backend that scans or modifies the index keeps a fully-built, in-memory copy of it (every bitmap included) in session-local (`CacheMemoryContext`) memory for the life of that backend, loaded from the on-disk pages on first use. That per-session copy is what drives query execution; use `biscuit_index_memory_size()` to inspect its size, and `REINDEX` if you need to shrink or reorganize the on-disk index itself.
-
-### **Write Performance**
-
-`INSERT`, `UPDATE` (internally a delete-then-insert), and `VACUUM`-driven `DELETE` all mutate the in-memory copy directly and durably append a small delta record per touched structure to that structure's on-disk pending-delta chain — there is no whole-index rewrite on every write. A structure's pending chain is periodically re-serialized ("drained") into a compacted blob once it crosses a size threshold, and `VACUUM` performs a full drain pass regardless of size. Because a single indexed string can touch many per-character structures, `INSERT`/`UPDATE` on a Biscuit index still does more work than on a B-tree; for very write-heavy workloads, evaluate `pg_trgm` or a plain B-tree against your workload as alternatives. `VACUUM` also marks deleted rows as tombstones and reclaims their slots for reuse, with periodic cleanup once outstanding tombstones cross an internal threshold.
+Biscuit does not currently expose tunable index options. The pending-list drain
+threshold is fixed in the metapage, and cost-model constants are set at compile
+time. Exposing these as runtime settings is planned.
 
 ---
 
-##  **Comparison with pg_trgm**
-
-| Feature                  | Biscuit                     | pg_trgm (GIN)        |
-|--------------------------|------------------------------|----------------------|
-| **Wildcard patterns**    | ✔ Native              | ✔ Approximate        |
-| **Recheck overhead**     | ✔ None (deterministic)       | ✗ Required    |
-| **Regex support**        | ✗ No                         | ✔ Yes                |
-| **Similarity search**    | ✗ No                         | ✔ Yes                |
-| **ILIKE support**        | ✔ Full       | ✔ Native             |
-
-
-**When to use Biscuit:**
-- Wildcard-heavy `LIKE` / `ILIKE` queries (`%`, `_`)
--  Multi-column pattern matching
--  Need exact results (no false positives)
--  `COUNT(*)` / aggregate queries
--  High query volume, can afford memory
-
-**When to use pg_trgm:**
-- Fuzzy/similarity search (`word <-> pattern`)
-- Regular expressions
-- Memory-constrained environments
-- Write-heavy workloads
-
----
-
-## **Development**
-
-### **Build from Source**
+## Development
 
 ```bash
 git clone https://github.com/Crystallinecore/biscuit.git
 cd biscuit
-
-# Development build with debug symbols
 make clean
 CFLAGS="-g -O0 -DDEBUG" make
-
-# Run tests
 make installcheck
-
-# Install
 sudo make install
 ```
 
-### **Testing**
+### Testing
 
-```bash
-# Unit tests
-make installcheck
-
-# Manual testing
-psql -d testdb
-
+```sql
 CREATE EXTENSION biscuit;
-
--- Create test table
 CREATE TABLE test (id SERIAL, name TEXT);
 INSERT INTO test (name) VALUES ('hello'), ('world'), ('test');
-
--- Create index
 CREATE INDEX idx_test ON test USING biscuit(name);
-
--- Test queries
 EXPLAIN ANALYZE SELECT * FROM test WHERE name LIKE '%ell%';
 ```
 
-### **Debugging**
-
-Enable PostgreSQL debug logging:
-
-```sql
-SET client_min_messages = DEBUG1;
-SET log_min_messages = DEBUG1;
-
--- Now run queries to see Biscuit's internal logs
-SELECT * FROM test WHERE name LIKE '%pattern%';
-```
+Changes to the scan or cache paths should be accompanied by a **two-session**
+test: one session queries the index, a second session commits a change, and the
+first session must then observe it. Single-session tests do not exercise cache
+invalidation.
 
 ---
 
-##  **Contributing**
+## Roadmap
 
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing`)
-3. Make your changes with tests
-4. Submit a pull request
-
-### **Areas for Contribution**
-
-- [ ] Implement `amcanorder` for native sorted scans
-- [ ] Add statistics collection for better cost estimation
-- [ ] Support for more data types 
+- [ ] Incremental cache refresh in place of full reload on invalidation
+- [ ] Reduced write amplification
+- [ ] Index-only scan support (`amcanreturn`)
+- [ ] Runtime-configurable cost-model parameters
+- [ ] Regular-expression support via glob decomposition
+- [ ] `amcanorder` for native sorted scans
 - [ ] Parallel index build
-- [ ] Index compression options
+- [ ] Length bucketing to bound unanchored query cost
 
 ---
 
-##  **License**
+## License
 
-MIT License - See LICENSE file for details.
+MIT License — see the LICENSE file.
 
----
+## Author
 
-## **Author**
+Sivaprasad Murali · [@Crystallinecore](https://github.com/Crystallinecore) ·
+sivaprasad.off@gmail.com
 
-Sivaprasad Murali
-- Email: sivaprasad.off@gmail.com
-- GitHub: [@Crystallinecore](https://github.com/Crystallinecore)
+## Acknowledgments
 
----
+* The PostgreSQL community, for the extensible index access method framework
+* The **B-tree** and **pg_trgm** implementations, which define the design space
+  for pattern matching in PostgreSQL
+* The **CRoaring** library, for efficient compressed bitmap operations
 
-
-## **Acknowledgments**
-
-* The PostgreSQL community for the extensible index access method (AM) framework
-* **B-tree** and **pg_trgm** indexes that shaped the design space for pattern matching in PostgreSQL
-* The **CRoaring** library for efficient compressed bitmap operations
-
----
-
-## **Support**
+## Support
 
 - **Issues**: [GitHub Issues](https://github.com/Crystallinecore/biscuit/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/Crystallinecore/biscuit/discussions)
-- **Documentation**: [ReadTheDocs Page](https://biscuit.readthedocs.io/) 
----
-
-**Happy pattern matching! Grab a biscuit 🍪 when others feel half-baked!**
+- **Documentation**: [ReadTheDocs](https://biscuit.readthedocs.io/)
 
 ---
+
+**Happy pattern matching. Grab a biscuit 🍪**

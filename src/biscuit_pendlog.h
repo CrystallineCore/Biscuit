@@ -101,6 +101,40 @@ extern uint64 biscuit_pendlog_append(Relation index,
                                       int32 ch, int32 position,
                                       uint32 rec_idx, uint8 op);
 
+/* ==================== ROW BATCHING ==================== */
+
+/*
+ * A row's fan-out is large: indexing one N-character string emits
+ * POS/NEG/CACHE per character per case mode, plus LEN and one LEN_GE
+ * append per length threshold -- on the order of 8N+4 appends. They all
+ * target the same tail page, but before batching each one opened its own
+ * GenericXLog transaction, so each paid a full XLogRecord header and
+ * block reference for a ~20-byte payload. The fixed per-record overhead,
+ * not the payload, dominated an insert's WAL.
+ *
+ * A batch holds that one tail page exclusively locked with a single
+ * GenericXLog transaction open across the whole row, so N appends produce
+ * one WAL record carrying the accumulated page delta.
+ *
+ * Contract:
+ *   - begin/end must be paired around one row's write. end() is
+ *     idempotent, and on an error unwind the buffer content lock and the
+ *     GenericXLogState are both released by resource-owner cleanup.
+ *   - While a batch is open, callers must NOT drain: biscuit_pendlog_
+ *     drain_all() takes the metapage and other page locks, and taking
+ *     them under the tail page's content lock deadlocks. The drain
+ *     trigger in biscuit_pending_mutate_structure() therefore tests
+ *     biscuit_pendlog_batch_active() and skips; the batch records that a
+ *     drain is wanted and runs it from end(), with no locks of ours held.
+ *   - Appends that cannot fit the batch's current page (fresh log, tail
+ *     full, tail detached by a concurrent drain) transparently fall back
+ *     to the unbatched single-record path, which owns all rollover and
+ *     allocation logic. Correctness never depends on a batch being open.
+ */
+extern void biscuit_pendlog_batch_begin(Relation index);
+extern void biscuit_pendlog_batch_end(void);
+extern bool biscuit_pendlog_batch_active(void);
+
 /* ==================== READ-PATH SNAPSHOT ==================== */
 
 /*

@@ -1024,7 +1024,17 @@ biscuit_pending_mutate_structure(Relation index,
      * per-structure number to a whole-index log is what made the first
      * version of this drain fire constantly.
      */
-    if (pendlog_bytes > (uint64) BISCUIT_PENDLOG_DRAIN_PAGES * BLCKSZ)
+    /*
+     * While a row batch is open we hold the pendlog tail page's content
+     * lock, and biscuit_pendlog_drain_all() takes the metapage and other
+     * page locks -- draining here would deadlock. The batch records that a
+     * drain is wanted and runs it from biscuit_pendlog_batch_end(), which
+     * executes with no locks of ours held. Outside a batch (the build
+     * path, bulkdelete, remove-from-all-indices) the trigger fires here as
+     * before.
+     */
+    if (pendlog_bytes > (uint64) BISCUIT_PENDLOG_DRAIN_PAGES * BLCKSZ &&
+        !biscuit_pendlog_batch_active())
         biscuit_pendlog_drain_all(index, false);   /* opportunistic: skip if
                                                     * another backend is
                                                     * already draining */
@@ -2482,6 +2492,29 @@ biscuit_insert(Relation index,
 
     ItemPointerCopy(ht_ctid, &idx->tids[slot]);
 
+    /*
+     * Batch this row's pending-log appends into one WAL record.
+     *
+     * Indexing one string emits POS/NEG/CACHE per character per case mode,
+     * plus LEN and one LEN_GE append per length threshold -- on the order
+     * of 8N+4 records for an N-character string. Unbatched, each was its
+     * own GenericXLog transaction, so each paid a full record header and
+     * block reference for a ~24-byte payload; the fixed overhead, not the
+     * data, dominated insert WAL. They all target the same pendlog tail
+     * page, so one open transaction across the row collapses them into a
+     * single record carrying the accumulated page delta.
+     *
+     * biscuit_pendlog_batch_end() below is what actually finishes that
+     * transaction and releases the page, and it also runs the drain
+     * trigger that biscuit_pending_mutate_structure() defers while a batch
+     * is open (draining under the tail page's content lock would
+     * deadlock). It must therefore be reached on every path out of the row
+     * write; biscuit_insert has a single exit, and on an error unwind the
+     * buffer lock and GenericXLogState are released by resource-owner
+     * cleanup, so an abort is safe too.
+     */
+    biscuit_pendlog_batch_begin(index);
+
     /* Insert record data */
     if (idx->num_columns == 1)
     {
@@ -2761,6 +2794,14 @@ biscuit_insert(Relation index,
             }
         }
     }
+
+    /*
+     * Close the row batch: finishes the single GenericXLog transaction
+     * covering every pending-log append made above, releases the tail
+     * page, and then -- holding none of our locks -- runs any drain that
+     * was deferred during the row.
+     */
+    biscuit_pendlog_batch_end();
 
     if (!found_existing)
         idx->insert_count++;

@@ -27,14 +27,206 @@ PendLogRecords(BiscuitPendLogPageHeader *hdr)
 }
 
 /* ================================================================
+ * ROW BATCHING
+ *
+ * Why this exists
+ * ---------------
+ * Indexing one string of N characters emits, per case mode, POS/NEG/CACHE
+ * per character plus LEN and one LEN_GE append per length threshold --
+ * on the order of 8N+4 pendlog records for a single row. Before batching,
+ * each of those was its own GenericXLogStart/Finish pair, so each carried
+ * a full XLogRecord header plus a block reference even though its payload
+ * is a ~24-byte BiscuitPendLogRecord. The fixed per-record overhead, not
+ * the payload, dominated the WAL cost of an insert.
+ *
+ * All of a row's appends already land on the SAME pendlog tail page (that
+ * is the whole point of the shared log). So a batch keeps that one page
+ * exclusively locked with a single GenericXLog transaction open across the
+ * whole row, writes every record into it, and finishes once. N records
+ * become one WAL record carrying the accumulated page delta.
+ *
+ * Two rules make this safe:
+ *
+ *   1. NEVER drain while a batch is open. biscuit_pendlog_drain_all()
+ *      takes the metapage and other page locks; taking them while holding
+ *      the tail page's content lock is a deadlock. The drain trigger is
+ *      therefore deferred to biscuit_pendlog_batch_end(), which runs with
+ *      no locks of ours held.
+ *
+ *   2. NEVER hold the tail lock across biscuit_page_alloc(). If the tail
+ *      fills mid-row, the batch finishes and releases first, then falls
+ *      back to pendlog_append_single() for that one record -- which owns
+ *      all the rollover/allocation logic -- and re-opens a batch on the
+ *      new tail for the records that follow.
+ *
+ * The batch is process-local and non-reentrant by construction: it wraps
+ * one row's write inside one backend. begin/end must be paired; end() is
+ * idempotent so an error path that unwinds without it leaves nothing
+ * locked (the buffer content lock and GenericXLogState are both released
+ * by resource-owner cleanup on abort).
+ * ================================================================ */
+
+typedef struct BiscuitPendLogBatch
+{
+    Relation            index;      /* relation this batch is bound to */
+    GenericXLogState   *state;      /* open xlog txn, or NULL */
+    Buffer              buf;        /* exclusive-locked tail, or InvalidBuffer */
+    Page                scratch;    /* GenericXLog page image for buf -- ALL
+                                     * writes must go here, never to
+                                     * BufferGetPage(buf), or they bypass WAL */
+    uint64              last_bytes; /* log size reported by the last append */
+    bool                want_drain; /* a deferred drain trigger fired */
+} BiscuitPendLogBatch;
+
+static BiscuitPendLogBatch biscuit_batch      = { NULL, NULL, InvalidBuffer, NULL, 0, false };
+static bool                biscuit_batch_open = false;
+
+bool
+biscuit_pendlog_batch_active(void)
+{
+    return biscuit_batch_open;
+}
+
+/* Finish the open GenericXLog transaction, if any, and release the page. */
+static void
+batch_flush(void)
+{
+    if (biscuit_batch.state != NULL)
+    {
+        GenericXLogFinish(biscuit_batch.state);
+        biscuit_batch.state = NULL;
+    }
+    if (BufferIsValid(biscuit_batch.buf))
+    {
+        UnlockReleaseBuffer(biscuit_batch.buf);
+        biscuit_batch.buf = InvalidBuffer;
+    }
+    biscuit_batch.scratch = NULL;
+}
+
+/*
+ * Try to open (or keep) a tail page with room for one more record.
+ * Returns the page header on success with biscuit_batch.state/buf set,
+ * or NULL if the caller must fall back to pendlog_append_single().
+ */
+static BiscuitPendLogPageHeader *
+batch_page_with_room(Relation index)
+{
+    Buffer                    mbuf;
+    BiscuitMetaPageData      *meta;
+    BlockNumber               tailblk;
+    BiscuitPendLogPageHeader *hdr;
+    BiscuitPageOpaque         topaque;
+    Page                      lpage;
+
+    /* Already have one open with room? */
+    if (biscuit_batch.state != NULL && BufferIsValid(biscuit_batch.buf))
+    {
+        /*
+         * Re-registering an already-registered buffer is defined to return
+         * the same page image (generic_xlog.c), so this is a cheap lookup
+         * rather than a second registration.
+         */
+        biscuit_batch.scratch =
+            GenericXLogRegisterBuffer(biscuit_batch.state, biscuit_batch.buf, 0);
+        hdr = (BiscuitPendLogPageHeader *) BiscuitPageDataPtr(biscuit_batch.scratch);
+        if (hdr->num_records < hdr->max_records)
+            return hdr;
+        batch_flush();          /* full -- roll over below */
+    }
+
+    mbuf = ReadBuffer(index, BISCUIT_METAPAGE_BLKNO);
+    LockBuffer(mbuf, BUFFER_LOCK_SHARE);
+    meta    = (BiscuitMetaPageData *) PageGetSpecialPointer(BufferGetPage(mbuf));
+    tailblk = meta->pendlog_tail;
+    /*
+     * Keep the log-size estimate fresh while batched. We only re-read it
+     * on rollover, not per append, which is exactly the point: the size
+     * only changes when a page is added, and the drain trigger is a
+     * threshold test that tolerates being a page stale.
+     */
+    biscuit_batch.last_bytes = (uint64) meta->pendlog_npages * BLCKSZ;
+    UnlockReleaseBuffer(mbuf);
+
+    if (tailblk == InvalidBlockNumber)
+        return NULL;            /* fresh log: single-record path allocates */
+
+    biscuit_batch.buf = ReadBuffer(index, tailblk);
+    LockBuffer(biscuit_batch.buf, BUFFER_LOCK_EXCLUSIVE);
+
+    hdr     = (BiscuitPendLogPageHeader *)
+                  BiscuitPageDataPtr(BufferGetPage(biscuit_batch.buf));
+    topaque = (BiscuitPageOpaque)
+                  PageGetSpecialPointer(BufferGetPage(biscuit_batch.buf));
+
+    /* Same detach check as the unbatched fast path -- see its comment. */
+    if ((topaque->flags & BISCUIT_PENDING_FLAG_TAIL) == 0 ||
+        hdr->num_records >= hdr->max_records)
+    {
+        UnlockReleaseBuffer(biscuit_batch.buf);
+        biscuit_batch.buf = InvalidBuffer;
+        return NULL;
+    }
+
+    biscuit_batch.state   = GenericXLogStart(index);
+    lpage                 = GenericXLogRegisterBuffer(biscuit_batch.state,
+                                                      biscuit_batch.buf, 0);
+    biscuit_batch.scratch = lpage;
+    return (BiscuitPendLogPageHeader *) BiscuitPageDataPtr(lpage);
+}
+
+void
+biscuit_pendlog_batch_begin(Relation index)
+{
+    /*
+     * Nested begin would silently orphan the outer batch's locked page.
+     * Callers pair begin/end around one row, so this should not happen;
+     * flush defensively rather than assert, so a stray call cannot leave
+     * a content lock held.
+     */
+    if (biscuit_batch_open)
+        batch_flush();
+
+    biscuit_batch.index      = index;
+    biscuit_batch.state      = NULL;
+    biscuit_batch.buf        = InvalidBuffer;
+    biscuit_batch.scratch    = NULL;
+    biscuit_batch.last_bytes = 0;
+    biscuit_batch.want_drain = false;
+    biscuit_batch_open       = true;
+}
+
+void
+biscuit_pendlog_batch_end(void)
+{
+    Relation index      = biscuit_batch.index;
+    bool     want_drain = biscuit_batch.want_drain;
+
+    if (!biscuit_batch_open)
+        return;                 /* idempotent */
+
+    batch_flush();
+    biscuit_batch_open       = false;
+    biscuit_batch.index      = NULL;
+    biscuit_batch.want_drain = false;
+
+    /*
+     * Deferred drain, now that we hold none of our own locks. Doing this
+     * inside the batch would deadlock against the tail page lock.
+     */
+    if (want_drain && index != NULL)
+        biscuit_pendlog_drain_all(index, false);
+}
+
+/* ================================================================
  * APPEND
  * ================================================================ */
 
-uint64
-biscuit_pendlog_append(Relation index,
-                        int32 col, bool is_lower, uint8 kind,
-                        int32 ch, int32 position,
-                        uint32 rec_idx, uint8 op)
+static uint64
+pendlog_append_single(Relation index,
+                       int32 col, bool is_lower, uint8 kind,
+                       int32 ch, int32 position,
+                       uint32 rec_idx, uint8 op)
 {
     Buffer                    mbuf;
     Buffer                    tbuf;
@@ -266,6 +458,83 @@ slow_path:
     }
 
     return (uint64) npages * BLCKSZ;
+}
+
+/*
+ * biscuit_pendlog_append -- public entry point.
+ *
+ * Routes through the open row batch when there is one, so that a row's
+ * whole fan-out lands in a single WAL record instead of one per
+ * structure. Falls back to the single-record path whenever the batch
+ * cannot take the record on its current page (fresh log, tail full,
+ * or tail detached by a concurrent drain).
+ *
+ * The return value keeps the pre-batching contract: the caller uses it
+ * only to decide whether to trigger a drain. While batched we report the
+ * last known size and record that a drain is wanted, so the trigger
+ * fires once in biscuit_pendlog_batch_end() rather than mid-row.
+ */
+uint64
+biscuit_pendlog_append(Relation index,
+                        int32 col, bool is_lower, uint8 kind,
+                        int32 ch, int32 position,
+                        uint32 rec_idx, uint8 op)
+{
+    BiscuitPendLogPageHeader *hdr;
+    BiscuitPendLogRecord      rec;
+    Page                      lpage;
+
+    if (!biscuit_batch_open || biscuit_batch.index != index)
+        return pendlog_append_single(index, col, is_lower, kind,
+                                      ch, position, rec_idx, op);
+
+    Assert(op == BISCUIT_PENDING_OP_ADD || op == BISCUIT_PENDING_OP_REMOVE);
+
+    hdr = batch_page_with_room(index);
+    if (hdr == NULL)
+    {
+        /*
+         * No batchable page. The single-record path owns rollover and
+         * allocation; let it write this record, and leave the batch closed
+         * so the next append re-opens on whatever tail now exists.
+         */
+        biscuit_batch.last_bytes =
+            pendlog_append_single(index, col, is_lower, kind,
+                                   ch, position, rec_idx, op);
+        if (biscuit_batch.last_bytes >
+            (uint64) BISCUIT_PENDLOG_DRAIN_PAGES * BLCKSZ)
+            biscuit_batch.want_drain = true;
+        return biscuit_batch.last_bytes;
+    }
+
+    biscuit_ensure_synchronous_commit();
+
+    memset(&rec, 0, sizeof(rec));   /* zero-fills reserved[] too */
+    rec.col      = (int16) col;
+    rec.is_lower = is_lower ? 1 : 0;
+    rec.kind     = kind;
+    rec.ch       = ch;
+    rec.position = position;
+    rec.rec_idx  = rec_idx;
+    rec.op       = op;
+
+    PendLogRecords(hdr)[hdr->num_records] = rec;
+    hdr->num_records++;
+
+    /* hdr already points into the scratch image; keep pd_lower in sync there */
+    lpage = biscuit_batch.scratch;
+    PendLogSetLower(lpage, BiscuitPendLogUsedBytes(hdr->num_records));
+
+    /*
+     * Arm the deferred drain rather than running it here -- we are holding
+     * the tail page's content lock, and the drain wants the metapage.
+     * biscuit_pendlog_batch_end() runs it once the lock is released.
+     */
+    if (biscuit_batch.last_bytes >
+        (uint64) BISCUIT_PENDLOG_DRAIN_PAGES * BLCKSZ)
+        biscuit_batch.want_drain = true;
+
+    return biscuit_batch.last_bytes;
 }
 
 /* ================================================================
