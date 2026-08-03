@@ -430,8 +430,25 @@ biscuit_index_stats(PG_FUNCTION_ARGS)
 
     index = index_open(indexoid, AccessShareLock);
 
-    idx = (BiscuitIndex *) index->rd_amcache;
-    if (!idx) { idx = biscuit_load_index(index); index->rd_amcache = idx; }
+    /*
+     * Was: read index->rd_amcache, and on a miss load and stash the index
+     * there. Two problems, both now avoided by going through the same
+     * accessor every scan uses.
+     *
+     *  - Staleness (BLOCKER-1's reporting counterpart): rd_amcache is
+     *    per-backend and never revalidated, so these statistics described
+     *    whatever this backend happened to have loaded, not the index as
+     *    it exists now. biscuit_get_current_index() compares the cached
+     *    copy's generation against the metapage and reloads on mismatch.
+     *
+     *  - Use-after-free: biscuit_cache holds the same object, and
+     *    PostgreSQL pfree()s rd_amcache on relcache invalidation, which
+     *    would free memory the session cache still points at. The rest of
+     *    the extension deliberately never touches rd_amcache for exactly
+     *    this reason (see biscuit_beginscan()); these two SQL-callable
+     *    helpers were the last holdouts.
+     */
+    idx = biscuit_get_current_index(index);
 
     have_pending_stats = biscuit_read_pending_stats(index, &pending_list_limit,
                                                      &total_pending_bytes, &total_drains);
@@ -522,8 +539,8 @@ biscuit_index_memory_size(PG_FUNCTION_ARGS)
     if (!index)
         elog(ERROR, "Could not open index with OID %u", indexoid);
 
-    idx = (BiscuitIndex *) index->rd_amcache;
-    if (!idx) { idx = biscuit_load_index(index); index->rd_amcache = idx; }
+    /* Same reasoning as biscuit_index_stats() above: never rd_amcache. */
+    idx = biscuit_get_current_index(index);
     if (!idx) { index_close(index, AccessShareLock); PG_RETURN_INT64(0); }
 
     metadata_bytes += sizeof(BiscuitIndex);

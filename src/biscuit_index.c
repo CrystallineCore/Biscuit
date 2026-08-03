@@ -234,6 +234,81 @@ biscuit_get_column_case_mode(Relation index, int col)
  * SECTION 1 – Disk metadata I/O
  * ================================================================ */
 
+/*
+ * biscuit_metapage_data
+ *
+ * Validate a buffer's contents as a Biscuit metapage and return the
+ * special-area struct, or NULL if it isn't one.
+ *
+ * WHY THIS EXISTS (BLOCKER-1). The metapage readers below used to gate on
+ *
+ *     if (PageIsNew(page) || PageIsEmpty(page))
+ *         return false;
+ *
+ * PageIsEmpty() is *always true* for a valid Biscuit metapage. The page
+ * keeps every byte of its data in the special area
+ * (BiscuitMetaPageData via PageGetSpecialPointer) and never places an
+ * item in the page body, so PageInit() leaves pd_lower at
+ * SizeOfPageHeaderData and it stays there forever -- which is precisely
+ * what PageIsEmpty() tests. The gate therefore fired on every
+ * successfully written metapage, and every caller took the "no readable
+ * metapage" branch unconditionally.
+ *
+ * biscuit_write_metadata_to_disk() already documents this trap and had
+ * PageIsEmpty() removed from its own carry-forward gate; the two readers
+ * were missed, and that omission is what silently disabled the
+ * cross-backend staleness check. See biscuit_get_current_index().
+ *
+ * The correct validity test for a special-area-only format is the one
+ * used here: confirm the special area is structurally sane, then confirm
+ * it actually holds a Biscuit metapage of a layout we understand.
+ * PageIsNew() is still screened because PageGetSpecialPointer() on a
+ * never-initialized (all-zero) page would index past a zero-sized
+ * special area.
+ *
+ * Callers hold at least a share lock on the buffer.
+ */
+static BiscuitMetaPageData *
+biscuit_metapage_data(Page page)
+{
+    PageHeader           ph = (PageHeader) page;
+    BiscuitMetaPageData *meta;
+
+    if (PageIsNew(page))
+        return NULL;
+
+    /*
+     * Structural sanity before dereferencing the special area: a page
+     * whose header survived but whose pd_special is garbage must not be
+     * turned into a wild pointer.
+     */
+    if (PageGetPageSize(page) != BLCKSZ)
+        return NULL;
+    if (ph->pd_special > BLCKSZ || ph->pd_special < ph->pd_upper)
+        return NULL;
+    if (PageGetSpecialSize(page) < MAXALIGN(sizeof(BiscuitMetaPageData)))
+        return NULL;
+
+    meta = (BiscuitMetaPageData *) PageGetSpecialPointer(page);
+
+    /*
+     * magic identifies this as a Biscuit metapage at all; version /
+     * page_format_version identify which layout it was written with.
+     * BISCUIT_VERSION 2's metapage layout (dir_roots/fsm_root/pending-list
+     * tuning) is not compatible with a version-1 page (which had `root`
+     * and a differently-sized reserved area at the same offsets), so a
+     * mismatch is treated exactly like "no metapage", which
+     * biscuit_load_index() turns into a REINDEX-required ERROR rather
+     * than interpreting old-layout bytes as if they were the new one.
+     */
+    if (meta->magic != BISCUIT_MAGIC ||
+        meta->version != BISCUIT_VERSION ||
+        meta->page_format_version != BISCUIT_PAGE_FORMAT_VERSION)
+        return NULL;
+
+    return meta;
+}
+
 void
 biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
 {
@@ -459,30 +534,38 @@ biscuit_read_metadata_from_disk(Relation index,
     LockBuffer(buf, BUFFER_LOCK_SHARE);
     page = BufferGetPage(buf);
 
-    if (PageIsNew(page) || PageIsEmpty(page))
-    {
-        UnlockReleaseBuffer(buf);
-        *num_records = *num_columns = *max_len = 0;
-        if (gen) *gen = 0;
-        return false;
-    }
-
-    meta = (BiscuitMetaPageData *) PageGetSpecialPointer(page);
-
     /*
-     * magic identifies this as a Biscuit metapage at all; version/
-     * page_format_version identify which layout it was written with.
-     * BISCUIT_VERSION 2's metapage layout (dir_roots/fsm_root/pending-list
-     * tuning) is not compatible with a version-1 page (which had `root`
-     * and a differently-sized reserved area in the same offsets) -- this
-     * is the clean cutover the design doc calls for, so a mismatch here
-     * is treated exactly like "no snapshot", which biscuit_load_index()
-     * turns into a REINDEX-required ERROR rather than trying to interpret
-     * bytes written under the old layout as if they were the new one.
+     * BLOCKER-1 FIX. This used to be
+     *
+     *     if (PageIsNew(page) || PageIsEmpty(page))
+     *
+     * followed by an inline magic/version check. PageIsEmpty() is always
+     * true for a Biscuit metapage (all its data lives in the special
+     * area, so pd_lower never moves off SizeOfPageHeaderData), so this
+     * function returned false for *every* index, always -- including
+     * perfectly healthy ones. See biscuit_metapage_data().
+     *
+     * The two consequences were exactly the reported symptom:
+     *
+     *  1. biscuit_get_current_index() treats a false return as "no
+     *     readable metapage, nothing to compare against, trust the
+     *     cache" and returns the cached copy unconditionally. The
+     *     cross-backend staleness check was dead code: a backend that
+     *     primed its cache before another backend's INSERT committed
+     *     served the pre-commit snapshot forever.
+     *
+     *  2. biscuit_load_index() read back gen == 0 for every index, so a
+     *     writer's own idx->gen restarted at 0 on each (re)load. Because
+     *     biscuit_write_metadata_to_disk() publishes
+     *     Max(prev_gen, idx->gen), the on-disk counter then stopped
+     *     advancing altogether once it exceeded the number of mutations
+     *     any single backend performed since its last load -- so even a
+     *     working comparison would have had nothing to compare.
+     *
+     * Both are repaired by reading the metapage correctly here.
      */
-    if (meta->magic != BISCUIT_MAGIC ||
-        meta->version != BISCUIT_VERSION ||
-        meta->page_format_version != BISCUIT_PAGE_FORMAT_VERSION)
+    meta = biscuit_metapage_data(page);
+    if (meta == NULL)
     {
         UnlockReleaseBuffer(buf);
         *num_records = *num_columns = *max_len = 0;
@@ -797,20 +880,17 @@ biscuit_read_pending_stats(Relation index,
     LockBuffer(buf, BUFFER_LOCK_SHARE);
     page = BufferGetPage(buf);
 
-    if (PageIsNew(page) || PageIsEmpty(page))
-    {
-        UnlockReleaseBuffer(buf);
-        *pending_list_limit  = BISCUIT_DEFAULT_PENDING_LIST_LIMIT;
-        *total_pending_bytes = 0;
-        *total_drains        = 0;
-        return false;
-    }
-
-    meta = (BiscuitMetaPageData *) PageGetSpecialPointer(page);
-
-    if (meta->magic != BISCUIT_MAGIC ||
-        meta->version != BISCUIT_VERSION ||
-        meta->page_format_version != BISCUIT_PAGE_FORMAT_VERSION)
+    /*
+     * Same always-true PageIsEmpty() gate as biscuit_read_metadata_from_disk()
+     * had -- see biscuit_metapage_data(). Here the blast radius was
+     * observability rather than correctness: biscuit_index_stats() reported
+     * the default pending-list limit and zero pending bytes / zero drains
+     * for every index, healthy or not, which is also why the undrained
+     * write volume this counter exists to expose never showed up in the
+     * GA report's pending-list figures.
+     */
+    meta = biscuit_metapage_data(page);
+    if (meta == NULL)
     {
         UnlockReleaseBuffer(buf);
         *pending_list_limit  = BISCUIT_DEFAULT_PENDING_LIST_LIMIT;
@@ -2195,6 +2275,79 @@ biscuit_load_index(Relation index)
     return idx;
 }
 
+/*
+ * biscuit_get_current_index
+ *
+ * BLOCKER-1 FIX -- cross-backend visibility of committed inserts.
+ *
+ * biscuit_cache_lookup() returns this backend's own process-local copy of
+ * the index. Despite comments elsewhere calling biscuit_cache a "global"
+ * cache, biscuit_cache_head (biscuit_cache.c) is a per-backend static, not
+ * shared memory. That copy's idx->num_records, idx->tids[], data caches,
+ * and every bitmap are a snapshot taken when it was built
+ * (biscuit_load_index()) or last mutated *by this backend*
+ * (biscuit_insert()/biscuit_bulkdelete()). It is never touched by another
+ * backend's commit: ordinary DML does not send a relcache invalidation for
+ * the target relation (that machinery fires for DDL-shaped catalog
+ * changes, not row inserts), so biscuit_relcache_callback() -- the index's
+ * only cache-eviction path -- never runs because of a concurrent INSERT. A
+ * backend that primed this cache before another backend committed
+ * therefore keeps serving the pre-commit snapshot indefinitely, across
+ * any number of later transactions in that backend.
+ *
+ * This is not just a "missing row" problem. Every read path (the
+ * candidate-set construction in biscuit_scan.c, the negation base set in
+ * biscuit_pattern.c) builds its universe as the range [0, idx->num_records),
+ * so slots another backend has since claimed sit entirely outside the
+ * candidate range and are structurally unreachable no matter what any
+ * individual bitmap contains. The shared pending log (biscuit_pendlog.c)
+ * reconciles bitmap *membership* for slots this backend already knows
+ * about; it cannot manufacture idx->tids[]/idx->num_records entries for
+ * slots it has never loaded, so it cannot close this gap by itself.
+ *
+ * Fix: before trusting a cached BiscuitIndex for a read, compare it
+ * against the metapage's authoritative, monotonically non-decreasing
+ * generation counter (meta->gen -- bumped and durably persisted at the end
+ * of every biscuit_insert()/biscuit_bulkdelete(), by whichever backend
+ * performed it). A single share-locked metapage read is cheap enough to
+ * do on every beginscan/rescan. On a mismatch the cached copy is stale by
+ * construction: evict it and reload the complete index synchronously from
+ * disk via biscuit_load_index() -- the same path an ordinary cold cache
+ * miss already takes, which is correct because it consults the real
+ * on-disk state directly rather than trying to patch a partial in-memory
+ * object.
+ */
+BiscuitIndex *
+biscuit_get_current_index(Relation index)
+{
+    Oid           indexoid = RelationGetRelid(index);
+    BiscuitIndex *idx      = biscuit_cache_lookup(indexoid);
+    int           disk_num_records, disk_num_columns, disk_max_len;
+    uint64        disk_gen = 0;
+
+    if (!idx)
+        return biscuit_load_index(index);
+
+    if (!biscuit_read_metadata_from_disk(index, &disk_num_records,
+                                          &disk_num_columns, &disk_max_len,
+                                          &disk_gen))
+        return idx;   /* no readable on-disk metapage; nothing to compare
+                        * against, so trust the cache rather than error */
+
+    if (disk_gen <= idx->gen)
+        return idx;   /* nothing has mutated this index since we cached it */
+
+    /*
+     * Stale: another backend committed a mutation (insert, update, or
+     * delete) since this backend last built or refreshed its copy. Discard
+     * it and reload synchronously -- biscuit_load_index() reads the
+     * complete index (TIDs, data caches, every bitmap) from the on-disk
+     * directory and re-installs the fresh copy in the cache itself.
+     */
+    biscuit_cache_remove(indexoid);
+    return biscuit_load_index(index);
+}
+
 bool
 biscuit_insert(Relation index,
                Datum *values,
@@ -2233,12 +2386,11 @@ biscuit_insert(Relation index,
      * that pfree would free the object the global cache still references,
      * leading to a use-after-free on a later lookup.
      */
-    idx = biscuit_cache_lookup(RelationGetRelid(index));
-    if (!idx)
-        idx = biscuit_load_index(index);
+    idx = biscuit_get_current_index(index);
 
     /*
-     * biscuit_load_index() (called above on a cache miss) always builds a
+     * biscuit_load_index() (called by biscuit_get_current_index() above,
+     * on a cold miss or a stale-cache reload) always builds a
      * complete BiscuitIndex — heap scan, data caches, and every bitmap —
      * before returning it, so the length-bitmap arrays below are always
      * allocated and non-NULL by the time we get here.
@@ -2714,8 +2866,7 @@ biscuit_bulkdelete(IndexVacuumInfo *info,
     uint32_t      *delete_indices;
     uint32         pending_list_limit;
 
-    idx = biscuit_cache_lookup(RelationGetRelid(index));
-    if (!idx) { idx = biscuit_load_index(index); }
+    idx = biscuit_get_current_index(index);
 
     if (!stats)
         stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));

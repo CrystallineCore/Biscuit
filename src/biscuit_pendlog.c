@@ -774,6 +774,17 @@ pendlog_clear_draining(Relation index)
     mpage = GenericXLogRegisterBuffer(state, mbuf, 0);
     meta  = (BiscuitMetaPageData *) PageGetSpecialPointer(mpage);
     meta->pendlog_draining = InvalidBlockNumber;
+
+    /*
+     * The merge is now durable in the blobs and this chain is about to
+     * become unreachable. A backend that reloaded *during* the drain
+     * window holds pre-merge blobs and was ingesting the abandoned chain
+     * to compensate; the moment the marker clears, that chain stops being
+     * ingested, so its copy must be re-read. See the matching bump in
+     * pendlog_detach() for the full rationale.
+     */
+    meta->gen++;
+
     GenericXLogFinish(state);
     UnlockReleaseBuffer(mbuf);
 }
@@ -884,6 +895,30 @@ pendlog_detach(Relation index)
     meta->pendlog_tail   = InvalidBlockNumber;
     meta->pendlog_npages = 0;
     meta->total_drains++;
+
+    /*
+     * BLOCKER-1, drain half.
+     *
+     * A drain relocates deltas from the shared log into the compacted
+     * blobs. Any other backend holding a cached BiscuitIndex built from
+     * the *pre-drain* blobs was relying on this log to supply exactly
+     * those deltas at query time; once they are merged and the log is
+     * gone, biscuit_pendlog_snapshot() correctly returns NULL and that
+     * backend's bitmaps quietly lose every membership the drain absorbed.
+     * Same symptom as the insert case, different trigger -- and this one
+     * fires from autovacuum, with no user action at all.
+     *
+     * meta->gen is the one counter every backend already re-checks on
+     * beginscan/rescan (biscuit_get_current_index()), so bumping it here
+     * forces the reload. Free: we are already inside this function's
+     * GenericXLog transaction with the metapage exclusively locked.
+     *
+     * Bumped at both ends of the drain -- here, and again in
+     * pendlog_clear_draining() -- because both transitions change what a
+     * given set of blobs plus a given log state add up to. Over-
+     * invalidation costs one reload; under-invalidation is wrong answers.
+     */
+    meta->gen++;
 
     /*
      * Publish the detached chain so it is recoverable if this merge dies.

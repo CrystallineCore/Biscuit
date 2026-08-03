@@ -77,33 +77,27 @@ biscuit_beginscan(Relation index, int nkeys, int norderbys)
     so   = (BiscuitScanOpaque *) palloc(sizeof(BiscuitScanOpaque));
 
     /*
-     * Resolve solely through the global, relid-keyed biscuit_cache.
+     * Resolve through the (per-backend) biscuit_cache, but never trust a
+     * cache hit blindly -- biscuit_get_current_index() compares the cached
+     * copy's generation against the metapage's authoritative counter and
+     * transparently reloads from disk if another backend has committed a
+     * mutation since this backend's copy was built. See its header comment
+     * and BLOCKER-1 in the GA report: without this check, a backend that
+     * primed its cache before a concurrent INSERT committed would keep
+     * returning stale (under-counted) results indefinitely.
+     *
      * index->rd_amcache is intentionally never read or written here:
      * PostgreSQL pfree()s rd_amcache on relcache invalidation, and since
      * biscuit_cache holds the same object, that pfree would free memory
-     * the global cache still references — a use-after-free on the next
-     * lookup. biscuit_cache (with its relcache callback in
-     * biscuit_cache.c) is the single source of truth for this object's
-     * lifetime.
+     * the cache still references — a use-after-free on the next lookup.
+     * biscuit_cache (with its relcache callback in biscuit_cache.c) is the
+     * single source of truth for this object's lifetime.
      */
-    so->index = biscuit_cache_lookup(indexoid);
+    so->index = biscuit_get_current_index(index);
 
-    elog(DEBUG1, "Entered beginscan()");
-
-    if (!so->index)
-    {
-        /*
-         * Cache miss: read the complete index (data caches, all bitmaps)
-         * synchronously from its on-disk page directory.
-         * biscuit_load_index() inserts the result into biscuit_cache
-         * itself, so we just look it up again via its return value.
-         */
-        so->index = biscuit_load_index(index);
-
-        elog(DEBUG1,
-             "Biscuit: loaded index %u (%d records)",
-             indexoid, so->index->num_records);
-    }
+    elog(DEBUG1,
+         "Entered beginscan() (index %u, %d records)",
+         indexoid, so->index->num_records);
 
     so->results            = NULL;
     so->num_results        = 0;
@@ -287,6 +281,15 @@ biscuit_rescan(IndexScanDesc scan,
     }
     so->num_results = 0;
     so->current     = 0;
+
+    /*
+     * Same staleness check as biscuit_beginscan() (BLOCKER-1): a scan node
+     * can survive across many rescans (e.g. the inner side of a
+     * parameterized nested loop), and a plain DML commit in another
+     * backend never invalidates our cache entry, so re-check on every
+     * rescan rather than only once at beginscan time.
+     */
+    so->index = biscuit_get_current_index(scan->indexRelation);
 
     if (!so->index || nkeys == 0 || so->index->num_records == 0)
         return;

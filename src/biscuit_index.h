@@ -57,6 +57,32 @@ extern IndexBuildResult *biscuit_build(Relation heap,
 extern void              biscuit_buildempty(Relation index);
 extern BiscuitIndex     *biscuit_load_index(Relation index);
 
+/*
+ * biscuit_get_current_index
+ *
+ * BLOCKER-1 fix (cross-backend visibility of committed inserts/updates/
+ * deletes). Resolves `index` through the per-backend biscuit_cache like
+ * biscuit_load_index() does on a miss, but on a cache HIT additionally
+ * compares the cached copy's generation against the metapage's
+ * authoritative, durably-persisted generation counter (a single
+ * share-locked metapage read) and transparently evicts + reloads from
+ * disk if another backend has committed a mutation since this backend's
+ * copy was built. Every caller that previously did:
+ *
+ *     idx = biscuit_cache_lookup(RelationGetRelid(index));
+ *     if (!idx) idx = biscuit_load_index(index);
+ *
+ * should use this instead -- both read paths (biscuit_beginscan()/
+ * biscuit_rescan() in biscuit_scan.c) and write paths (biscuit_insert()/
+ * biscuit_bulkdelete() here) need it: a writer that mutates from a stale
+ * base would otherwise bump its own idx->gen from behind, and the Max()
+ * carry-forward in biscuit_write_metadata_to_disk() would silently
+ * swallow that bump, breaking the counter's monotonicity for every other
+ * backend's freshness check. See the function definition in
+ * biscuit_index.c for the full root-cause writeup.
+ */
+extern BiscuitIndex     *biscuit_get_current_index(Relation index);
+
 /* ==================== CRUD HELPERS ==================== */
 
 extern void biscuit_init_crud_structures(BiscuitIndex *idx);
