@@ -187,6 +187,40 @@ biscuit_module_unload_callback(int code, unsigned long datum)
      * see biscuit_persist.c's file header for the full history. This
      * callback now exists solely to drop the process-local cache.
      */
+    /*
+     * COMPACTION ON CLEAN SHUTDOWN (design §7.3) IS NOT IMPLEMENTED HERE,
+     * AND CANNOT BE.
+     *
+     * The design proposes compacting at clean shutdown so that a *planned*
+     * restart discards nothing, leaving crash restart -- which is already
+     * replaying WAL -- as the only case that rebuilds a delta from
+     * scratch. The benefit is real: a 100k-row delta costs an estimated
+     * ~3 s to rebuild, and throwing that away on every ordinary restart is
+     * pure waste. It is also described as "one hook", which is what makes
+     * it look cheap.
+     *
+     * It is not one hook, because this is the wrong place for it, for
+     * exactly the reason recorded above and in biscuit_persist.c's file
+     * header. Compaction needs a real Relation: biscuit_pendlog_compact()
+     * reaches the buffer manager and takes a heavyweight page lock, so it
+     * needs relation_open(), and relation_open() is not safe this late in
+     * backend shutdown. That is precisely why the old
+     * biscuit_persist_save() flush was removed from this callback rather
+     * than fixed. Reintroducing the same call under a different name would
+     * reintroduce the same crash.
+     *
+     * Nor does before_shmem_exit() help -- it is later still, not earlier.
+     *
+     * A working version needs a context that legitimately holds relations
+     * open: a background worker with a shutdown callback, or piggybacking
+     * on the checkpointer. Both are more than a hook, and neither is
+     * required for correctness -- an un-compacted delta is rebuilt on
+     * demand, just slowly. Until one exists, the compaction threshold
+     * (biscuit.delta_compaction_slots) is what bounds the loss: at 20,000
+     * rows the most a restart can cost is roughly 0.6 s of rebuild, which
+     * is the same bound §7.5 relies on when it rejects a persisted delta
+     * layer.
+     */
     elog(DEBUG1, "Biscuit: Module unload - clearing all cache entries");
     biscuit_cache_head          = NULL;
     biscuit_callback_registered = false;

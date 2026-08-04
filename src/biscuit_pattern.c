@@ -73,8 +73,34 @@ biscuit_reconcile_pending(Relation index, RoaringBitmap *cached,
         return cached;   /* log empty -- fully drained, the steady state */
 
     pend = biscuit_pendlog_lookup(snap, col, is_lower, kind, ch, position);
-    if (pend == NULL || pend->ndeltas == 0)
-        return cached;   /* nothing pending for this structure */
+
+    /*
+     * THE MISS IS NO LONGER AUTOMATICALLY A NO-OP.
+     *
+     * Under the old derived-record scheme, a structure with no entry in
+     * the log was untouched by definition -- every mutation named the
+     * structure it applied to, so a hash miss meant "nothing pending here"
+     * and the cached bitmap could be returned borrowed, with zero copies.
+     *
+     * The kill set breaks that implication in one direction. A DELETE now
+     * records only that a slot was retired; it names no structures,
+     * because the set of structures the slot belonged to is a function of
+     * text that an UPDATE may already have overwritten. So a structure
+     * with no entry may still be holding a slot that has been retired out
+     * from under it, and returning the cached bitmap unmodified would
+     * yield a TID for a row that no longer matches the pattern. Nothing
+     * downstream would catch it: xs_recheck is false, so the predicate is
+     * never re-tested, and MVCC filters dead rows, not wrong ones.
+     *
+     * The fast path survives where it is still valid. An empty kill set
+     * means no base membership anywhere is stale, which is the case for
+     * any workload that has not deleted or updated a row since the last
+     * drain -- and biscuit_pendlog.c deliberately keeps single
+     * unaccompanied ADDs out of the kill set precisely so that a
+     * pure-insert stream keeps hitting this branch.
+     */
+    if (pend == NULL && !biscuit_pendlog_has_kills(snap))
+        return cached;   /* nothing pending, and nothing retired */
 
     /*
      * Copy before applying: `cached` is the caller's live, borrowed
@@ -83,7 +109,7 @@ biscuit_reconcile_pending(Relation index, RoaringBitmap *cached,
      * recorded and will be applied again at the next real drain.
      */
     merged = cached ? biscuit_roaring_copy(cached) : biscuit_roaring_create();
-    biscuit_pendlog_apply(pend, merged);
+    biscuit_pendlog_apply(snap, pend, merged);
 
     return merged;
 }
@@ -647,16 +673,62 @@ biscuit_get_negation_base_set_legacy(Relation index, BiscuitIndex *idx,
                         : biscuit_get_length_ge(index, idx, 0);
 
     {
-        RoaringBitmap *all = biscuit_roaring_create();
+        /*
+         * Dense fallback, filtered on data_cache[j] rather than a plain
+         * range: a NULL-valued row has no data_cache entry and must not
+         * appear in the complement. That much is unchanged.
+         *
+         * What is new is the reconciliation. data_cache is this backend's
+         * in-memory mirror, so on its own it misses every row written
+         * since this backend last loaded, and retains every row retired
+         * since -- the same two errors the multi-column fallback makes,
+         * and with the same silent symptom, since a row missing from
+         * all_rows is simply absent from the result with no dead tuple for
+         * anything downstream to filter. Route it through the ordinary
+         * accessor so the kill set is subtracted and the delta's LEN_GE[0]
+         * additions are merged.
+         */
+        RoaringBitmap *all = biscuit_roaring_create_sized((uint32) idx->num_records);
         int            j;
 
         for (j = 0; j < idx->num_records; j++)
             if (idx->data_cache[j])
                 biscuit_roaring_add(all, j);
-        return all;
+
+        return biscuit_reconcile_pending(index, all, BISCUIT_DIR_COL_LEGACY,
+                                          is_lower, BISCUIT_DIR_KIND_LEN_GE,
+                                          -1, 0);
     }
 }
 
+/*
+ * NEGATION UNDER BASE + DELTA (design §6.1)
+ *
+ * NOT LIKE p is NOT (NOT base) OR (NOT delta). Negation does not
+ * distribute over the merge. It has to be:
+ *
+ *     all_rows \ (base_match(p) | delta_match(p))
+ *
+ * where all_rows includes delta rows and excludes tombstones. The
+ * subtrahend is handled by the caller, which builds it from the same
+ * reconciling accessors as any positive scan. What this function owes it
+ * is an all_rows that has been through the identical reconciliation --
+ * which is exactly what the primary path below does, because
+ * biscuit_get_col_length_ge(index, ..., 0) is a reconciling accessor and
+ * LEN_GE[0] is by construction "every indexed, non-null row of this
+ * column". A row added since the last drain appears in the delta's
+ * LEN_GE[0] entry; a row retired since then is in the kill set and is
+ * subtracted from base's. Both happen inside the accessor.
+ *
+ * MVCC DOES NOT COVER A MISTAKE HERE, and the failure is the quiet kind.
+ * A row wrongly missing from all_rows is simply absent from the result --
+ * it is a live, visible tuple that was never returned, so there is no dead
+ * tuple for the executor's visibility check to filter and nothing to
+ * notice. This is the same shape as the bug that motivated this function's
+ * existence: mixing an unreconciled base with a reconciled subtrahend
+ * returned 0 rows where the heap had 80, reproducible only with autovacuum
+ * off, because any drain hid it completely.
+ */
 RoaringBitmap *
 biscuit_get_negation_base_set(Relation index, ColumnIndex *col, int col_idx,
                                bool is_lower, int num_records)
@@ -669,7 +741,33 @@ biscuit_get_negation_base_set(Relation index, ColumnIndex *col, int col_idx,
                         : biscuit_get_col_length_ge(index, col, col_idx, 0);
 
     {
-        RoaringBitmap *all = biscuit_roaring_create();
+        /*
+         * DENSE FALLBACK -- a column with no LEN_GE array at all (built
+         * before length bitmaps existed, or never populated).
+         *
+         * num_records is this backend's process-local high-water mark, so
+         * the raw range is "every slot this backend believes exists". Two
+         * corrections are needed before it can stand in for all_rows, and
+         * neither was applied before, because before the base/delta change
+         * this path could not see undrained state at all.
+         *
+         * 1. Add delta rows. A row inserted since the last drain may sit
+         *    at a slot beyond num_records as this backend last loaded it.
+         *    Omitting it silently drops it from every negation result.
+         *
+         * 2. Subtract tombstones AND the kill set. A deleted row's slot
+         *    stays within [0, num_records) -- it goes on the free list, it
+         *    does not shrink the range -- so a plain range readmits every
+         *    deleted row into the complement.
+         *
+         * Both are done by reconciling an empty structure through the
+         * ordinary accessor path: the kill set is subtracted and the
+         * delta's own LEN_GE[0] additions are merged in, which is the
+         * same treatment the primary path above receives.
+         */
+        RoaringBitmap *all = biscuit_roaring_create_sized((uint32) num_records);
+        RoaringBitmap *reconciled;
+
 #ifdef HAVE_ROARING
         roaring_bitmap_add_range(all, 0, num_records);
 #else
@@ -677,7 +775,19 @@ biscuit_get_negation_base_set(Relation index, ColumnIndex *col, int col_idx,
         for (j = 0; j < num_records; j++)
             biscuit_roaring_add(all, j);
 #endif
-        return all;
+
+        reconciled = biscuit_reconcile_pending(index, all, col_idx, is_lower,
+                                                BISCUIT_DIR_KIND_LEN_GE, -1, 0);
+
+        /*
+         * biscuit_reconcile_pending() returns `all` itself when there is
+         * nothing to reconcile, and a fresh bitmap otherwise. Callers of
+         * this function own the result, so hand back whichever it is and
+         * let the caller free it; the intermediate is not leaked either
+         * way, since a fresh result means `all` is context-scoped scratch
+         * reclaimed with the rest.
+         */
+        return reconciled;
     }
 }
 

@@ -515,19 +515,59 @@ typedef BiscuitMetaPageData *BiscuitMetaPage;
 /*
  * BISCUIT_PENDLOG_DRAIN_PAGES
  *
- * Log size (in pages) at which the append path drains opportunistically.
- * VACUUM drains unconditionally regardless of this.
+ * Hard ceiling (in pages) on log size, at which the append path drains
+ * opportunistically. VACUUM drains unconditionally regardless of this.
  *
- * Sized for an OLAP-first workload: a drain costs O(index size) because it
- * rewrites every touched structure's compacted blob, so frequent draining
- * makes bulk loading quadratic. Letting the log grow to a few MB keeps
- * drains rare during a load while bounding what a cold reader has to
- * materialize into a snapshot before its first query (and bounding that
- * snapshot's memory). 512 pages = 4MB at the default BLCKSZ, which is the
- * same order as GIN's gin_pending_list_limit default, arrived at for the
- * same reasons.
+ * THIS IS NO LONGER THE PRIMARY TRIGGER. Read
+ * biscuit.delta_compaction_slots (biscuit_delta.c) first; this constant is
+ * now the backstop beneath it.
+ *
+ * Why it was demoted: 512 pages = 4 MB was sized against records that
+ * averaged ~3.9 kB per row, i.e. a few thousand rows. A row now costs 8
+ * bytes, so the same byte threshold admits on the order of 500x more rows
+ * before firing. Bytes were never the quantity that mattered -- what a
+ * large log costs is delta rebuild time, and rebuild time scales with the
+ * number of ROWS in the log (one STRCACHE materialization plus one
+ * fan-out each), not with how few bytes each row's record occupied. A
+ * threshold in bytes is now nearly uncorrelated with the cost it was
+ * meant to bound.
+ *
+ * The row-denominated threshold lives in a GUC because the right value
+ * follows from a measurement that has not been taken yet: whether delta
+ * rebuild is dominated by the STRCACHE walk or by bitmap construction
+ * (design §11). Keeping this page ceiling as well costs nothing and
+ * bounds the pathological case where the GUC is set absurdly high.
  */
 #define BISCUIT_PENDLOG_DRAIN_PAGES  512
+
+/*
+ * BISCUIT_PENDLOG_COMPACT_PAGES
+ *
+ * How much of the log one opportunistic compaction ships into base.
+ *
+ * Compaction exists so the delta does not grow unbounded between vacuums
+ * (design §7.2), and it must ship a strict PREFIX of the log -- never a
+ * selection of slots. For any slot, either every record up to the
+ * compaction point is applied to base, or none is. Shipping "the
+ * interesting slots" reorders that slot's history, and with slot recycling
+ * that is concretely wrong: a slot may hold ADD, REMOVE, ADD for three
+ * different rows, and applying the first ADD without the REMOVE leaves
+ * base claiming a row that no longer matches. Nothing downstream catches
+ * that -- xs_recheck is false, so the predicate is never re-tested, and
+ * MVCC filters dead rows, not wrong ones.
+ *
+ * The value is a compromise between two costs that pull opposite ways. A
+ * large prefix amortises the fixed cost of a compaction (detach, ingest,
+ * the directory work) over more rows, but each one blocks longer against
+ * other drainers. A small prefix keeps every individual compaction short
+ * but fires more often. 64 pages is ~65k rows' worth of records at 8 bytes
+ * each, which is comfortably more than any sensible value of
+ * biscuit.delta_compaction_slots -- so in practice one compaction ships
+ * everything that has accumulated, and the constant acts as a ceiling on
+ * how much a single trigger can be made to do rather than as a routine
+ * limit.
+ */
+#define BISCUIT_PENDLOG_COMPACT_PAGES  64
 
 #define BISCUIT_PAGE_PAGEDIR  4     /* logical-page -> BlockNumber directory */
 #define BISCUIT_PAGE_TIDSLOT  5     /* fixed ItemPointerData[] slot page     */
@@ -680,8 +720,29 @@ typedef struct BiscuitBlobChunkHeader
  * survive because the shared log's records still use them.
  */
 
-#define BISCUIT_PENDING_OP_ADD     1
-#define BISCUIT_PENDING_OP_REMOVE  2
+/*
+ * Direction of one pending-log record.
+ *
+ * Encoded as the ASCII characters rather than 1 and 2. This costs nothing:
+ * BiscuitPendLogRecord is 8 bytes either way, and `op` occupies a byte
+ * that alignment padding would otherwise waste, so the choice of value is
+ * free. What it buys is that a raw dump of a pendlog page is readable
+ * without a decoder -- a run of inserts shows up as a column of 2b, an
+ * UPDATE as the 2d/2b pair it actually is. On a structure whose whole job
+ * is to be reconstructed by hand when something has gone wrong, that is
+ * worth more than the tidiness of small integers.
+ *
+ * Not folded into the sign of BiscuitPendLogRecord.slot, which would be
+ * the genuinely compact encoding. slot is uint32; signing it would cost a
+ * bit of slot space, leave slot 0 with no representable REMOVE, and save
+ * no bytes at all, since the record is padded to 8 regardless.
+ *
+ * The values are free to change because nothing has shipped: 3.0.0 is the
+ * first GA release built on this log format, so there is no on-disk or
+ * WAL representation in the field to stay compatible with.
+ */
+#define BISCUIT_PENDING_OP_ADD     '+'
+#define BISCUIT_PENDING_OP_REMOVE  '-'
 
 /* ---- DIRECTORY ---- */
 
@@ -947,30 +1008,71 @@ typedef struct BiscuitDirPageHeader
 /*
  * BiscuitPendLogRecord
  *
- * One delta against one structure's compacted bitmap, in the shared log.
+ * THE FACT OF A ROW WRITE. Eight bytes, fixed size, no payload.
  *
- * The difference from the retired per-structure pending record is that
- * this record is *self-describing*: it carries the full structure identity
- * (col, is_lower, kind, ch, position) that the old per-structure chain
- * conveyed implicitly by which chain the record was sitting in. That
- * costs 12 extra bytes per record (20 vs 8) and buys the collapse from
- * K pages per row down to 1 -- a trade that is overwhelmingly worth it,
- * because page count drives full-page-image volume while record width
- * only drives the (already cheap) delta.
+ * History, because the shape of this struct is the whole design:
  *
- * rec_idx is the dense record slot index, the same uint32 domain the
- * retired per-structure pending record's `value` field used.
+ *   1. A per-structure pending chain. A row touching K structures dirtied
+ *      ~K distinct pages, and PostgreSQL charges a full-page image per
+ *      distinct page per checkpoint interval.
+ *   2. A shared, index-wide log of *self-describing derived* records: the
+ *      full structure identity (col, is_lower, kind, ch, position) plus
+ *      rec_idx, 20 bytes. That collapsed K pages per row to 1, which is
+ *      what the FPI bill actually scales with.
+ *   3. This. Stop logging derived records altogether.
+ *
+ * Step 2 fixed page count but left record count alone, and record count is
+ * where the remaining write amplification lived: indexing one N-character
+ * string emits roughly 8N+4 derived identities (POS, NEG and CACHE per
+ * character per case mode, plus LEN and the LEN_GE ladder). At N=24 that
+ * is ~196 records, ~3.9 kB of derived data per row, and the accumulated
+ * page delta covering it is what lands in WAL. Measured on a 100k-row
+ * fixture: 5131 B of WAL per row inserted into a live index against 158 B
+ * for the heap alone -- ~32x, with pg_waldump attributing 95.9% of it to
+ * this extension's own Generic records.
+ *
+ * None of that fan-out is information. It is all recomputable from the
+ * row's text, which is ALREADY durable and ALREADY WAL-logged, once, by
+ * biscuit_persist_row_identity_write_record(): that writes TIDS[slot] and
+ * every (column, is_lower) STRCACHE entry for the slot, in place, O(1).
+ * Putting the text in this record too would write the same bytes to WAL
+ * twice. So the record carries neither the text nor the fan-out -- only
+ * which slot changed and in which direction -- and biscuit_delta.c
+ * reconstructs the identities on demand by reading STRCACHE back.
+ *
+ * Consequences of the fixed-size form, all of them simplifications:
+ *   - No variable-length encoding, no page-spanning records, no oversize
+ *     spill path. BiscuitPendLogMaxRecords stays a plain constant.
+ *   - Multi-column atomicity comes free: one row's write is ONE record
+ *     regardless of column count, because the per-column text lives in
+ *     STRCACHE under that slot.
+ *
+ * Why there is no per-record generation counter: idx->gen is bumped
+ * non-transactionally (see biscuit_insert()), so a record written by a
+ * transaction that later aborts would carry a generation that "happened".
+ * Generation tracking belongs in the three places that already do it
+ * correctly -- the metapage-vs-cache comparison in
+ * biscuit_get_current_index(), the snapshot's resume_blk/resume_off, and
+ * total_drains -- not in a field on every record.
+ *
+ * Why `op` is mandatory: slots are recycled, so a log may legitimately
+ * hold ADD@42, REMOVE@42, ADD@42 for three different rows. DELETE and the
+ * delete-half of UPDATE have no other representation at all.
+ *
+ * NOTE ON NAMING (deviation from the design doc): the doc calls the first
+ * field `position`. It is renamed `slot` here because this codebase
+ * already uses `position` throughout for a character's position within a
+ * structure identity (BiscuitDirEntry.position, BiscuitPendLogKey.position),
+ * and a second, unrelated meaning for the same word in the same subsystem
+ * is a bug waiting to be written.
  */
 typedef struct BiscuitPendLogRecord
 {
-    int16   col;            /* BiscuitDirEntry.col, incl. the sentinels */
-    uint8   is_lower;
-    uint8   kind;           /* BISCUIT_DIR_KIND_* */
-    int32   ch;
-    int32   position;
-    uint32  rec_idx;        /* roaring element to add/remove */
+    uint32  slot;           /* record slot (rec_idx) this record concerns */
     uint8   op;             /* BISCUIT_PENDING_OP_ADD / _REMOVE */
-    uint8   reserved[3];    /* zero-filled by writers, ignored by readers */
+    uint8   flags;          /* reserved; zero-filled by writers, ignored
+                             * by readers */
+    uint16  pad;            /* reserved; zero-filled by writers */
 } BiscuitPendLogRecord;
 
 typedef struct BiscuitPendLogPageHeader

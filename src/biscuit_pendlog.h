@@ -66,7 +66,8 @@
 /*
  * biscuit_pendlog_append
  *
- * Durably record one delta. In the common case this is a single
+ * Durably record one ROW WRITE -- not one bitmap delta. In the common case
+ * this is a single
  * GenericXLog transaction registering exactly ONE page: the log tail.
  *
  * The metapage is read under a SHARE lock to find the tail and released
@@ -85,21 +86,56 @@
  * full-page-image bill: one FPI per checkpoint interval no matter how
  * many rows or structures go through.
  *
- * Unlike the per-structure path this replaced, there is NO directory
- * lookup and NO directory update here -- the record is self-describing,
- * so the structure need not even have a directory entry yet. Entries are
- * created lazily at drain time for whatever structures actually appear in
- * the log. That removes the biscuit_dir_find() chain walk from the hot
- * path entirely, which was a per-structure cost on top of the page cost.
+ * There is NO directory lookup and NO directory update here. Entries are
+ * created lazily at drain time for whatever structures actually appear.
  *
- * Returns the log's undrained byte count after the append, so the caller
- * can apply the pending_list_limit drain trigger without a second
- * metapage read.
+ * WHAT CHANGED, AND WHY THE SIGNATURE SHRANK SO MUCH
+ * --------------------------------------------------
+ * This used to take a full structure identity plus a rec_idx, and was
+ * called once per structure a row touched -- roughly 8N+4 times for an
+ * N-character string, since every character contributes POS, NEG and CACHE
+ * per case mode on top of LEN and the LEN_GE ladder. Collapsing those onto
+ * one page fixed the full-page-image bill but left the record count alone,
+ * and record count is where the remaining amplification lived: ~196 records
+ * and ~3.9 kB of derived data per 24-character row, measured at 5131 B of
+ * WAL per row against 158 B for the heap alone.
+ *
+ * All of it was derivation. The set of structures a row belongs to is a
+ * function of the row's text, and the text is already durable and already
+ * WAL-logged, once, by biscuit_persist_row_identity_write_record(). So the
+ * log now records only WHICH SLOT changed and IN WHICH DIRECTION, and
+ * biscuit_delta.c reconstructs the identities on demand by reading the text
+ * back out of STRCACHE and running biscuit_fanout_string() over it.
+ *
+ * The fan-out did not disappear; it left the write path and became
+ * delta-build work, paid on the first read after a write burst rather than
+ * on every write. For load-then-query it is never paid at all.
+ *
+ * op is BISCUIT_PENDING_OP_ADD or _REMOVE. It is mandatory: slots are
+ * recycled, so a log may legitimately hold ADD@42, REMOVE@42, ADD@42 for
+ * three different rows, and DELETE and the delete-half of UPDATE have no
+ * other representation.
+ *
+ * Returns the log's undrained byte count after the append, so the caller can
+ * apply the compaction trigger without a second metapage read.
  */
-extern uint64 biscuit_pendlog_append(Relation index,
-                                      int32 col, bool is_lower, uint8 kind,
-                                      int32 ch, int32 position,
-                                      uint32 rec_idx, uint8 op);
+extern uint64 biscuit_pendlog_append(Relation index, uint32 slot, uint8 op);
+
+/*
+ * biscuit_pendlog_drain_trigger_bytes
+ *
+ * Log size (in bytes) at which the append path should compact.
+ *
+ * The threshold is configured in ROWS (biscuit.delta_compaction_slots) and
+ * converted here, because rows are what set delta rebuild time while bytes
+ * are what the append path cheaply knows. With a fixed 8-byte record the
+ * conversion is exact rather than an estimate.
+ *
+ * BISCUIT_PENDLOG_DRAIN_PAGES survives only as a hard ceiling underneath:
+ * 4 MB of 8-byte records is roughly half a million rows, far past any sane
+ * rebuild budget, so it no longer functions as a tuning knob.
+ */
+extern uint64 biscuit_pendlog_drain_trigger_bytes(void);
 
 /* ==================== ROW BATCHING ==================== */
 
@@ -120,6 +156,13 @@ extern uint64 biscuit_pendlog_append(Relation index,
  *   - begin/end must be paired around one row's write. end() is
  *     idempotent, and on an error unwind the buffer content lock and the
  *     GenericXLogState are both released by resource-owner cleanup.
+ * NOTE: biscuit_insert() no longer opens a batch. A row is now ONE record,
+ * so a batch would open a GenericXLog transaction, write eight bytes, and
+ * close it again. The machinery is retained -- it is correct, costs nothing
+ * unused, and a change reintroducing multiple appends per row would want it
+ * back -- but the only live caller of biscuit_pendlog_batch_active() is now
+ * the compaction trigger, defensively.
+ *
  *   - While a batch is open, callers must NOT drain: biscuit_pendlog_
  *     drain_all() takes the metapage and other page locks, and taking
  *     them under the tail page's content lock deadlocks. The drain
@@ -154,18 +197,22 @@ typedef struct BiscuitPendLogKey
     uint8   pad[2];         /* must be zeroed -- hash key is memcmp'd */
 } BiscuitPendLogKey;
 
-typedef struct BiscuitPendLogDelta
-{
-    uint32  rec_idx;
-    uint8   op;
-} BiscuitPendLogDelta;
-
+/*
+ * BiscuitPendLogEntry
+ *
+ * One structure's ADDITIONS in the current delta. There is no removal list,
+ * and that absence is the design, not an omission -- see BiscuitPendLogSnapshot
+ * .kill below.
+ *
+ * (BiscuitPendLogDelta, the old ordered (rec_idx, op) array element, is
+ * gone with it. Ordering mattered when a structure carried its own
+ * interleaved adds and removes; it does not now, because the additions are
+ * derived from each slot's CURRENT text and are therefore a set.)
+ */
 typedef struct BiscuitPendLogEntry
 {
-    BiscuitPendLogKey     key;      /* must be first (dynahash) */
-    BiscuitPendLogDelta  *deltas;
-    int                   ndeltas;
-    int                   capacity;
+    BiscuitPendLogKey  key;     /* must be first (dynahash) */
+    RoaringBitmap     *adds;    /* slots this structure gained */
 } BiscuitPendLogEntry;
 
 typedef struct BiscuitPendLogSnapshot
@@ -200,6 +247,57 @@ typedef struct BiscuitPendLogSnapshot
      */
     BlockNumber    resume_blk;
     uint32         resume_off;
+
+    /*
+     * SLOT-LEVEL STATE -- the half of the delta that is not per-structure.
+     *
+     * kill -- slots whose membership in the BASE blobs may be stale, and
+     *         which must therefore be subtracted from every base bitmap
+     *         before a structure's additions are applied.
+     *
+     *         This exists because a REMOVE names no structures. It cannot:
+     *         the set of structures a slot belonged to is a function of
+     *         text that an UPDATE may already have overwritten in STRCACHE
+     *         by the time anything reads the log. Trying to recover that
+     *         list by re-deriving it would expand the REPLACEMENT row's
+     *         identities and leave the original's in base forever. So the
+     *         reconciler withdraws the slot from base wholesale and re-adds
+     *         it from whatever the current text says.
+     *
+     *         A slot lands here if it was ever REMOVEd, or ADDed more than
+     *         once. Deliberately NOT if it was ADDed exactly once and never
+     *         removed: base can only contain a slot via an earlier,
+     *         already-drained record, and every path that rewrites a live
+     *         slot emits a REMOVE first, so a lone ADD is necessarily a slot
+     *         base has never seen. That exclusion is what keeps a
+     *         pure-insert workload on the zero-copy fast path in
+     *         biscuit_reconcile_pending().
+     *
+     * live     -- slots whose last record is an ADD; the ones worth
+     *             expanding. A row inserted and deleted within one drain
+     *             window never gets expanded at all.
+     * seen     -- every slot mentioned, used only to notice a second
+     *             mention.
+     * expanded -- slots already fanned out into htab. A record mentioning
+     *             one of these sets need_rebuild: its identities came from
+     *             text that has since changed, and there is no way to
+     *             withdraw them.
+     *
+     * touched/ntouched/cap_touched -- slots ingested since the last
+     * expansion. Expansion is a separate phase precisely so a slot reaches
+     * its final state before its text is read.
+     */
+    RoaringBitmap *kill;
+    RoaringBitmap *live;
+    RoaringBitmap *seen;
+    RoaringBitmap *expanded;
+
+    uint32        *touched;
+    int            ntouched;
+    int            cap_touched;
+
+    bool           need_rebuild;
+    uint64         nidentities;  /* identities emitted; instrumentation */
 } BiscuitPendLogSnapshot;
 
 /*
@@ -236,11 +334,38 @@ extern BiscuitPendLogEntry *biscuit_pendlog_lookup(BiscuitPendLogSnapshot *snap,
 
 /*
  * biscuit_pendlog_apply
- * Apply a structure's deltas to a bitmap, in log order (order matters:
- * add-then-remove and remove-then-add of the same rec_idx differ).
+ *
+ * Reconcile one structure:  target := (target \ kill) | entry->adds
+ *
+ * ORDER IS NOT NEGOTIABLE. A slot updated in place appears in BOTH sets --
+ * in kill because its base membership is stale, and in adds under its new
+ * text's identities. Adding before subtracting would remove the row from
+ * the structures it now belongs to. Subtract first.
+ *
+ * entry may be NULL: a structure with no additions may still be holding a
+ * slot that has been retired out from under it, so the kill set applies
+ * whether or not the hash had an entry.
+ *
+ * MVCC does not make an error here survivable and nothing may lean on it.
+ * Because xs_recheck is false, nothing re-tests the predicate after the
+ * index yields a TID. MVCC filters DEAD rows; it does not filter WRONG
+ * ones. A stale membership that survives this is a live, visible tuple
+ * returned for a pattern it does not match.
  */
-extern void biscuit_pendlog_apply(const BiscuitPendLogEntry *entry,
+extern void biscuit_pendlog_apply(const BiscuitPendLogSnapshot *snap,
+                                   const BiscuitPendLogEntry *entry,
                                    RoaringBitmap *target);
+
+/*
+ * biscuit_pendlog_has_kills
+ *
+ * Does this snapshot change any structure, whether or not the hash has an
+ * entry for it? Callers use this to preserve the old zero-copy fast path
+ * where it is still valid -- an empty kill set means no base membership
+ * anywhere is stale, which holds for any workload that has not deleted or
+ * updated a row since the last drain.
+ */
+extern bool biscuit_pendlog_has_kills(const BiscuitPendLogSnapshot *snap);
 
 /* Drop any cached snapshot (relcache invalidation, drain, index drop). */
 extern void biscuit_pendlog_invalidate(Oid indexoid);
@@ -285,6 +410,33 @@ extern void biscuit_pendlog_invalidate(Oid indexoid);
  * crossing of its own chain.
  */
 extern int biscuit_pendlog_drain_all(Relation index, bool wait);
+
+/*
+ * biscuit_pendlog_compact
+ *
+ * Ship the first max_pages pages of the log into the compacted blobs,
+ * leaving the remainder live and appendable throughout. Same merge as
+ * biscuit_pendlog_drain_all(), same drain lock, same `wait` semantics.
+ *
+ * Why this exists: waiting for VACUUM lets the delta grow without bound
+ * between vacuums, and delta size is what sets read latency and cold-start
+ * rebuild cost. A full drain from the append path would rewrite every
+ * structure the log touched, which makes a bulk load quadratic; a bounded
+ * prefix bounds the work per trigger.
+ *
+ * COMPACTION SHIPS A STRICT PREFIX, NEVER A SELECTION OF SLOTS. For any
+ * slot, either every record up to the compaction point is applied to base
+ * or none is. Shipping "the interesting slots" reorders that slot's
+ * history, and with slot recycling that is concretely wrong -- a slot may
+ * hold ADD, REMOVE, ADD for three different rows, and applying the first
+ * ADD without the REMOVE leaves base claiming a row that no longer
+ * matches. Nothing downstream catches it (see biscuit_pendlog_apply()).
+ *
+ * If the prefix would reach the tail, this degrades to a full drain, which
+ * additionally clears BISCUIT_PENDING_FLAG_TAIL -- the handshake that stops
+ * a concurrent appender writing into a chain about to be freed.
+ */
+extern int biscuit_pendlog_compact(Relation index, bool wait, uint32 max_pages);
 
 /*
  * biscuit_pendlog_free_chain

@@ -28,6 +28,10 @@
 #include "biscuit_tid.h"
 #include "biscuit_cache.h"
 #include "biscuit_persist.h"
+#include "biscuit_delta.h"     /* biscuit_delta_compaction_slots -- the
+                                 * rebuild-time budget behind the compaction
+                                 * trigger, exposed as a GUC below */
+#include "utils/guc.h"
 
 /* ================================================================
  * MODULE MAGIC
@@ -187,6 +191,51 @@ _PG_init(void)
 {
     prev_object_access_hook = object_access_hook;
     object_access_hook      = biscuit_object_access_hook;
+
+    /*
+     * biscuit.delta_compaction_slots
+     *
+     * How many rows may accumulate in the pending log before the append
+     * path ships a prefix of it into the base blobs.
+     *
+     * This is the knob that replaced BISCUIT_PENDLOG_DRAIN_PAGES as the
+     * real trigger, and it is denominated in ROWS deliberately. The old
+     * threshold was 512 pages = 4 MB, sized when a row cost ~3.9 kB of
+     * derived pending records, i.e. a few thousand rows. A row now costs 8
+     * bytes, so the same byte figure would admit roughly 500x more rows --
+     * and rows, not bytes, are what set delta rebuild time and therefore
+     * the latency of the first read after a write burst.
+     *
+     * It is a GUC rather than a constant because the correct value follows
+     * from a measurement that has not been taken: whether delta rebuild is
+     * dominated by the STRCACHE walk or by bitmap construction. The
+     * estimate behind the default is that construction dominates by
+     * roughly an order of magnitude (CREATE INDEX measures ~31 s per 1M
+     * rows against ~1.4 s to bulk load the same data, while the walk is a
+     * few amortised buffer reads per row), which puts rebuild near 30
+     * us/row and makes 20,000 rows about 0.6 s. That is a defensible
+     * ceiling on what a cold start should be willing to redo -- but it is
+     * arithmetic on an estimate, not a measurement, and the cheapest way
+     * to settle it is to time CREATE INDEX against a bulk load on
+     * identical data.
+     *
+     * PGC_SUSET rather than PGC_USERSET: raising it lets one session
+     * impose unbounded rebuild cost on every other backend reading the
+     * same index, since the log is index-wide and shared.
+     */
+    DefineCustomIntVariable("biscuit.delta_compaction_slots",
+                            "Rows of pending log tolerated before compaction.",
+                            "Compaction ships a prefix of the pending log into "
+                            "the compacted blobs. The threshold is a budget on "
+                            "delta rebuild time, expressed in rows.",
+                            &biscuit_delta_compaction_slots,
+                            20000,
+                            1, INT_MAX,
+                            PGC_SUSET,
+                            0,
+                            NULL, NULL, NULL);
+
+    MarkGUCPrefixReserved("biscuit");
 }
 
 /* ================================================================

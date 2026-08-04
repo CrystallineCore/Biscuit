@@ -1116,6 +1116,116 @@ biscuit_rowstore_str_read_all(Relation index, BlockNumber ptr_pagedir_root,
      */
 }
 
+/*
+ * biscuit_rowstore_str_read_slots
+ *
+ * Materialize a SPARSE, ascending set of slots, rather than the dense
+ * [0, num_records) range biscuit_rowstore_str_read_all() reads.
+ *
+ * The delta builder needs this. A delta covering 500 rows may span slots
+ * 0 through 900,000, because slots are claimed monotonically and the log
+ * holds only what has been written since the last drain. Reading densely
+ * to the highest slot present would materialize the entire string cache to
+ * expand a handful of rows -- and materializing means a pnstrdup per slot,
+ * so the cost is real memory, not just wasted reads.
+ *
+ * The walk is still ONE ordered pass over the pointer-array page
+ * directory, which is why `slots` must be ascending. Logical pointer page
+ * L covers slots [L * ptrs_per_page, (L+1) * ptrs_per_page), so an
+ * ascending request lets the walk skip whole directory entries without
+ * reading them and lets the value-heap buffer be reused across
+ * consecutive slots (the heap is bump-allocated in slot order, so runs of
+ * slots share a page). An unsorted request would degrade all of that into
+ * random I/O and re-reads.
+ *
+ * out_arr[i] receives the string for slots[i], or stays NULL. A NULL is
+ * not a short read: it is either an explicitly-NULL column value or a slot
+ * whose logical page was never allocated, and those are indistinguishable
+ * here and identical in effect -- exactly as in
+ * biscuit_rowstore_str_read_all(), which likewise has no truncation
+ * condition to detect.
+ */
+void
+biscuit_rowstore_str_read_slots(Relation index, BlockNumber ptr_pagedir_root,
+                                 const uint32 *slots, int nslots,
+                                 MemoryContext cxt, char **out_arr)
+{
+    uint32      ptrs_per_page = BiscuitStrPtrSlotsPerPage(BLCKSZ);
+    BlockNumber cur           = ptr_pagedir_root;
+    Buffer      heap_buf      = InvalidBuffer;
+    BlockNumber heap_blk      = InvalidBlockNumber;
+    uint32      logical_page  = 0;   /* logical pointer page index */
+    int         next_slot     = 0;   /* index into slots[] still unserved */
+
+    if (ptr_pagedir_root == InvalidBlockNumber || nslots <= 0)
+        return;
+
+    while (cur != InvalidBlockNumber && next_slot < nslots)
+    {
+        Buffer                dbuf = ReadBuffer(index, cur);
+        Page                  dpage;
+        BiscuitPageDirHeader *dhdr;
+        BlockNumber          *dslots;
+        BiscuitPageOpaque     dopaque;
+        BlockNumber           next;
+        uint32                i, n;
+
+        LockBuffer(dbuf, BUFFER_LOCK_SHARE);
+        dpage  = BufferGetPage(dbuf);
+        dhdr   = (BiscuitPageDirHeader *) BiscuitPageDataPtr(dpage);
+        dslots = (BlockNumber *) ((char *) dhdr + MAXALIGN(sizeof(BiscuitPageDirHeader)));
+        n      = dhdr->num_entries;
+
+        for (i = 0; i < n && next_slot < nslots; i++, logical_page++)
+        {
+            uint32 first = logical_page * ptrs_per_page;
+            uint32 past  = first + ptrs_per_page;
+            Buffer pbuf;
+            Page   ppage;
+            BiscuitStrPtr *pslots;
+
+            /*
+             * Skip this pointer page entirely if no requested slot falls
+             * in it. This is the whole point of the sparse variant: no
+             * ReadBuffer, no lock, no materialization.
+             */
+            if (slots[next_slot] >= past)
+                continue;
+
+            pbuf = ReadBuffer(index, dslots[i]);
+            LockBuffer(pbuf, BUFFER_LOCK_SHARE);
+            ppage  = BufferGetPage(pbuf);
+            pslots = (BiscuitStrPtr *) BiscuitPageDataPtr(ppage);
+
+            while (next_slot < nslots && slots[next_slot] < past)
+            {
+                /*
+                 * Copy the pointer out before materializing: materializing
+                 * may acquire a different value-heap buffer, and relying
+                 * on `pslots` remaining valid across that is not worth the
+                 * subtlety for a 12-byte struct. Same reasoning as
+                 * biscuit_rowstore_str_read_all().
+                 */
+                BiscuitStrPtr sp = pslots[slots[next_slot] - first];
+
+                out_arr[next_slot] =
+                    biscuit_strptr_materialize(index, &sp, cxt, &heap_buf, &heap_blk);
+                next_slot++;
+            }
+
+            UnlockReleaseBuffer(pbuf);
+        }
+
+        dopaque = (BiscuitPageOpaque) PageGetSpecialPointer(dpage);
+        next    = dopaque->next;
+        UnlockReleaseBuffer(dbuf);
+        cur = next;
+    }
+
+    if (heap_buf != InvalidBuffer)
+        UnlockReleaseBuffer(heap_buf);
+}
+
 /* ================================================================
  * HEADER
  * ================================================================ */

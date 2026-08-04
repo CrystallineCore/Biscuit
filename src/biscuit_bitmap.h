@@ -12,7 +12,31 @@
 /* ==================== BITMAP WRAPPERS ==================== */
 
 extern RoaringBitmap *biscuit_roaring_create(void);
+
+/*
+ * biscuit_roaring_create_sized
+ *
+ * Create a bitmap that will hold values up to max_value.
+ *
+ * On the CRoaring build this is a no-op shim: containers are allocated per
+ * 2^16 block on demand and there is no capacity to reserve. On the fallback
+ * bitset the presize is real and it is not merely an optimisation --
+ * biscuit_roaring_add() grows to (block + 1) * 2 with palloc0 + memcpy +
+ * pfree, so a delta built in ascending slot order otherwise reallocates all
+ * the way up.
+ *
+ * SIZE FROM THE MAXIMUM VALUE, NEVER FROM THE ELEMENT COUNT. Slots are
+ * claimed monotonically and recycled, so a 500-element delta can contain
+ * slot 900,000; a capacity derived from a count is large enough right up
+ * until it is not, and on the fallback path that is a buffer overrun rather
+ * than a mis-size.
+ */
+extern RoaringBitmap *biscuit_roaring_create_sized(uint32_t max_value);
+
 extern void           biscuit_roaring_add(RoaringBitmap *rb, uint32_t value);
+
+/* Membership test. NULL is treated as empty. */
+extern bool           biscuit_roaring_contains(const RoaringBitmap *rb, uint32_t value);
 extern void           biscuit_roaring_remove(RoaringBitmap *rb, uint32_t value);
 extern uint64_t       biscuit_roaring_count(const RoaringBitmap *rb);
 extern bool           biscuit_roaring_is_empty(const RoaringBitmap *rb);

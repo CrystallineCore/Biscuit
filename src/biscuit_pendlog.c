@@ -8,6 +8,8 @@
 #include "biscuit_dir.h"
 #include "biscuit_bitmap.h"
 #include "biscuit_pendlog.h"
+#include "biscuit_fanout.h"
+#include "biscuit_delta.h"
 #include "storage/bufpage.h"
 #include "utils/memutils.h"
 
@@ -223,10 +225,7 @@ biscuit_pendlog_batch_end(void)
  * ================================================================ */
 
 static uint64
-pendlog_append_single(Relation index,
-                       int32 col, bool is_lower, uint8 kind,
-                       int32 ch, int32 position,
-                       uint32 rec_idx, uint8 op)
+pendlog_append_single(Relation index, uint32 slot, uint8 op)
 {
     Buffer                    mbuf;
     Buffer                    tbuf;
@@ -242,14 +241,9 @@ pendlog_append_single(Relation index,
 
     biscuit_ensure_synchronous_commit();
 
-    memset(&rec, 0, sizeof(rec));   /* zero-fills reserved[] too */
-    rec.col      = (int16) col;
-    rec.is_lower = is_lower ? 1 : 0;
-    rec.kind     = kind;
-    rec.ch       = ch;
-    rec.position = position;
-    rec.rec_idx  = rec_idx;
-    rec.op       = op;
+    memset(&rec, 0, sizeof(rec));   /* zero-fills flags/pad too */
+    rec.slot = slot;
+    rec.op   = op;
 
     /*
      * LOCKING (this cost a self-deadlock to get right, so it is spelled out).
@@ -475,18 +469,14 @@ slow_path:
  * fires once in biscuit_pendlog_batch_end() rather than mid-row.
  */
 uint64
-biscuit_pendlog_append(Relation index,
-                        int32 col, bool is_lower, uint8 kind,
-                        int32 ch, int32 position,
-                        uint32 rec_idx, uint8 op)
+biscuit_pendlog_append(Relation index, uint32 slot, uint8 op)
 {
     BiscuitPendLogPageHeader *hdr;
     BiscuitPendLogRecord      rec;
     Page                      lpage;
 
     if (!biscuit_batch_open || biscuit_batch.index != index)
-        return pendlog_append_single(index, col, is_lower, kind,
-                                      ch, position, rec_idx, op);
+        return pendlog_append_single(index, slot, op);
 
     Assert(op == BISCUIT_PENDING_OP_ADD || op == BISCUIT_PENDING_OP_REMOVE);
 
@@ -498,25 +488,17 @@ biscuit_pendlog_append(Relation index,
          * allocation; let it write this record, and leave the batch closed
          * so the next append re-opens on whatever tail now exists.
          */
-        biscuit_batch.last_bytes =
-            pendlog_append_single(index, col, is_lower, kind,
-                                   ch, position, rec_idx, op);
-        if (biscuit_batch.last_bytes >
-            (uint64) BISCUIT_PENDLOG_DRAIN_PAGES * BLCKSZ)
+        biscuit_batch.last_bytes = pendlog_append_single(index, slot, op);
+        if (biscuit_batch.last_bytes > biscuit_pendlog_drain_trigger_bytes())
             biscuit_batch.want_drain = true;
         return biscuit_batch.last_bytes;
     }
 
     biscuit_ensure_synchronous_commit();
 
-    memset(&rec, 0, sizeof(rec));   /* zero-fills reserved[] too */
-    rec.col      = (int16) col;
-    rec.is_lower = is_lower ? 1 : 0;
-    rec.kind     = kind;
-    rec.ch       = ch;
-    rec.position = position;
-    rec.rec_idx  = rec_idx;
-    rec.op       = op;
+    memset(&rec, 0, sizeof(rec));   /* zero-fills flags/pad too */
+    rec.slot = slot;
+    rec.op   = op;
 
     PendLogRecords(hdr)[hdr->num_records] = rec;
     hdr->num_records++;
@@ -530,8 +512,7 @@ biscuit_pendlog_append(Relation index,
      * the tail page's content lock, and the drain wants the metapage.
      * biscuit_pendlog_batch_end() runs it once the lock is released.
      */
-    if (biscuit_batch.last_bytes >
-        (uint64) BISCUIT_PENDLOG_DRAIN_PAGES * BLCKSZ)
+    if (biscuit_batch.last_bytes > biscuit_pendlog_drain_trigger_bytes())
         biscuit_batch.want_drain = true;
 
     return biscuit_batch.last_bytes;
@@ -540,6 +521,39 @@ biscuit_pendlog_append(Relation index,
 /* ================================================================
  * STATS
  * ================================================================ */
+
+/*
+ * Log size (in bytes) at which the append path should compact.
+ *
+ * The threshold is stated in ROWS -- biscuit.delta_compaction_slots -- and
+ * converted here, because rows are what set delta rebuild time and bytes
+ * are what the append path cheaply knows. With a fixed 8-byte record the
+ * conversion is exact rather than an estimate: one row is one record, and
+ * a page holds BiscuitPendLogMaxRecords(BLCKSZ) of them.
+ *
+ * BISCUIT_PENDLOG_DRAIN_PAGES survives as a hard ceiling underneath. It is
+ * no longer the tuning knob -- 4 MB of 8-byte records is roughly half a
+ * million rows, far past any sane rebuild budget -- but it bounds the
+ * damage if the GUC is set absurdly high.
+ */
+uint64
+biscuit_pendlog_drain_trigger_bytes(void)
+{
+    uint64 recs_per_page = (uint64) BiscuitPendLogMaxRecords(BLCKSZ);
+    uint64 rows          = (uint64) biscuit_delta_compaction_threshold();
+    uint64 pages;
+
+    if (recs_per_page == 0)
+        recs_per_page = 1;
+
+    pages = (rows + recs_per_page - 1) / recs_per_page;
+    if (pages < 1)
+        pages = 1;
+    if (pages > (uint64) BISCUIT_PENDLOG_DRAIN_PAGES)
+        pages = (uint64) BISCUIT_PENDLOG_DRAIN_PAGES;
+
+    return pages * (uint64) BLCKSZ;
+}
 
 void
 biscuit_pendlog_stats(Relation index, uint64 *out_count, uint64 *out_bytes)
@@ -612,6 +626,7 @@ static uint64              snapshot_lru_clock = 0;
 
 static void pendlog_ingest_from(Relation index, BiscuitPendLogSnapshot *snap,
                                  BlockNumber start_blk, uint32 start_off);
+static void pendlog_expand_touched(Relation index, BiscuitPendLogSnapshot *snap);
 
 static void
 pendlog_key_init(BiscuitPendLogKey *k, int32 col, bool is_lower, uint8 kind,
@@ -625,13 +640,98 @@ pendlog_key_init(BiscuitPendLogKey *k, int32 col, bool is_lower, uint8 kind,
     k->is_lower = is_lower ? 1 : 0;
 }
 
+/*
+ * Free a snapshot.
+ *
+ * The per-structure `adds` bitmaps and the four snapshot-wide sets are
+ * freed EXPLICITLY, before the context goes, rather than being left to
+ * MemoryContextDelete(). Under HAVE_ROARING a RoaringBitmap is allocated
+ * by CRoaring's own allocator, not by palloc, so deleting the context
+ * reclaims the hash entries while leaking every bitmap they point at. The
+ * fallback bitset does use palloc and would survive either way; freeing
+ * explicitly is the behaviour that is correct under both builds, which is
+ * the only kind worth having.
+ */
+static void
+pendlog_snapshot_free(BiscuitPendLogSnapshot *snap)
+{
+    HASH_SEQ_STATUS      seq;
+    BiscuitPendLogEntry *e;
+
+    if (snap == NULL)
+        return;
+
+    if (snap->htab != NULL)
+    {
+        hash_seq_init(&seq, snap->htab);
+        while ((e = (BiscuitPendLogEntry *) hash_seq_search(&seq)) != NULL)
+        {
+            biscuit_roaring_free(e->adds);
+            e->adds = NULL;
+        }
+    }
+
+    biscuit_roaring_free(snap->kill);
+    biscuit_roaring_free(snap->live);
+    biscuit_roaring_free(snap->seen);
+    biscuit_roaring_free(snap->expanded);
+
+    MemoryContextDelete(snap->cxt);
+}
+
+/*
+ * Allocate an empty snapshot in its own context. Shared by the read-path
+ * cache and by the drain, which needs the identical structure but must not
+ * install it in the process-wide cache.
+ */
+static BiscuitPendLogSnapshot *
+pendlog_snapshot_create(Oid indexoid, MemoryContext parent, const char *name)
+{
+    MemoryContext           cxt;
+    MemoryContext           old;
+    HASHCTL                 ctl;
+    BiscuitPendLogSnapshot *snap;
+
+    /*
+     * The context name must be a compile-time constant -- AllocSetContextCreate
+     * static-asserts on it, because the context stores the pointer rather
+     * than a copy. So `name` distinguishes the two callers in the hash's
+     * name (which does copy) and the context takes a fixed literal.
+     */
+    cxt = AllocSetContextCreate(parent, "biscuit pendlog snapshot",
+                                 ALLOCSET_DEFAULT_SIZES);
+
+    memset(&ctl, 0, sizeof(ctl));
+    ctl.keysize   = sizeof(BiscuitPendLogKey);
+    ctl.entrysize = sizeof(BiscuitPendLogEntry);
+    ctl.hcxt      = cxt;
+
+    snap = (BiscuitPendLogSnapshot *) MemoryContextAllocZero(cxt, sizeof(*snap));
+    snap->cxt        = cxt;
+    snap->indexoid   = indexoid;
+    snap->resume_blk = InvalidBlockNumber;   /* a zeroed BlockNumber would
+                                              * read as block 0, the metapage */
+    snap->resume_off = 0;
+    snap->htab       = hash_create(name, 256, &ctl,
+                                    HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+    old = MemoryContextSwitchTo(cxt);
+    snap->kill     = biscuit_roaring_create();
+    snap->live     = biscuit_roaring_create();
+    snap->seen     = biscuit_roaring_create();
+    snap->expanded = biscuit_roaring_create();
+    MemoryContextSwitchTo(old);
+
+    return snap;
+}
+
 /* Drop one slot's snapshot (freeing its context) and mark the slot empty. */
 static void
 pendlog_slot_clear(PendLogSnapshotSlot *slot)
 {
     if (slot->snap != NULL)
     {
-        MemoryContextDelete(slot->snap->cxt);
+        pendlog_snapshot_free(slot->snap);
         slot->snap = NULL;
     }
     slot->lru               = 0;
@@ -696,8 +796,6 @@ biscuit_pendlog_snapshot(Relation index)
     uint64                  count;
     uint64                  drains;
     uint32                  npages;
-    MemoryContext           cxt;
-    HASHCTL                 ctl;
     BiscuitPendLogSnapshot *snap;
     PendLogSnapshotSlot    *slot;
 
@@ -820,45 +918,72 @@ biscuit_pendlog_snapshot(Relation index)
              * until a drain resets it, then grows again.
              */
             pendlog_ingest_from(index, snap, snap->resume_blk, snap->resume_off);
-            snap->built_at_count = count;
-            return snap;
-        }
 
-        /* A drain (or a drain's completion) happened: start over. */
-        pendlog_slot_clear(slot);
+            /*
+             * A slot mentioned again after we already expanded it is the
+             * one case incremental extension cannot absorb, and it is
+             * worth being precise about why.
+             *
+             * Expansion reads the row's text from STRCACHE, which always
+             * holds the CURRENT text for a slot. That is what makes the
+             * scheme order-independent: replaying "ADD@42" twice, or in
+             * either order relative to "REMOVE@42", yields the same
+             * identities, because both readings consult the same bytes.
+             * It stops being true across time. If this snapshot expanded
+             * slot 42 an hour ago, its `adds` bitmaps hold identities
+             * derived from the text slot 42 had THEN; an UPDATE since has
+             * overwritten STRCACHE, so those identities are stale and
+             * there is no record of which structures to withdraw them
+             * from -- the old text is gone.
+             *
+             * So: rebuild from scratch. This is not the common path. A
+             * pure-insert stream never re-mentions a slot (biscuit_insert()
+             * claims a fresh slot every time -- see its freelist comment),
+             * so appends extend incrementally as before. Only UPDATE and
+             * DELETE of rows written since the last drain land here, and
+             * they pay one full rebuild rather than a wrong answer.
+             */
+            if (!snap->need_rebuild)
+            {
+                pendlog_expand_touched(index, snap);
+                snap->built_at_count = count;
+                return snap;
+            }
+
+            elog(DEBUG1,
+                 "Biscuit: pendlog snapshot rebuild forced (slot re-mentioned after expansion)");
+            pendlog_slot_clear(slot);
+        }
+        else
+        {
+
+            /* A drain (or a drain's completion) happened: start over. */
+            pendlog_slot_clear(slot);
+        }
     }
 
-    cxt = AllocSetContextCreate(CacheMemoryContext,
-                                 "biscuit pendlog snapshot",
-                                 ALLOCSET_DEFAULT_SIZES);
-
-    memset(&ctl, 0, sizeof(ctl));
-    ctl.keysize   = sizeof(BiscuitPendLogKey);
-    ctl.entrysize = sizeof(BiscuitPendLogEntry);
-    ctl.hcxt      = cxt;
-
-    snap = (BiscuitPendLogSnapshot *) MemoryContextAllocZero(cxt, sizeof(*snap));
-    snap->cxt             = cxt;
-    snap->indexoid        = indexoid;
+    snap = pendlog_snapshot_create(indexoid, CacheMemoryContext,
+                                    "biscuit pendlog snapshot");
     snap->built_at_count  = count;
     snap->built_at_drains = drains;
-    snap->resume_blk      = InvalidBlockNumber;
-    snap->resume_off      = 0;
-    snap->htab = hash_create("biscuit pendlog", 256, &ctl,
-                              HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
     /*
      * Ingest the abandoned chain (if any) BEFORE the live head, matching
      * the order biscuit_pendlog_drain_all() uses at its own two
-     * pendlog_ingest_from() calls -- so a key that appears in both chains
-     * replays in original append order and ends up with the same final
-     * state a completed drain would have produced.
+     * pendlog_ingest_from() calls. Both chains are absorbed into the same
+     * seen/live/kill sets before ANY expansion happens, which is why
+     * expansion is a separate step rather than the tail of ingest: a slot
+     * that appears in both chains must reach its final state before its
+     * text is read, or the first chain's reading would be superseded by
+     * the second with no way to withdraw it.
      */
     if (draining != InvalidBlockNumber && draining != head)
         pendlog_ingest_from(index, snap, draining, 0);
 
     if (head != InvalidBlockNumber)
         pendlog_ingest_from(index, snap, head, 0);
+
+    pendlog_expand_touched(index, snap);
 
     slot                    = pendlog_slot_acquire();
     slot->snap              = snap;
@@ -869,27 +994,80 @@ biscuit_pendlog_snapshot(Relation index)
 }
 
 /*
- * pendlog_ingest_from
+ * Append a slot to the snapshot's "touched since last expansion" list.
+ * A plain growable array, not a set: duplicates are cheap here and are
+ * removed by the sort in pendlog_expand_touched(), whereas keeping it
+ * deduplicated would mean a membership test per record on the hot ingest
+ * path for no benefit.
+ */
+static void
+pendlog_touch_slot(BiscuitPendLogSnapshot *snap, uint32 slot)
+{
+    if (snap->ntouched == snap->cap_touched)
+    {
+        int newcap = snap->cap_touched ? snap->cap_touched * 2 : 256;
+
+        if (snap->touched == NULL)
+            snap->touched = (uint32 *) MemoryContextAlloc(snap->cxt,
+                                                          newcap * sizeof(uint32));
+        else
+            snap->touched = (uint32 *) repalloc(snap->touched,
+                                                 newcap * sizeof(uint32));
+        snap->cap_touched = newcap;
+    }
+    snap->touched[snap->ntouched++] = slot;
+}
+
+static int
+pendlog_slot_cmp(const void *a, const void *b)
+{
+    uint32 x = *(const uint32 *) a;
+    uint32 y = *(const uint32 *) b;
+
+    return (x < y) ? -1 : ((x > y) ? 1 : 0);
+}
+
+/*
+ * pendlog_ingest_from  -- PHASE 1 of delta construction
  *
- * Walk the log chain starting at start_blk, skipping the first start_off
- * records of that first page, and bucket everything else into snap's hash
- * by structure identity. Records are appended per structure in chain
- * order, which biscuit_pendlog_apply() relies on (add-then-remove of the
- * same rec_idx is not the same as remove-then-add).
+ * Walk the log chain from start_blk, skipping the first start_off records
+ * of that first page, and fold every record into the snapshot's three
+ * slot-level sets. NO text is read and NO identity is produced here; that
+ * is pendlog_expand_touched()'s job, and the separation is load-bearing
+ * (see the comment there).
+ *
+ * The three sets:
+ *
+ *   seen -- every slot the log mentions at all. Used only to notice a
+ *           second mention.
+ *
+ *   live -- slots whose LAST record is an ADD. These are the slots that
+ *           currently have text worth fanning out. A slot inserted and
+ *           then deleted inside one drain window leaves `live` and is
+ *           never expanded, which is exactly right: it contributes
+ *           nothing to any structure.
+ *
+ *   kill -- slots whose membership in the BASE blobs may be stale, and
+ *           which must therefore be subtracted from every base bitmap
+ *           before the delta's additions are applied. A slot lands here
+ *           if it was ever REMOVEd, or if it was ADDed more than once.
+ *
+ *           It deliberately does NOT contain slots that were ADDed
+ *           exactly once and never removed, and that exclusion is what
+ *           keeps the common case fast. A base blob can only contain a
+ *           slot if some earlier, already-drained record put it there;
+ *           and every path that rewrites a live slot (biscuit_insert()'s
+ *           UPDATE branch, biscuit_bulkdelete()) emits a REMOVE first.
+ *           So a single unaccompanied ADD is necessarily a slot the base
+ *           has never seen, and subtracting it would be a no-op bought
+ *           with a bitmap copy per structure per query. A pure-insert
+ *           workload therefore leaves `kill` empty and pays nothing.
  *
  * On return snap->resume_blk/resume_off point just past the last record
- * consumed, so a later call can pick up exactly where this one stopped.
- * That is what makes incremental extension possible: within one drain
- * cycle the log is strictly append-only -- pages already in the chain are
- * immutable and only the tail page's num_records grows -- so re-reading
- * from the resume point yields precisely the records that are new.
- *
- * Two callers, two uses of the same walk:
- *   - biscuit_pendlog_snapshot(), with (head, 0) for a cold build or
- *     (resume_blk, resume_off) to extend.
- *   - biscuit_pendlog_drain_all(), with (chain, 0) on a chain it has
- *     *detached* from the metapage, which by definition cannot be found by
- *     re-reading the metapage.
+ * consumed, so a later call resumes exactly there. Within one drain cycle
+ * the log is strictly append-only -- pages already in the chain are
+ * immutable, only the tail's num_records grows -- so re-reading from the
+ * resume point yields precisely what is new.
  *
  * Allocates into snap->cxt.
  */
@@ -919,35 +1097,35 @@ pendlog_ingest_from(Relation index, BiscuitPendLogSnapshot *snap,
 
         for (i = off; i < n; i++)
         {
-            BiscuitPendLogKey    key;
-            BiscuitPendLogEntry *e;
-            bool                 found;
+            uint32 rslot = recs[i].slot;
+            bool   seen_before;
 
-            pendlog_key_init(&key, recs[i].col, recs[i].is_lower != 0,
-                              recs[i].kind, recs[i].ch, recs[i].position);
+            seen_before = biscuit_roaring_contains(snap->seen, rslot);
 
-            e = (BiscuitPendLogEntry *) hash_search(snap->htab, &key, HASH_ENTER, &found);
-            if (!found)
+            /*
+             * Already expanded in an earlier pass over this same snapshot?
+             * Then its identities were derived from text that has since
+             * been overwritten, and there is no way to withdraw them.
+             * Flag it and let the caller rebuild; keep walking so
+             * resume_blk/resume_off stay honest either way.
+             */
+            if (biscuit_roaring_contains(snap->expanded, rslot))
+                snap->need_rebuild = true;
+
+            if (recs[i].op == BISCUIT_PENDING_OP_REMOVE)
             {
-                e->capacity = 8;
-                e->ndeltas  = 0;
-                e->deltas   = (BiscuitPendLogDelta *)
-                    MemoryContextAlloc(snap->cxt, e->capacity * sizeof(BiscuitPendLogDelta));
+                biscuit_roaring_add(snap->kill, rslot);
+                biscuit_roaring_remove(snap->live, rslot);
             }
-            else if (e->ndeltas == e->capacity)
+            else
             {
-                int newcap = e->capacity * 2;
-                BiscuitPendLogDelta *nd = (BiscuitPendLogDelta *)
-                    MemoryContextAlloc(snap->cxt, newcap * sizeof(BiscuitPendLogDelta));
-                memcpy(nd, e->deltas, e->ndeltas * sizeof(BiscuitPendLogDelta));
-                pfree(e->deltas);
-                e->deltas   = nd;
-                e->capacity = newcap;
+                if (seen_before)
+                    biscuit_roaring_add(snap->kill, rslot);
+                biscuit_roaring_add(snap->live, rslot);
             }
 
-            e->deltas[e->ndeltas].rec_idx = recs[i].rec_idx;
-            e->deltas[e->ndeltas].op      = recs[i].op;
-            e->ndeltas++;
+            biscuit_roaring_add(snap->seen, rslot);
+            pendlog_touch_slot(snap, rslot);
             snap->nrecords++;
         }
 
@@ -970,6 +1148,145 @@ pendlog_ingest_from(Relation index, BiscuitPendLogSnapshot *snap,
     MemoryContextSwitchTo(old);
 }
 
+/* ---- delta expansion sink ---- */
+
+typedef struct DeltaEmitCtx
+{
+    BiscuitPendLogSnapshot *snap;
+    uint32                  max_slot;   /* for fallback-bitset presizing */
+} DeltaEmitCtx;
+
+/*
+ * Record one (structure identity, slot) pair into the delta hash.
+ *
+ * Keyed by the same BiscuitPendLogKey the directory and the old derived
+ * records used, so a delta entry is directly comparable to a base
+ * structure with no translation. Sparse by construction: only identities
+ * the delta's rows actually produce get an entry, so memory scales with
+ * delta size rather than with the index's key space (a dense mirror would
+ * be 256 x max_length x 2 x 2 pointers, almost all empty).
+ */
+static void
+pendlog_delta_emit(void *ctxp,
+                   int32 col, bool is_lower, uint8 kind,
+                   int32 ch, int32 position, uint32 slot, uint8 op)
+{
+    DeltaEmitCtx            *ectx = (DeltaEmitCtx *) ctxp;
+    BiscuitPendLogSnapshot  *snap = ectx->snap;
+    BiscuitPendLogKey        key;
+    BiscuitPendLogEntry     *e;
+    bool                     found;
+    MemoryContext            old;
+
+    /* Expansion only ever produces additions; removals are the kill set. */
+    Assert(op == BISCUIT_PENDING_OP_ADD);
+    (void) op;
+
+    pendlog_key_init(&key, col, is_lower, kind, ch, position);
+
+    old = MemoryContextSwitchTo(snap->cxt);
+
+    e = (BiscuitPendLogEntry *) hash_search(snap->htab, &key, HASH_ENTER, &found);
+    if (!found)
+        e->adds = biscuit_roaring_create_sized(ectx->max_slot);
+
+    biscuit_roaring_add(e->adds, slot);
+    snap->nidentities++;
+
+    MemoryContextSwitchTo(old);
+}
+
+/*
+ * pendlog_expand_touched  -- PHASE 2 of delta construction
+ *
+ * Take the slots ingested since the last expansion, keep the ones that are
+ * still live, read their text from STRCACHE, and fan it out into the delta
+ * hash.
+ *
+ * Why this is separate from ingest, and must stay separate: expansion
+ * reads whatever text a slot currently has. A slot must therefore reach
+ * its FINAL state within the ingested range before its text is consulted,
+ * or an early reading gets superseded with no way to withdraw it. Ingest
+ * can be called twice in one build (the abandoned chain, then the live
+ * one); expansion runs once, afterwards.
+ */
+static void
+pendlog_expand_touched(Relation index, BiscuitPendLogSnapshot *snap)
+{
+    DeltaEmitCtx  ectx;
+    uint32       *slots;
+    int           nslots = 0;
+    int           i;
+    uint32        max_slot = 0;
+
+    if (snap->ntouched == 0)
+        return;
+
+    /*
+     * Filter to live-and-not-yet-expanded, in ascending order.
+     *
+     * Ascending matters twice over. biscuit_delta_expand_slots() walks the
+     * STRCACHE pointer directory once and reuses the value-heap buffer
+     * across consecutive slots -- the heap is bump-allocated in slot
+     * order, so a sorted run is a handful of buffer reads and an unsorted
+     * one is random I/O. And on the fallback bitset, adding in ascending
+     * order means each delta bitmap grows at most once, to its final size.
+     *
+     * The touched list is already ascending per ingest pass (the log is
+     * append-only and slots are claimed monotonically), but it is sorted
+     * explicitly rather than assumed: an UPDATE re-mentions an older slot,
+     * and the freelist could reintroduce out-of-order slots if slot reuse
+     * is ever restored to the insert path.
+     */
+    qsort(snap->touched, snap->ntouched, sizeof(uint32), pendlog_slot_cmp);
+
+    slots = (uint32 *) palloc(snap->ntouched * sizeof(uint32));
+    for (i = 0; i < snap->ntouched; i++)
+    {
+        uint32 sl = snap->touched[i];
+
+        if (i > 0 && sl == snap->touched[i - 1])
+            continue;                                   /* dedupe */
+        if (!biscuit_roaring_contains(snap->live, sl))
+            continue;                                   /* finally removed */
+        if (biscuit_roaring_contains(snap->expanded, sl))
+            continue;                                   /* already done */
+
+        slots[nslots++] = sl;
+        if (sl > max_slot)
+            max_slot = sl;
+    }
+
+    snap->ntouched = 0;
+
+    if (nslots == 0)
+    {
+        pfree(slots);
+        return;
+    }
+
+    /*
+     * SIZE FROM max(slot), NOT FROM THE COUNT.
+     *
+     * Slots are recycled and claimed monotonically, so a 500-record delta
+     * can perfectly well contain slot 900,000. On the fallback bitset,
+     * presizing from the record count is not a mis-size -- it is a buffer
+     * overrun. One pass over the filtered list makes it exact, and it is
+     * the same pass that already had to run.
+     */
+    ectx.snap     = snap;
+    ectx.max_slot = max_slot;
+
+    biscuit_delta_expand_slots(index, slots, nslots,
+                                BISCUIT_PENDING_OP_ADD,
+                                pendlog_delta_emit, &ectx);
+
+    for (i = 0; i < nslots; i++)
+        biscuit_roaring_add(snap->expanded, slots[i]);
+
+    pfree(slots);
+}
+
 BiscuitPendLogEntry *
 biscuit_pendlog_lookup(BiscuitPendLogSnapshot *snap,
                         int32 col, bool is_lower, uint8 kind,
@@ -984,24 +1301,66 @@ biscuit_pendlog_lookup(BiscuitPendLogSnapshot *snap,
     return (BiscuitPendLogEntry *) hash_search(snap->htab, &key, HASH_FIND, NULL);
 }
 
-void
-biscuit_pendlog_apply(const BiscuitPendLogEntry *entry, RoaringBitmap *target)
+/*
+ * Does this snapshot change ANY structure, whether or not it has an entry
+ * for it?
+ *
+ * The kill set makes that a real question. Under the old derived-record
+ * scheme a structure with no pending entry was untouched by definition,
+ * so a hash miss meant "return the cached bitmap, borrowed, zero copies".
+ * That is no longer true: a deleted row must vanish from every base
+ * bitmap it was in, and the log records the deletion once, against the
+ * slot, not once per structure. So a structure with no entry may still
+ * need the kill set subtracted from it.
+ *
+ * Callers use this to keep the old fast path where it is still valid: an
+ * empty kill set means no base membership is stale, which is the case for
+ * any workload that has not deleted or updated a row since the last drain.
+ */
+bool
+biscuit_pendlog_has_kills(const BiscuitPendLogSnapshot *snap)
 {
-    int i;
+    return snap != NULL && snap->kill != NULL &&
+           !biscuit_roaring_is_empty(snap->kill);
+}
 
-    if (entry == NULL || target == NULL)
+/*
+ * Reconcile one structure: target := (target \ kill) | entry->adds.
+ *
+ * ORDER IS NOT NEGOTIABLE, and the reason is worth stating because the
+ * arithmetic looks commutative and is not. A slot that was updated in
+ * place appears in BOTH kill (its base membership is stale) and, under
+ * its new text's identities, in adds. Subtracting after adding would
+ * remove the row from the structures it now belongs to. Subtract first.
+ *
+ * There is no per-structure removal list and there must not be one. A
+ * REMOVE is recorded against a slot, and the set of structures that slot
+ * belonged to is a property of text that may no longer exist -- an UPDATE
+ * has already overwritten STRCACHE by the time anything reads the log. The
+ * kill set sidesteps that entirely: withdraw the slot from whatever the
+ * base says, then re-add it from whatever it says now.
+ *
+ * MVCC does not make a mistake here survivable, and no part of this may
+ * lean on it. Because xs_recheck is false, nothing re-tests the predicate
+ * after the index yields a TID. MVCC filters DEAD rows; it does not filter
+ * WRONG rows. A stale membership that survives this reconciliation is a
+ * live, visible tuple returned for a pattern it does not match, and the
+ * executor will happily hand it to the user. In the other direction, a row
+ * wrongly missing from a negation's base set is simply absent from the
+ * result -- there is no tuple for anything downstream to filter at all.
+ */
+void
+biscuit_pendlog_apply(const BiscuitPendLogSnapshot *snap,
+                       const BiscuitPendLogEntry *entry, RoaringBitmap *target)
+{
+    if (target == NULL)
         return;
 
-    /* In log order: the same rec_idx can be added and later removed (or
-     * the reverse) within one undrained window, and only the last one
-     * counts. */
-    for (i = 0; i < entry->ndeltas; i++)
-    {
-        if (entry->deltas[i].op == BISCUIT_PENDING_OP_ADD)
-            biscuit_roaring_add(target, entry->deltas[i].rec_idx);
-        else
-            biscuit_roaring_remove(target, entry->deltas[i].rec_idx);
-    }
+    if (biscuit_pendlog_has_kills(snap))
+        biscuit_roaring_andnot_inplace(target, snap->kill);
+
+    if (entry != NULL && entry->adds != NULL)
+        biscuit_roaring_or_inplace(target, entry->adds);
 }
 
 /* ================================================================
@@ -1212,12 +1571,324 @@ pendlog_detach(Relation index)
     return head;
 }
 
-int
-biscuit_pendlog_drain_all(Relation index, bool wait)
+/*
+ * pendlog_detach_prefix
+ *
+ * Detach the first `max_pages` pages of the log as a standalone chain and
+ * hand the caller its head. max_pages == 0 means "the whole log", which
+ * degrades exactly to pendlog_detach() and is the VACUUM path.
+ *
+ * The prefix case is what makes incremental compaction possible: the rest
+ * of the log stays reachable from pendlog_head, keeps its BISCUIT_PENDING_
+ * FLAG_TAIL page, and remains appendable for the entire duration of the
+ * merge. Only the shipped pages become unreachable.
+ *
+ * Three things happen in ONE GenericXLog transaction, and they have to:
+ *   - metapage: pendlog_head advances past the prefix, npages drops by the
+ *     number shipped, total_drains and gen are bumped, and pendlog_draining
+ *     is set to the prefix head so an interrupted merge is recoverable.
+ *   - the prefix's last page: opaque->next is severed, so nothing walking
+ *     the detached chain wanders into the still-live remainder. Getting
+ *     this wrong in the other order would let the merge ingest records
+ *     that are still reachable from pendlog_head and then free the pages
+ *     holding them.
+ *
+ * If an earlier drain died mid-merge, its chain is adopted and returned
+ * untouched, exactly as pendlog_detach() does -- pendlog_draining is a
+ * single BlockNumber and can only ever describe one outstanding chain, so
+ * it must never be overwritten while set.
+ */
+static BlockNumber
+pendlog_detach_prefix(Relation index, uint32 max_pages)
+{
+    Buffer               mbuf, lbuf;
+    Page                 mpage, lpage;
+    BiscuitMetaPageData *meta;
+    GenericXLogState    *state;
+    BlockNumber          head, tail, draining;
+    BlockNumber          cur, next_after;
+    BiscuitPageOpaque    lopaque;
+    uint32               shipped;
+
+    if (max_pages == 0)
+        return pendlog_detach(index);
+
+    if (RelationGetNumberOfBlocks(index) == 0)
+        return InvalidBlockNumber;
+
+    mbuf = ReadBuffer(index, BISCUIT_METAPAGE_BLKNO);
+    LockBuffer(mbuf, BUFFER_LOCK_EXCLUSIVE);
+    meta     = (BiscuitMetaPageData *) PageGetSpecialPointer(BufferGetPage(mbuf));
+    head     = meta->pendlog_head;
+    tail     = meta->pendlog_tail;
+    draining = meta->pendlog_draining;
+
+    if (draining != InvalidBlockNumber)
+    {
+        UnlockReleaseBuffer(mbuf);
+        return draining;
+    }
+
+    if (head == InvalidBlockNumber)
+    {
+        UnlockReleaseBuffer(mbuf);
+        return InvalidBlockNumber;
+    }
+
+    /*
+     * Walk the prefix to find its last page and what follows. Buffer reads
+     * under the metapage's exclusive lock are safe here specifically
+     * because nothing in this walk allocates -- biscuit_page_alloc() takes
+     * the metapage lock itself, and holding it across an allocation is the
+     * self-deadlock the append path's comment warns about.
+     */
+    cur        = head;
+    shipped    = 0;
+    next_after = InvalidBlockNumber;
+
+    while (cur != InvalidBlockNumber && shipped < max_pages)
+    {
+        Buffer            b = ReadBuffer(index, cur);
+        BiscuitPageOpaque o;
+        BlockNumber       nxt;
+
+        LockBuffer(b, BUFFER_LOCK_SHARE);
+        o   = (BiscuitPageOpaque) PageGetSpecialPointer(BufferGetPage(b));
+        nxt = o->next;
+        UnlockReleaseBuffer(b);
+
+        shipped++;
+        if (shipped == max_pages)
+            next_after = nxt;
+
+        if (cur == tail)
+        {
+            /*
+             * The prefix reached the tail, so there is no remainder to
+             * keep. Fall back to a whole-log detach, which additionally
+             * clears BISCUIT_PENDING_FLAG_TAIL -- the handshake that stops
+             * a concurrent appender from writing into a chain we are about
+             * to free.
+             */
+            UnlockReleaseBuffer(mbuf);
+            return pendlog_detach(index);
+        }
+        cur = nxt;
+    }
+
+    if (next_after == InvalidBlockNumber)
+    {
+        /* Shorter than max_pages and never hit the tail: nothing sane to
+         * ship a prefix of. Take the whole thing. */
+        UnlockReleaseBuffer(mbuf);
+        return pendlog_detach(index);
+    }
+
+    /* Re-walk to the prefix's last page so we can sever it under xlog. */
+    cur = head;
+    {
+        uint32 i;
+
+        for (i = 1; i < shipped; i++)
+        {
+            Buffer            b = ReadBuffer(index, cur);
+            BiscuitPageOpaque o;
+            BlockNumber       nxt;
+
+            LockBuffer(b, BUFFER_LOCK_SHARE);
+            o   = (BiscuitPageOpaque) PageGetSpecialPointer(BufferGetPage(b));
+            nxt = o->next;
+            UnlockReleaseBuffer(b);
+            cur = nxt;
+        }
+    }
+
+    lbuf = ReadBuffer(index, cur);
+    LockBuffer(lbuf, BUFFER_LOCK_EXCLUSIVE);
+
+    biscuit_ensure_synchronous_commit();
+    state = GenericXLogStart(index);
+    mpage = GenericXLogRegisterBuffer(state, mbuf, 0);
+    lpage = GenericXLogRegisterBuffer(state, lbuf, 0);
+
+    meta = (BiscuitMetaPageData *) PageGetSpecialPointer(mpage);
+    meta->pendlog_head = next_after;
+    meta->pendlog_npages = (meta->pendlog_npages > shipped)
+                            ? meta->pendlog_npages - shipped : 0;
+
+    /*
+     * total_drains and gen both move for the same reason they do in a full
+     * detach: the log's identity changed, and every backend's staleness
+     * key and cached index have to notice. Over-invalidation costs a
+     * reload; under-invalidation is wrong answers.
+     */
+    meta->total_drains++;
+    meta->gen++;
+    meta->pendlog_draining = head;
+
+    lopaque       = (BiscuitPageOpaque) PageGetSpecialPointer(lpage);
+    lopaque->next = InvalidBlockNumber;
+
+    GenericXLogFinish(state);
+    UnlockReleaseBuffer(lbuf);
+    UnlockReleaseBuffer(mbuf);
+
+    return head;
+}
+
+/* ================================================================
+ * KILL SWEEP
+ *
+ * The one genuinely new cost this design introduces, and the one place
+ * where "log the fact of the row" is more expensive than logging derived
+ * records. It is worth being explicit about the trade rather than letting
+ * it be discovered.
+ *
+ * Under the old scheme, deleting a row emitted an explicit REMOVE record
+ * against every structure it belonged to -- biscuit_remove_from_all_indices()
+ * literally walked the in-memory index and appended ~8N+4 records. That
+ * made deletes enormously expensive in WAL, and made the drain cheap:
+ * every structure needing an update was named in the log.
+ *
+ * Now a delete is eight bytes and names no structures at all, because the
+ * set of structures it affects is a property of text that may already have
+ * been overwritten. Reads handle this by subtracting the kill set from
+ * every base bitmap they touch (biscuit_pendlog_apply()). But the drain
+ * has to make that subtraction durable, and it cannot know which blobs
+ * contain a killed slot without reading them. So when the kill set is
+ * non-empty, the drain sweeps every bitmap-kind directory entry that the
+ * merge loop did not already rewrite.
+ *
+ * The cost moved rather than appeared: a drain over a delete-bearing log
+ * is O(total structures) instead of O(structures the log touched). A
+ * pure-insert log leaves the kill set empty and skips this entirely, which
+ * is why the check is on emptiness rather than on whether any REMOVE was
+ * seen.
+ *
+ * Only bitmap kinds are swept. TIDS, TOMBSTONES, FREELIST, STRCACHE and
+ * HEADER are row-identity structures whose element domain is not "slots
+ * matching a pattern", and biscuit_rowstore.c owns their durability; a
+ * kill applied to them would corrupt them.
+ */
+
+static bool
+pendlog_kind_is_bitmap(uint8 kind)
+{
+    return kind == BISCUIT_DIR_KIND_POS ||
+           kind == BISCUIT_DIR_KIND_NEG ||
+           kind == BISCUIT_DIR_KIND_CACHE ||
+           kind == BISCUIT_DIR_KIND_LEN ||
+           kind == BISCUIT_DIR_KIND_LEN_GE;
+}
+
+typedef struct KillSweepState
+{
+    Relation                index;
+    BiscuitPendLogSnapshot *snap;
+    int                     swept;
+} KillSweepState;
+
+static void
+pendlog_kill_sweep_cb(const BiscuitDirEntry *entry, void *state)
+{
+    KillSweepState     *st = (KillSweepState *) state;
+    BiscuitPendLogKey   key;
+    RoaringBitmap      *bm;
+    BiscuitDirEntry     fresh;
+    BiscuitDirEntryRef  ref;
+    char               *blob;
+    uint32              bloblen;
+    char               *buf;
+    uint32              len = 0;
+    BlockNumber         newhead;
+    uint32              written;
+
+    if (!pendlog_kind_is_bitmap(entry->kind))
+        return;
+    if (entry->blob_head == InvalidBlockNumber)
+        return;   /* nothing durable to subtract from */
+
+    /*
+     * Already handled by the merge loop, which applied the kill set to
+     * this structure on its way past. Rewriting it again would be correct
+     * but would cost a second blob rewrite per structure.
+     */
+    pendlog_key_init(&key, entry->col, entry->is_lower != 0,
+                      entry->kind, entry->ch, entry->position);
+    if (hash_search(st->snap->htab, &key, HASH_FIND, NULL) != NULL)
+        return;
+
+    /*
+     * Re-find under our own reference rather than mutating the caller's
+     * snapshot copy: biscuit_dir_foreach_column() hands out a copy with
+     * the page lock already released, precisely so a callback can take its
+     * own exclusive reference without self-deadlocking.
+     */
+    if (!biscuit_dir_find(st->index, entry->col, entry->is_lower != 0,
+                           entry->kind, entry->ch, entry->position,
+                           &fresh, &ref))
+        return;
+    if (fresh.blob_head == InvalidBlockNumber)
+        return;
+
+    biscuit_page_read_blob(st->index, fresh.blob_head, &blob, &bloblen);
+    bm = biscuit_roaring_deserialize(blob, bloblen);
+    if (blob)
+        pfree(blob);
+
+    biscuit_roaring_andnot_inplace(bm, st->snap->kill);
+
+    buf = biscuit_roaring_serialize(bm, &len);
+    biscuit_page_write_blob(st->index, buf, len, &newhead, &written);
+    if (buf)
+        pfree(buf);
+    biscuit_roaring_free(bm);
+
+    /*
+     * Repoint before freeing, for the same reason the merge loop does:
+     * biscuit_page_free_blob() rewrites each freed page's opaque->next
+     * into a freelist link, so a reader following a still-stale blob_head
+     * would walk off into recycled pages.
+     */
+    {
+        BlockNumber oldhead = fresh.blob_head;
+
+        fresh.blob_head = newhead;
+        biscuit_dir_update(st->index, &ref, &fresh);
+
+        if (oldhead != InvalidBlockNumber)
+            biscuit_page_free_blob(st->index, oldhead);
+    }
+
+    st->swept++;
+}
+
+static int
+pendlog_kill_sweep(Relation index, BiscuitPendLogSnapshot *snap)
+{
+    KillSweepState st;
+    int            nslots;
+    int            i;
+
+    if (!biscuit_pendlog_has_kills(snap))
+        return 0;
+
+    st.index = index;
+    st.snap  = snap;
+    st.swept = 0;
+
+    nslots = biscuit_dir_num_slots(index);
+    for (i = 0; i < nslots; i++)
+        biscuit_dir_foreach_column(index, i, pendlog_kill_sweep_cb, &st);
+
+    elog(DEBUG1, "Biscuit: kill sweep rewrote %d structure(s)", st.swept);
+    return st.swept;
+}
+
+static int
+pendlog_drain_internal(Relation index, bool wait, uint32 max_pages)
 {
     BiscuitPendLogSnapshot *snap;
-    MemoryContext           cxt;
-    HASHCTL                 ctl;
     HASH_SEQ_STATUS         seq;
     BiscuitPendLogEntry    *e;
     int                     drained = 0;
@@ -1270,7 +1941,7 @@ biscuit_pendlog_drain_all(Relation index, bool wait)
      * freed with the chain.
      */
     abandoned = pendlog_read_draining(index);
-    head      = pendlog_detach(index);
+    head      = pendlog_detach_prefix(index, max_pages);
     if (head == InvalidBlockNumber)
     {
         UnlockPage(index, BISCUIT_METAPAGE_BLKNO, ExclusiveLock);
@@ -1290,33 +1961,26 @@ biscuit_pendlog_drain_all(Relation index, bool wait)
      * points at this chain, and it would install the result as the
      * process-wide read cache, which must stay keyed to the *live* log.
      */
-    cxt = AllocSetContextCreate(CurrentMemoryContext,
-                                 "biscuit pendlog drain",
-                                 ALLOCSET_DEFAULT_SIZES);
-
-    memset(&ctl, 0, sizeof(ctl));
-    ctl.keysize   = sizeof(BiscuitPendLogKey);
-    ctl.entrysize = sizeof(BiscuitPendLogEntry);
-    ctl.hcxt      = cxt;
-
-    snap = (BiscuitPendLogSnapshot *) MemoryContextAllocZero(cxt, sizeof(*snap));
-    snap->cxt        = cxt;
-    snap->indexoid   = RelationGetRelid(index);
-    snap->resume_blk = InvalidBlockNumber;   /* never resumed; a zeroed
-                                              * BlockNumber would read as
-                                              * block 0, the metapage */
-    snap->resume_off = 0;
-    snap->htab     = hash_create("biscuit pendlog drain", 256, &ctl,
-                                  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+    snap = pendlog_snapshot_create(RelationGetRelid(index), CurrentMemoryContext,
+                                    "biscuit pendlog drain");
 
     /*
      * Ingest the abandoned chain (if any) BEFORE the freshly detached one,
-     * so replay order matches original append order across the two.
+     * so both chains reach the same slot-level final state before any text
+     * is read.
      */
     if (abandoned != InvalidBlockNumber && abandoned != head)
         pendlog_ingest_from(index, snap, abandoned, 0);
 
     pendlog_ingest_from(index, snap, head, 0);
+
+    /*
+     * Expand once, after both chains are in. The drain builds a fresh
+     * snapshot every time, so need_rebuild cannot fire here -- nothing was
+     * expanded before this call.
+     */
+    pendlog_expand_touched(index, snap);
+    Assert(!snap->need_rebuild);
 
     /*
      * Merge each structure's deltas into its compacted blob. A structure
@@ -1366,7 +2030,7 @@ biscuit_pendlog_drain_all(Relation index, bool wait)
         else
             bm = biscuit_roaring_create();
 
-        biscuit_pendlog_apply(e, bm);
+        biscuit_pendlog_apply(snap, e, bm);
 
         buf = biscuit_roaring_serialize(bm, &len);
         biscuit_page_write_blob(index, buf, len, &newhead, &written);
@@ -1408,6 +2072,16 @@ biscuit_pendlog_drain_all(Relation index, bool wait)
     }
 
     /*
+     * Make the removals durable in the structures the merge loop did not
+     * visit. Runs INSIDE the drain lock and before the recovery marker is
+     * cleared, so a crash part-way leaves the marker set and the whole
+     * chain -- kills included -- is re-ingested and re-applied by the next
+     * drain. Re-applying a kill is idempotent (subtracting a slot that is
+     * already absent is a no-op), which is what makes that safe.
+     */
+    drained += pendlog_kill_sweep(index, snap);
+
+    /*
      * The chain is already unreachable, so freeing it last is safe in
      * either crash direction: a crash before this point leaks the chain's
      * pages (recovered by nothing until the index is dropped) but loses no
@@ -1427,10 +2101,54 @@ biscuit_pendlog_drain_all(Relation index, bool wait)
     if (abandoned != InvalidBlockNumber && abandoned != head)
         biscuit_page_free_chain(index, abandoned);
 
-    MemoryContextDelete(cxt);
+    pendlog_snapshot_free(snap);
     UnlockPage(index, BISCUIT_METAPAGE_BLKNO, ExclusiveLock);
 
     return drained;
+}
+
+int
+biscuit_pendlog_drain_all(Relation index, bool wait)
+{
+    return pendlog_drain_internal(index, wait, 0 /* whole log */);
+}
+
+/*
+ * INCREMENTAL COMPACTION (design §7.2)
+ *
+ * Waiting for VACUUM lets the delta grow without bound between vacuums,
+ * and delta size is what sets both read latency and cold-start rebuild
+ * cost. Compaction bounds it without a full drain: ship the oldest portion
+ * of the log into base and drop those records.
+ *
+ * COMPACTION SHIPS A STRICT PREFIX OF THE LOG, NEVER A SELECTION OF
+ * SLOTS. This is a rule, not an implementation detail, and it survives
+ * even though the kill/add formulation happens to make out-of-order
+ * application harmless for the *current* set of operations. The reason to
+ * keep it stated and enforced is that the property it protects is not
+ * local: for any slot, either every record up to the compaction point is
+ * applied to base, or none is. Shipping "the significant slots" and
+ * leaving others behind reorders a slot's history, and slot recycling
+ * makes that concretely wrong -- a slot may hold ADD, REMOVE, ADD for
+ * three different rows, and applying the first ADD without the REMOVE
+ * leaves base claiming a row that no longer matches.
+ *
+ * It is tempting to reason that MVCC covers such a mistake. It does not.
+ * MVCC filters dead rows, not wrong ones, and because xs_recheck is false
+ * nothing re-tests the predicate on the way out. See
+ * biscuit_pendlog_apply().
+ *
+ * Mechanically this is the existing drain applied to a prefix: detach the
+ * first max_pages pages as their own chain, merge them exactly as a full
+ * drain would, retire them, and leave the rest of the log live and
+ * appendable throughout.
+ */
+int
+biscuit_pendlog_compact(Relation index, bool wait, uint32 max_pages)
+{
+    if (max_pages == 0)
+        max_pages = 1;
+    return pendlog_drain_internal(index, wait, max_pages);
 }
 
 void

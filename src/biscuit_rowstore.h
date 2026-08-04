@@ -223,6 +223,33 @@ extern void biscuit_rowstore_str_read_all(Relation index,
                                            MemoryContext cxt,
                                            char **out_arr);
 
+/*
+ * biscuit_rowstore_str_read_slots
+ *
+ * Sparse counterpart to biscuit_rowstore_str_read_all(): materialize an
+ * ASCENDING, deduplicated set of slots rather than the dense
+ * [0, num_records) range. out_arr[i] receives the string for slots[i]
+ * (palloc'd in cxt), or stays NULL for an absent entry.
+ *
+ * The delta builder needs this. A delta covering 500 rows can span slots 0
+ * through 900,000, because slots are claimed monotonically and the log holds
+ * only what has been written since the last drain. Reading densely to the
+ * highest slot present would materialize the whole string cache -- and
+ * materializing means a pnstrdup per slot, so the cost is resident memory,
+ * not just wasted buffer reads.
+ *
+ * Ascending order is a requirement, not a convention: logical pointer page L
+ * covers slots [L * ptrs_per_page, (L+1) * ptrs_per_page), so a sorted
+ * request lets one ordered walk skip whole directory entries without reading
+ * them and reuse the value-heap buffer across consecutive slots. An unsorted
+ * request would degrade that into random I/O and repeated page reads.
+ */
+extern void biscuit_rowstore_str_read_slots(Relation index,
+                                             BlockNumber ptr_pagedir_root,
+                                             const uint32 *slots, int nslots,
+                                             MemoryContext cxt,
+                                             char **out_arr);
+
 /* ==================== HEADER ==================== */
 
 /*

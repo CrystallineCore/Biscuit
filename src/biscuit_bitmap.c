@@ -20,10 +20,45 @@ biscuit_roaring_create(void)
     return roaring_bitmap_create();
 }
 
+RoaringBitmap *
+biscuit_roaring_create_sized(uint32_t max_value)
+{
+    /*
+     * Nothing to presize. CRoaring manages containers per 2^16 block and
+     * allocates them on demand, so there is no capacity to reserve and no
+     * growth-with-copy to avoid.
+     *
+     * The shim exists so call sites stay uniform across both build
+     * configurations. On the fallback bitset the presize is real and it
+     * matters (see the other branch), and a caller that knows its maximum
+     * slot should not have to know which bitmap implementation it got.
+     *
+     * The optimisation that WOULD pay here is the bulk path --
+     * roaring_bitmap_add_bulk() with a roaring_bulk_context_t, which
+     * caches the current container across a sorted run, plus one
+     * roaring_bitmap_run_optimize() per bitmap after build. Delta
+     * construction touches each structure in ascending slot order, so the
+     * run cache would hit constantly, and dense structures such as
+     * LEN_GE[0] and common-character CACHE entries compress well to runs.
+     * Deliberately not done yet: it changes the shape of the emit
+     * callback (which currently adds one value at a time, in identity
+     * order rather than slot order) and it should be measured, not
+     * assumed.
+     */
+    (void) max_value;
+    return roaring_bitmap_create();
+}
+
 void
 biscuit_roaring_add(RoaringBitmap *rb, uint32_t value)
 {
     roaring_bitmap_add(rb, value);
+}
+
+bool
+biscuit_roaring_contains(const RoaringBitmap *rb, uint32_t value)
+{
+    return rb != NULL && roaring_bitmap_contains(rb, value);
 }
 
 void
@@ -98,6 +133,38 @@ biscuit_roaring_create(void)
     return rb;
 }
 
+RoaringBitmap *
+biscuit_roaring_create_sized(uint32_t max_value)
+{
+    RoaringBitmap *rb   = (RoaringBitmap *) palloc0(sizeof(RoaringBitmap));
+    int            need = (int) (max_value >> 6) + 1;
+
+    /*
+     * Here the presize is real, and it fixes two distinct problems.
+     *
+     * Growth: biscuit_roaring_add() below grows to (block + 1) * 2 with a
+     * palloc0 + memcpy + pfree each time. Adding slots in ascending order
+     * into a default 16-block bitmap therefore reallocates repeatedly on
+     * the way up to the highest slot. Sizing once from the known maximum
+     * makes it exactly one allocation.
+     *
+     * SIZE FROM THE MAXIMUM SLOT, NEVER FROM THE COUNT. Slots are claimed
+     * monotonically and recycled, so a 500-element delta can perfectly
+     * well contain slot 900,000. Presizing from the element count is not a
+     * mis-size on this path, it is a buffer overrun -- biscuit_roaring_add()
+     * indexes blocks[value >> 6] after growing only if block >= capacity,
+     * and a capacity derived from a count that has nothing to do with the
+     * values is a capacity that happens to be large enough right up until
+     * it is not.
+     */
+    if (need < 16)
+        need = 16;
+
+    rb->capacity = need;
+    rb->blocks   = (uint64_t *) palloc0(need * sizeof(uint64_t));
+    return rb;
+}
+
 void
 biscuit_roaring_add(RoaringBitmap *rb, uint32_t value)
 {
@@ -126,6 +193,17 @@ biscuit_roaring_remove(RoaringBitmap *rb, uint32_t value)
     int bit   = value & 63;
     if (block < rb->num_blocks)
         rb->blocks[block] &= ~(1ULL << bit);
+}
+
+bool
+biscuit_roaring_contains(const RoaringBitmap *rb, uint32_t value)
+{
+    int block = value >> 6;
+    int bit   = value & 63;
+
+    if (rb == NULL || block >= rb->num_blocks)
+        return false;
+    return (rb->blocks[block] & (1ULL << bit)) != 0;
 }
 
 uint64_t

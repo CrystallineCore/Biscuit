@@ -15,6 +15,9 @@
                               * pending-chain primitives this used to need are
                               * gone; see biscuit_pendlog.h */
 #include "biscuit_dir.h"    /* biscuit_dir_find/_insert/_update, BiscuitDirEntry */
+#include "biscuit_fanout.h" /* biscuit_fanout_string() -- the single answer to
+                             * "what structures does this string belong to",
+                             * shared with the delta builder and the drain */
 #include "biscuit_pendlog.h" /* shared index-wide pending log: replaced the
                               * per-structure pending chains on the write path */
 #include "access/xact.h"    /* RegisterXactCallback, XACT_EVENT_* */
@@ -953,110 +956,126 @@ biscuit_read_pending_list_limit(Relation index)
  */
 
 /*
- * biscuit_pending_mutate_structure
+ * biscuit_pending_mutate_row
  *
- * Durable half of one bitmap mutation for structure (col, is_lower,
- * kind, ch, position): appends one BiscuitPendLogRecord for
- * (rec_idx, op) into the index-wide shared log, and opportunistically
- * drains the whole log if it has grown past BISCUIT_PENDLOG_DRAIN_PAGES.
- * Does NOT touch the directory at all: the record is self-describing, so
- * a structure need not even have a directory entry yet. Entries are
- * created lazily at drain time (biscuit_pendlog_drain_all()).
+ * The durable half of a row write: ONE fixed-size record into the
+ * index-wide shared log saying "slot N was added" or "slot N was retired",
+ * plus an opportunistic compaction if the log has outgrown its rebuild-time
+ * budget.
  *
- * col uses the same addressing biscuit_dir_slot_for_col() expects
- * elsewhere: -1 for the legacy single-column layout, 0-based column
- * index for multi-column.
+ * This replaces biscuit_pending_mutate_structure(), which was called once
+ * per structure the row touched -- roughly 8N+4 times for an N-character
+ * string, since every character contributes POS, NEG and CACHE per case
+ * mode on top of LEN and the LEN_GE ladder. Every one of those records was
+ * pure derivation: the set of structures a row belongs to is a function of
+ * that row's text, and the text is already durable, already WAL-logged,
+ * written in place and O(1) by
+ * biscuit_persist_row_identity_write_record() a few hundred lines below.
+ * Logging the fan-out as well was writing the same information to WAL a
+ * second time in expanded form, and it accounted for the overwhelming
+ * majority of this extension's write volume: 5131 B per row inserted into
+ * a live index against 158 B for the heap alone, with pg_waldump
+ * attributing 95.9% of an UPDATE window to our own Generic records.
+ *
+ * What consumes the resulting record: biscuit_delta.c, which reads the
+ * row's text back out of STRCACHE and runs biscuit_fanout_string() over it
+ * to reconstruct exactly the identities this function used to enumerate.
+ * The fan-out has not disappeared -- it left the write path and became
+ * delta-build work, paid on the first read after a write burst rather than
+ * on every write. For load-then-query it is never paid at all, because the
+ * delta is empty by query time.
+ *
+ * The multi-column case collapses for free: one row is one record no
+ * matter how many columns are indexed, because each column's text lives in
+ * STRCACHE under the same slot.
  */
 static void
-biscuit_pending_mutate_structure(Relation index,
-                                  int32 col, bool is_lower, uint8 kind,
-                                  int32 ch, int32 position,
-                                  uint32 rec_idx, uint8 op,
-                                  uint32 pending_list_limit)
+biscuit_pending_mutate_row(Relation index, uint32 slot, uint8 op,
+                            uint32 pending_list_limit)
 {
     uint64 pendlog_bytes;
 
-    /*
-     * One self-describing append to the index-wide shared log
-     * (biscuit_pendlog.c). No biscuit_dir_find(), no biscuit_dir_insert(),
-     * no biscuit_dir_update() -- the record carries its own structure
-     * identity, so this path never touches the directory at all. Directory
-     * entries are created lazily at drain time for whichever structures
-     * actually appear in the log.
-     *
-     * What this replaced: a per-structure pending chain, so a row touching
-     * K structures dirtied ~K distinct pages, and PostgreSQL charges a
-     * full-page image per distinct page per checkpoint interval. Now all K
-     * records land on the same log tail page, so the FPI bill stops
-     * scaling with K.
-     */
-    pendlog_bytes = biscuit_pendlog_append(index, col, is_lower, kind,
-                                            ch, position, rec_idx, op);
+    if (index == NULL)
+        return;   /* build/load: in-memory only; biscuit_build() persists
+                    * everything in one bulk pass at the end instead */
+
+    pendlog_bytes = biscuit_pendlog_append(index, slot, op);
 
     /*
-     * Opportunistic drain trigger -- tuned for OLAP, kept sane for OLTP.
+     * Compaction trigger.
      *
-     * A drain re-serializes the compacted blob of EVERY structure the log
-     * touched, so its cost is proportional to index size, not to how much
-     * is pending. Draining every pending_list_limit bytes therefore makes
-     * a bulk load quadratic: (N/limit) drains x O(index size) each. That
-     * is the same shape as the O(n)-per-commit bug the row-identity work
-     * removed, and reintroducing it here through the back door would be a
-     * poor trade.
+     * Two things changed here, and they are separable.
      *
-     * So the threshold is deliberately generous:
+     * The threshold is now denominated in ROWS
+     * (biscuit.delta_compaction_slots), not bytes, because rows are what
+     * set delta rebuild time and therefore read latency. At ~3.9 kB of
+     * derived records per row the old 4 MB byte threshold worked out to a
+     * few thousand rows; at 8 bytes per row the identical byte figure
+     * admits on the order of 500x more, which is a rebuild budget nobody
+     * chose. biscuit_pendlog_drain_trigger_bytes() converts.
      *
-     *   - OLAP (the priority): bulk loads and read-mostly workloads. A big
-     *     log costs almost nothing here. Reads pay a single snapshot hash
-     *     build per statement (biscuit_pendlog_snapshot()), amortized over
-     *     a scan that touches many structures, and VACUUM does the real
-     *     draining. Rare, large drains are exactly right.
+     * And this compacts a PREFIX rather than draining the whole log. A
+     * full drain rewrites every structure the log touched, so firing one
+     * from the append path makes a bulk load quadratic -- (N/limit) drains
+     * times O(index size) each. Shipping a bounded prefix bounds the work
+     * per trigger while still keeping the delta small enough to rebuild
+     * quickly. VACUUM still drains unconditionally and completely.
      *
-     *   - OLTP (kept reasonable, not optimized): the ceiling bounds how
-     *     much a cold reader must replay before its first query, and how
-     *     much memory one snapshot costs. BISCUIT_PENDLOG_DRAIN_PAGES caps
-     *     it at a few MB, so worst-case snapshot build stays in the
-     *     milliseconds rather than growing without limit until someone
-     *     runs VACUUM.
-     *
-     * pending_list_limit is intentionally NOT consulted: it is a
-     * per-structure figure (64KB-ish) from the old design, and applying a
-     * per-structure number to a whole-index log is what made the first
-     * version of this drain fire constantly.
+     * The batch check is now vestigial: biscuit_insert() no longer opens a
+     * row batch, because a row is one record and there is nothing left to
+     * batch. It is kept because biscuit_pendlog_batch_active() is cheap and
+     * because compacting while holding the tail page's content lock would
+     * deadlock if a batch ever returns.
      */
-    /*
-     * While a row batch is open we hold the pendlog tail page's content
-     * lock, and biscuit_pendlog_drain_all() takes the metapage and other
-     * page locks -- draining here would deadlock. The batch records that a
-     * drain is wanted and runs it from biscuit_pendlog_batch_end(), which
-     * executes with no locks of ours held. Outside a batch (the build
-     * path, bulkdelete, remove-from-all-indices) the trigger fires here as
-     * before.
-     */
-    if (pendlog_bytes > (uint64) BISCUIT_PENDLOG_DRAIN_PAGES * BLCKSZ &&
+    if (pendlog_bytes > biscuit_pendlog_drain_trigger_bytes() &&
         !biscuit_pendlog_batch_active())
-        biscuit_pendlog_drain_all(index, false);   /* opportunistic: skip if
-                                                    * another backend is
-                                                    * already draining */
+        biscuit_pendlog_compact(index, false,   /* opportunistic: skip if
+                                                 * another backend is
+                                                 * already draining */
+                                 BISCUIT_PENDLOG_COMPACT_PAGES);
 
     (void) pending_list_limit;   /* retained in the signature for the
                                    * statement-cached-read contract in
-                                   * biscuit_index.h; no longer the trigger */
+                                   * biscuit_index.h; it was never the
+                                   * trigger for the shared log, and is even
+                                   * less meaningful now that the threshold
+                                   * is counted in rows */
 }
 
 /*
  * Remove a record from every character and length bitmap.
  * Handles both single-column (legacy) and multi-column layouts.
  *
- * Mutates the in-memory bitmaps exactly as before (biscuit_roaring_remove,
- * unchanged) and, per the mutation contract, also durably records each
- * removal via biscuit_pending_mutate_structure() against that structure's
- * directory entry. `index`/`pending_list_limit` are always required now --
- * every call site is steady-state CRUD (biscuit_insert's UPDATE-as-
- * delete-then-insert path, biscuit_bulkdelete's tombstone purge), never
- * the one-time build path, so there is no NULL/build-mode case to gate
- * here (contrast biscuit_index_single_record/biscuit_index_column_record
- * below, which are shared between build and insert).
+ * TWO HALVES THAT NO LONGER MIRROR EACH OTHER.
+ *
+ * The in-memory half is unchanged: walk every structure this backend has
+ * cached and biscuit_roaring_remove() the slot from each. That still has
+ * to enumerate, because a cached bitmap is a concrete object with the slot
+ * concretely in it.
+ *
+ * The durable half is now a single record. It used to be one
+ * biscuit_pending_mutate_structure() call per structure, appended inside
+ * the loop below, so deleting one N-character row wrote ~8N+4 records
+ * naming every structure it belonged to. That made DELETE the most
+ * expensive operation in the extension, and all of it was derivation.
+ *
+ * The reconciler does NOT recover that list by re-deriving it. It cannot:
+ * by the time anything reads this record, an UPDATE may already have
+ * overwritten STRCACHE with the replacement row's text, so the identities
+ * this slot used to have are unrecoverable. Instead the slot joins the
+ * kill set, and every base bitmap a reader touches has the kill set
+ * subtracted from it before the delta's additions are applied (see
+ * biscuit_pendlog_apply()). That is order-independent and survives slot
+ * recycling, neither of which a list of per-structure removals would.
+ *
+ * The append happens ONCE, up front, and is deliberately not conditional
+ * on the loop below finding anything: a slot with no cached structures in
+ * THIS backend may still be present in the base blobs, and this record is
+ * what retires it there.
+ *
+ * `index`/`pending_list_limit` are always required -- every call site is
+ * steady-state CRUD (biscuit_insert's UPDATE-as-delete-then-insert path,
+ * biscuit_bulkdelete's tombstone purge), never the one-time build path.
  */
 void
 biscuit_remove_from_all_indices(Relation index, BiscuitIndex *idx,
@@ -1066,6 +1085,9 @@ biscuit_remove_from_all_indices(Relation index, BiscuitIndex *idx,
 
     if (!idx)
         return;
+
+    biscuit_pending_mutate_row(index, (uint32) rec_idx,
+                                BISCUIT_PENDING_OP_REMOVE, pending_list_limit);
 
     /* -------- Multi-column -------- */
     if (idx->num_columns > 1 && idx->column_indices)
@@ -1080,50 +1102,28 @@ biscuit_remove_from_all_indices(Relation index, BiscuitIndex *idx,
                 for (j = 0; j < cidx->pos_idx[ch].count; j++)
                 {
                     biscuit_roaring_remove(cidx->pos_idx[ch].entries[j].bitmap, rec_idx);
-                    biscuit_pending_mutate_structure(index, col, false, BISCUIT_DIR_KIND_POS,
-                                                      ch, cidx->pos_idx[ch].entries[j].pos,
-                                                      rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                                      pending_list_limit);
                 }
                 for (j = 0; j < cidx->neg_idx[ch].count; j++)
                 {
                     biscuit_roaring_remove(cidx->neg_idx[ch].entries[j].bitmap, rec_idx);
-                    biscuit_pending_mutate_structure(index, col, false, BISCUIT_DIR_KIND_NEG,
-                                                      ch, cidx->neg_idx[ch].entries[j].pos,
-                                                      rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                                      pending_list_limit);
                 }
                 if (cidx->char_cache[ch])
                 {
                     biscuit_roaring_remove(cidx->char_cache[ch], rec_idx);
-                    biscuit_pending_mutate_structure(index, col, false, BISCUIT_DIR_KIND_CACHE,
-                                                      ch, -1, rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                                      pending_list_limit);
                 }
 
                 /* case-insensitive */
                 for (j = 0; j < cidx->pos_idx_lower[ch].count; j++)
                 {
                     biscuit_roaring_remove(cidx->pos_idx_lower[ch].entries[j].bitmap, rec_idx);
-                    biscuit_pending_mutate_structure(index, col, true, BISCUIT_DIR_KIND_POS,
-                                                      ch, cidx->pos_idx_lower[ch].entries[j].pos,
-                                                      rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                                      pending_list_limit);
                 }
                 for (j = 0; j < cidx->neg_idx_lower[ch].count; j++)
                 {
                     biscuit_roaring_remove(cidx->neg_idx_lower[ch].entries[j].bitmap, rec_idx);
-                    biscuit_pending_mutate_structure(index, col, true, BISCUIT_DIR_KIND_NEG,
-                                                      ch, cidx->neg_idx_lower[ch].entries[j].pos,
-                                                      rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                                      pending_list_limit);
                 }
                 if (cidx->char_cache_lower[ch])
                 {
                     biscuit_roaring_remove(cidx->char_cache_lower[ch], rec_idx);
-                    biscuit_pending_mutate_structure(index, col, true, BISCUIT_DIR_KIND_CACHE,
-                                                      ch, -1, rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                                      pending_list_limit);
                 }
             }
 
@@ -1132,9 +1132,6 @@ biscuit_remove_from_all_indices(Relation index, BiscuitIndex *idx,
                     if (cidx->length_bitmaps[j])
                     {
                         biscuit_roaring_remove(cidx->length_bitmaps[j], rec_idx);
-                        biscuit_pending_mutate_structure(index, col, false, BISCUIT_DIR_KIND_LEN,
-                                                          -1, j, rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                                          pending_list_limit);
                     }
 
             if (cidx->length_ge_bitmaps)
@@ -1142,9 +1139,6 @@ biscuit_remove_from_all_indices(Relation index, BiscuitIndex *idx,
                     if (cidx->length_ge_bitmaps[j])
                     {
                         biscuit_roaring_remove(cidx->length_ge_bitmaps[j], rec_idx);
-                        biscuit_pending_mutate_structure(index, col, false, BISCUIT_DIR_KIND_LEN_GE,
-                                                          -1, j, rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                                          pending_list_limit);
                     }
 
             if (cidx->length_bitmaps_lower)
@@ -1152,9 +1146,6 @@ biscuit_remove_from_all_indices(Relation index, BiscuitIndex *idx,
                     if (cidx->length_bitmaps_lower[j])
                     {
                         biscuit_roaring_remove(cidx->length_bitmaps_lower[j], rec_idx);
-                        biscuit_pending_mutate_structure(index, col, true, BISCUIT_DIR_KIND_LEN,
-                                                          -1, j, rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                                          pending_list_limit);
                     }
 
             if (cidx->length_ge_bitmaps_lower)
@@ -1162,9 +1153,6 @@ biscuit_remove_from_all_indices(Relation index, BiscuitIndex *idx,
                     if (cidx->length_ge_bitmaps_lower[j])
                     {
                         biscuit_roaring_remove(cidx->length_ge_bitmaps_lower[j], rec_idx);
-                        biscuit_pending_mutate_structure(index, col, true, BISCUIT_DIR_KIND_LEN_GE,
-                                                          -1, j, rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                                          pending_list_limit);
                     }
         }
         return;
@@ -1179,50 +1167,28 @@ biscuit_remove_from_all_indices(Relation index, BiscuitIndex *idx,
         for (j = 0; j < idx->pos_idx_legacy[ch].count; j++)
         {
             biscuit_roaring_remove(idx->pos_idx_legacy[ch].entries[j].bitmap, rec_idx);
-            biscuit_pending_mutate_structure(index, -1, false, BISCUIT_DIR_KIND_POS,
-                                              ch, idx->pos_idx_legacy[ch].entries[j].pos,
-                                              rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                              pending_list_limit);
         }
         for (j = 0; j < idx->neg_idx_legacy[ch].count; j++)
         {
             biscuit_roaring_remove(idx->neg_idx_legacy[ch].entries[j].bitmap, rec_idx);
-            biscuit_pending_mutate_structure(index, -1, false, BISCUIT_DIR_KIND_NEG,
-                                              ch, idx->neg_idx_legacy[ch].entries[j].pos,
-                                              rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                              pending_list_limit);
         }
         if (idx->char_cache_legacy[ch])
         {
             biscuit_roaring_remove(idx->char_cache_legacy[ch], rec_idx);
-            biscuit_pending_mutate_structure(index, -1, false, BISCUIT_DIR_KIND_CACHE,
-                                              ch, -1, rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                              pending_list_limit);
         }
 
         /* case-insensitive */
         for (j = 0; j < idx->pos_idx_lower[ch].count; j++)
         {
             biscuit_roaring_remove(idx->pos_idx_lower[ch].entries[j].bitmap, rec_idx);
-            biscuit_pending_mutate_structure(index, -1, true, BISCUIT_DIR_KIND_POS,
-                                              ch, idx->pos_idx_lower[ch].entries[j].pos,
-                                              rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                              pending_list_limit);
         }
         for (j = 0; j < idx->neg_idx_lower[ch].count; j++)
         {
             biscuit_roaring_remove(idx->neg_idx_lower[ch].entries[j].bitmap, rec_idx);
-            biscuit_pending_mutate_structure(index, -1, true, BISCUIT_DIR_KIND_NEG,
-                                              ch, idx->neg_idx_lower[ch].entries[j].pos,
-                                              rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                              pending_list_limit);
         }
         if (idx->char_cache_lower[ch])
         {
             biscuit_roaring_remove(idx->char_cache_lower[ch], rec_idx);
-            biscuit_pending_mutate_structure(index, -1, true, BISCUIT_DIR_KIND_CACHE,
-                                              ch, -1, rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                              pending_list_limit);
         }
     }
 
@@ -1233,16 +1199,10 @@ biscuit_remove_from_all_indices(Relation index, BiscuitIndex *idx,
             if (idx->length_bitmaps_legacy && idx->length_bitmaps_legacy[j])
             {
                 biscuit_roaring_remove(idx->length_bitmaps_legacy[j], rec_idx);
-                biscuit_pending_mutate_structure(index, -1, false, BISCUIT_DIR_KIND_LEN,
-                                                  -1, j, rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                                  pending_list_limit);
             }
             if (idx->length_ge_bitmaps_legacy && idx->length_ge_bitmaps_legacy[j])
             {
                 biscuit_roaring_remove(idx->length_ge_bitmaps_legacy[j], rec_idx);
-                biscuit_pending_mutate_structure(index, -1, false, BISCUIT_DIR_KIND_LEN_GE,
-                                                  -1, j, rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                                  pending_list_limit);
             }
         }
     }
@@ -1254,16 +1214,10 @@ biscuit_remove_from_all_indices(Relation index, BiscuitIndex *idx,
             if (idx->length_bitmaps_lower && idx->length_bitmaps_lower[j])
             {
                 biscuit_roaring_remove(idx->length_bitmaps_lower[j], rec_idx);
-                biscuit_pending_mutate_structure(index, -1, true, BISCUIT_DIR_KIND_LEN,
-                                                  -1, j, rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                                  pending_list_limit);
             }
             if (idx->length_ge_bitmaps_lower && idx->length_ge_bitmaps_lower[j])
             {
                 biscuit_roaring_remove(idx->length_ge_bitmaps_lower[j], rec_idx);
-                biscuit_pending_mutate_structure(index, -1, true, BISCUIT_DIR_KIND_LEN_GE,
-                                                  -1, j, rec_idx, BISCUIT_PENDING_OP_REMOVE,
-                                                  pending_list_limit);
             }
         }
     }
@@ -1283,22 +1237,291 @@ biscuit_remove_from_all_indices(Relation index, BiscuitIndex *idx,
 
 #include "biscuit_pattern.h"   /* for set_pos/neg_bitmap helpers etc */
 
+/* ================================================================
+ * IN-MEMORY FAN-OUT SINK
+ * ================================================================
+ *
+ * The write path's half of "one fan-out, three callers".
+ *
+ * biscuit_index_single_record() and biscuit_index_column_record() used to
+ * contain their own copy of the rule for which structures a string belongs
+ * to -- the same rule biscuit_fanout_string() now owns and the delta
+ * builder depends on. Two implementations of that rule is the risk the
+ * design lists as "delta and base disagree on fan-out", and it is a
+ * particularly unpleasant one: the two would not disagree loudly, they
+ * would disagree on some strings and not others, and the in-memory copy is
+ * what serves reads for the writing backend until its next reload.
+ *
+ * So these functions now drive the shared fan-out and only supply the sink.
+ * All this callback does is resolve an identity to the right in-memory
+ * bitmap, creating it if absent -- no decisions about what the identities
+ * ARE.
+ *
+ * Only ADD is ever emitted here. Removal is biscuit_remove_from_all_indices()'s
+ * job, and it enumerates cached structures rather than fanning out, because
+ * a cached bitmap is a concrete object with the slot concretely in it.
+ */
+
+typedef struct InMemFanoutCtx
+{
+    BiscuitIndex *idx;
+    ColumnIndex  *cidx;         /* NULL for the legacy single-column layout */
+    bool          do_lengths;   /* maintain LEN / LEN_GE arrays here? */
+} InMemFanoutCtx;
+
+/*
+ * Grow a (length_bitmaps, length_ge_bitmaps, max_length) triple so that
+ * `need` is a valid index, preserving the exact growth policy the four
+ * open-coded copies in biscuit_insert() used: new capacity (need + 1) * 2,
+ * LEN slots left NULL and created on demand, LEN_GE slots pre-created.
+ *
+ * max_length is the ALLOCATED CAPACITY of these arrays, not a
+ * "longest string seen" counter, and treating it as the latter is a bug
+ * with a history here: biscuit_index_single_record() used to bump it,
+ * which made biscuit_insert() read an already-bumped value as the old
+ * capacity, leaving a gap of uninitialized RoaringBitmap* entries that
+ * crashed inside libroaring on the next longer insert. Only this function
+ * moves it.
+ */
+static void
+inmem_grow_lengths(RoaringBitmap ***len_arr, RoaringBitmap ***len_ge_arr,
+                    int *max_length, int need)
+{
+    int old_ml = *max_length;
+    int new_ml;
+    int i;
+
+    if (need < old_ml)
+        return;
+
+    new_ml = (need + 1) * 2;
+
+    if (*len_arr)
+        *len_arr = (RoaringBitmap **) repalloc(*len_arr, new_ml * sizeof(RoaringBitmap *));
+    else
+        *len_arr = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
+
+    if (*len_ge_arr)
+        *len_ge_arr = (RoaringBitmap **) repalloc(*len_ge_arr, new_ml * sizeof(RoaringBitmap *));
+    else
+        *len_ge_arr = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
+
+    for (i = old_ml; i < new_ml; i++)
+    {
+        (*len_arr)[i]    = NULL;
+        (*len_ge_arr)[i] = biscuit_roaring_create();
+    }
+
+    *max_length = new_ml;
+}
+
+static void
+inmem_fanout_emit(void *ctxp,
+                  int32 col, bool is_lower, uint8 kind,
+                  int32 ch, int32 position, uint32 slot, uint8 op)
+{
+    InMemFanoutCtx *fc  = (InMemFanoutCtx *) ctxp;
+    BiscuitIndex   *idx = fc->idx;
+    ColumnIndex    *cidx = fc->cidx;
+    unsigned char   uch = (unsigned char) ch;
+    RoaringBitmap  *bm;
+
+    Assert(op == BISCUIT_PENDING_OP_ADD);
+    (void) op;
+    (void) col;   /* the ColumnIndex to write into is already resolved in ctx */
+
+    switch (kind)
+    {
+        case BISCUIT_DIR_KIND_POS:
+            if (cidx == NULL)
+            {
+                /*
+                 * index == NULL to the getter, deliberately: the write path
+                 * needs the raw live pointer to mutate in place, not a
+                 * reconciled copy. See biscuit_pattern.h's contract note.
+                 */
+                if (is_lower)
+                {
+                    bm = biscuit_get_pos_bitmap_lower(NULL, idx, uch, position);
+                    if (!bm)
+                    {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_pos_bitmap_lower(idx, uch, position, bm);
+                    }
+                }
+                else
+                {
+                    bm = biscuit_get_pos_bitmap(NULL, idx, uch, position);
+                    if (!bm)
+                    {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_pos_bitmap(idx, uch, position, bm);
+                    }
+                }
+            }
+            else
+            {
+                if (is_lower)
+                {
+                    bm = biscuit_get_col_pos_bitmap_lower(NULL, cidx, (int) col, uch, position);
+                    if (!bm)
+                    {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_col_pos_bitmap_lower(cidx, uch, position, bm);
+                    }
+                }
+                else
+                {
+                    bm = biscuit_get_col_pos_bitmap(NULL, cidx, (int) col, uch, position);
+                    if (!bm)
+                    {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_col_pos_bitmap(cidx, uch, position, bm);
+                    }
+                }
+            }
+            biscuit_roaring_add(bm, slot);
+            break;
+
+        case BISCUIT_DIR_KIND_NEG:
+            if (cidx == NULL)
+            {
+                if (is_lower)
+                {
+                    bm = biscuit_get_neg_bitmap_lower(NULL, idx, uch, position);
+                    if (!bm)
+                    {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_neg_bitmap_lower(idx, uch, position, bm);
+                    }
+                }
+                else
+                {
+                    bm = biscuit_get_neg_bitmap(NULL, idx, uch, position);
+                    if (!bm)
+                    {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_neg_bitmap(idx, uch, position, bm);
+                    }
+                }
+            }
+            else
+            {
+                if (is_lower)
+                {
+                    bm = biscuit_get_col_neg_bitmap_lower(NULL, cidx, (int) col, uch, position);
+                    if (!bm)
+                    {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_col_neg_bitmap_lower(cidx, uch, position, bm);
+                    }
+                }
+                else
+                {
+                    bm = biscuit_get_col_neg_bitmap(NULL, cidx, (int) col, uch, position);
+                    if (!bm)
+                    {
+                        bm = biscuit_roaring_create();
+                        biscuit_set_col_neg_bitmap(cidx, uch, position, bm);
+                    }
+                }
+            }
+            biscuit_roaring_add(bm, slot);
+            break;
+
+        case BISCUIT_DIR_KIND_CACHE:
+        {
+            RoaringBitmap **cache;
+
+            if (cidx == NULL)
+                cache = is_lower ? &idx->char_cache_lower[uch]
+                                 : &idx->char_cache_legacy[uch];
+            else
+                cache = is_lower ? &cidx->char_cache_lower[uch]
+                                 : &cidx->char_cache[uch];
+
+            if (*cache == NULL)
+                *cache = biscuit_roaring_create();
+            biscuit_roaring_add(*cache, slot);
+            break;
+        }
+
+        case BISCUIT_DIR_KIND_LEN:
+        case BISCUIT_DIR_KIND_LEN_GE:
+        {
+            RoaringBitmap ***len_arr;
+            RoaringBitmap ***len_ge_arr;
+            int             *max_length;
+
+            if (!fc->do_lengths)
+                break;
+
+            if (cidx == NULL)
+            {
+                if (is_lower)
+                {
+                    len_arr    = &idx->length_bitmaps_lower;
+                    len_ge_arr = &idx->length_ge_bitmaps_lower;
+                    max_length = &idx->max_length_lower;
+                }
+                else
+                {
+                    len_arr    = &idx->length_bitmaps_legacy;
+                    len_ge_arr = &idx->length_ge_bitmaps_legacy;
+                    max_length = &idx->max_length_legacy;
+                }
+            }
+            else
+            {
+                if (is_lower)
+                {
+                    len_arr    = &cidx->length_bitmaps_lower;
+                    len_ge_arr = &cidx->length_ge_bitmaps_lower;
+                    max_length = &cidx->max_length_lower;
+                }
+                else
+                {
+                    len_arr    = &cidx->length_bitmaps;
+                    len_ge_arr = &cidx->length_ge_bitmaps;
+                    max_length = &cidx->max_length;
+                }
+            }
+
+            inmem_grow_lengths(len_arr, len_ge_arr, max_length, (int) position);
+
+            if (kind == BISCUIT_DIR_KIND_LEN)
+            {
+                if (!(*len_arr)[position])
+                    (*len_arr)[position] = biscuit_roaring_create();
+                biscuit_roaring_add((*len_arr)[position], slot);
+            }
+            else
+            {
+                if (!(*len_ge_arr)[position])
+                    (*len_ge_arr)[position] = biscuit_roaring_create();
+                biscuit_roaring_add((*len_ge_arr)[position], slot);
+            }
+            break;
+        }
+
+        default:
+            /* No other kind is a bitmap structure the fan-out can produce. */
+            break;
+    }
+}
+
 /*
  * Helper: add a single text record to the single-column (legacy) index.
  * Called both from biscuit_build()/biscuit_load_index() (one-time bulk
  * build/load) and from biscuit_insert() (steady-state CRUD).
  *
- * str / byte_len  : original (UTF-8) string
- * rec_idx         : slot in the index arrays to write into
- *
- * index / pending_list_limit: per the mutation contract, build/load
- * pass index == NULL to mean "populate the in-memory bitmaps only, no
- * durable pending-list append" -- biscuit_build() persists everything
- * in one bulk pass at the end instead (see biscuit_build()'s rewrite).
- * biscuit_insert() passes its Relation and the statement's cached
- * pending_list_limit (biscuit_read_pending_list_limit()), so every
- * biscuit_roaring_add() below is paired with a durable
- * biscuit_pending_mutate_structure() append.
+ * index == NULL means the build/load path. Two things follow from it:
+ * no durable pending-log append (biscuit_build() persists everything in
+ * one bulk pass at the end), and no LEN/LEN_GE maintenance here, because
+ * biscuit_build() has a dedicated length-bitmap pass that recomputes those
+ * arrays from scratch after every record is in. The steady-state insert
+ * path has no such pass, so it maintains them here -- which is where the
+ * four open-coded copies that used to live in biscuit_insert() went.
  */
 static void
 biscuit_index_single_record(Relation      index,
@@ -1308,71 +1531,32 @@ biscuit_index_single_record(Relation      index,
                              int           rec_idx,
                              uint32        pending_list_limit)
 {
-    int byte_pos  = 0;
-    int char_pos  = 0;
-    int char_count = biscuit_utf8_char_count(str, byte_len);
-    uint8 mode = idx->legacy_case_mode;
+    uint8          mode       = idx->legacy_case_mode;
+    int            char_count = biscuit_utf8_char_count(str, byte_len);
+    char          *str_lower  = NULL;
+    int            lower_len  = 0;
+    InMemFanoutCtx fc;
 
-    /* ---- Case-sensitive character indexing (LIKE-gated) ---- */
-    byte_pos = char_pos = 0;
-    while ((mode & BISCUIT_MODE_LIKE) && byte_pos < byte_len)
+    (void) pending_list_limit;   /* the row's single log record is appended
+                                   * by biscuit_insert(), after the row's
+                                   * text is durable -- not here, once per
+                                   * structure, as it used to be */
+
+    /*
+     * The lowercased copy is computed ONCE, here, and handed to the
+     * fan-out. It is never recomputed downstream: biscuit_str_tolower()
+     * calls PostgreSQL's collation-dependent lower(), so a second
+     * derivation of the same bytes -- in another backend, or on a standby
+     * running a different ICU/libc -- could disagree. The delta builder
+     * reads these bytes back from STRCACHE for the same reason.
+     */
+    if (mode & BISCUIT_MODE_ILIKE)
     {
-        unsigned char first_byte = (unsigned char) str[byte_pos];
-        int           char_len   = biscuit_utf8_char_length(first_byte);
-        int           b;
-
-        if (byte_pos + char_len > byte_len)
-            char_len = byte_len - byte_pos;
-
-        for (b = 0; b < char_len; b++)
-        {
-            unsigned char uch = (unsigned char) str[byte_pos + b];
-            RoaringBitmap *bm;
-            int remaining_chars;
-            int neg_offset;
-
-            /* positive position */
-            bm = biscuit_get_pos_bitmap(NULL /* raw live pointer, write path -- see biscuit_reconcile_pending() */, idx, uch, char_pos);
-            if (!bm) {
-                bm = biscuit_roaring_create();
-                biscuit_set_pos_bitmap(idx, uch, char_pos, bm);
-            }
-            biscuit_roaring_add(bm, rec_idx);
-            if (index != NULL)
-                biscuit_pending_mutate_structure(index, -1, false, BISCUIT_DIR_KIND_POS,
-                                                  uch, char_pos, rec_idx,
-                                                  BISCUIT_PENDING_OP_ADD, pending_list_limit);
-
-            /* negative position */
-            remaining_chars = biscuit_utf8_char_count(str + byte_pos, byte_len - byte_pos);
-            neg_offset = -remaining_chars;
-            bm = biscuit_get_neg_bitmap(NULL /* raw live pointer, write path -- see biscuit_reconcile_pending() */, idx, uch, neg_offset);
-            if (!bm) {
-                bm = biscuit_roaring_create();
-                biscuit_set_neg_bitmap(idx, uch, neg_offset, bm);
-            }
-            biscuit_roaring_add(bm, rec_idx);
-            if (index != NULL)
-                biscuit_pending_mutate_structure(index, -1, false, BISCUIT_DIR_KIND_NEG,
-                                                  uch, neg_offset, rec_idx,
-                                                  BISCUIT_PENDING_OP_ADD, pending_list_limit);
-
-            /* character cache */
-            if (!idx->char_cache_legacy[uch])
-                idx->char_cache_legacy[uch] = biscuit_roaring_create();
-            biscuit_roaring_add(idx->char_cache_legacy[uch], rec_idx);
-            if (index != NULL)
-                biscuit_pending_mutate_structure(index, -1, false, BISCUIT_DIR_KIND_CACHE,
-                                                  uch, -1, rec_idx,
-                                                  BISCUIT_PENDING_OP_ADD, pending_list_limit);
-        }
-
-        byte_pos += char_len;
-        char_pos++;
+        str_lower = biscuit_str_tolower(str, byte_len);
+        lower_len = (int) strlen(str_lower);
+        idx->data_cache_lower[rec_idx] = str_lower;
     }
-
-    /* ---- Case-insensitive character indexing (ILIKE-gated) ---- */
-    if (!(mode & BISCUIT_MODE_ILIKE))
+    else
     {
         /*
          * This column's opclass (biscuit_like_ops) never needs the
@@ -1381,82 +1565,15 @@ biscuit_index_single_record(Relation      index,
          */
         idx->data_cache_lower[rec_idx] = NULL;
     }
-    else
-    {
-        char *str_lower      = biscuit_str_tolower(str, byte_len);
-        int   lower_byte_len = strlen(str_lower);
-        int   lower_char_count = biscuit_utf8_char_count(str_lower, lower_byte_len);
-        (void) lower_char_count;  /* no longer used to bump idx->max_length_lower here; see note below */
 
-        idx->data_cache_lower[rec_idx] = str_lower;
+    fc.idx        = idx;
+    fc.cidx       = NULL;
+    fc.do_lengths = (index != NULL);
 
-        /*
-         * NOTE: do NOT bump idx->max_length_lower here.  This field is not
-         * a "largest string seen so far" scratch counter — it is the live
-         * allocated capacity of idx->length_bitmaps_lower/length_ge_bitmaps_lower.
-         * biscuit_build() recomputes it correctly from scratch after this
-         * function returns (see the dedicated length-bitmap pass), and
-         * biscuit_insert()'s growth block is the sole owner of keeping it
-         * in lockstep with the actual array size. Mutating it here made
-         * biscuit_insert() read an already-bumped value as "old capacity",
-         * leaving a gap of uninitialized RoaringBitmap* entries and
-         * crashing inside libroaring on the next insert of a longer string.
-         */
-
-        byte_pos = char_pos = 0;
-        while (byte_pos < lower_byte_len)
-        {
-            unsigned char first_byte = (unsigned char) str_lower[byte_pos];
-            int           char_len   = biscuit_utf8_char_length(first_byte);
-            int           b;
-
-            if (byte_pos + char_len > lower_byte_len)
-                char_len = lower_byte_len - byte_pos;
-
-            for (b = 0; b < char_len; b++)
-            {
-                unsigned char uch = (unsigned char) str_lower[byte_pos + b];
-                RoaringBitmap *bm;
-                int remaining_chars;
-                int neg_offset;
-
-                bm = biscuit_get_pos_bitmap_lower(NULL /* raw live pointer, write path -- see biscuit_reconcile_pending() */, idx, uch, char_pos);
-                if (!bm) {
-                    bm = biscuit_roaring_create();
-                    biscuit_set_pos_bitmap_lower(idx, uch, char_pos, bm);
-                }
-                biscuit_roaring_add(bm, rec_idx);
-                if (index != NULL)
-                    biscuit_pending_mutate_structure(index, -1, true, BISCUIT_DIR_KIND_POS,
-                                                      uch, char_pos, rec_idx,
-                                                      BISCUIT_PENDING_OP_ADD, pending_list_limit);
-
-                remaining_chars = biscuit_utf8_char_count(str_lower + byte_pos, lower_byte_len - byte_pos);
-                neg_offset = -remaining_chars;
-                bm = biscuit_get_neg_bitmap_lower(NULL /* raw live pointer, write path -- see biscuit_reconcile_pending() */, idx, uch, neg_offset);
-                if (!bm) {
-                    bm = biscuit_roaring_create();
-                    biscuit_set_neg_bitmap_lower(idx, uch, neg_offset, bm);
-                }
-                biscuit_roaring_add(bm, rec_idx);
-                if (index != NULL)
-                    biscuit_pending_mutate_structure(index, -1, true, BISCUIT_DIR_KIND_NEG,
-                                                      uch, neg_offset, rec_idx,
-                                                      BISCUIT_PENDING_OP_ADD, pending_list_limit);
-
-                if (!idx->char_cache_lower[uch])
-                    idx->char_cache_lower[uch] = biscuit_roaring_create();
-                biscuit_roaring_add(idx->char_cache_lower[uch], rec_idx);
-                if (index != NULL)
-                    biscuit_pending_mutate_structure(index, -1, true, BISCUIT_DIR_KIND_CACHE,
-                                                      uch, -1, rec_idx,
-                                                      BISCUIT_PENDING_OP_ADD, pending_list_limit);
-            }
-
-            byte_pos += char_len;
-            char_pos++;
-        }
-    }
+    biscuit_fanout_string(str, byte_len, str_lower, lower_len,
+                          BISCUIT_DIR_COL_LEGACY, mode, (uint32) rec_idx,
+                          -1, BISCUIT_PENDING_OP_ADD,
+                          inmem_fanout_emit, &fc);
 
     /* Track max case-sensitive character length */
     if (char_count > idx->max_len)
@@ -1466,27 +1583,11 @@ biscuit_index_single_record(Relation      index,
 /*
  * biscuit_index_column_record
  * ----------------------------
- * Populate all character-level and case-insensitive bitmaps for a single
- * string value into the ColumnIndex for column `col`.
+ * Multi-column analogue of biscuit_index_single_record(): populate every
+ * in-memory structure this string implies into column `col`'s ColumnIndex.
  *
- * This is the multi-column analogue of biscuit_index_single_record().
- * It uses the biscuit_set_col_*_bitmap helpers (static in biscuit_pattern.c
- * but inlined into this TU via the included header) which operate directly
- * on a ColumnIndex pointer rather than routing through the top-level
- * BiscuitIndex legacy fields.
- *
- * Parameters
- *   index    – Relation, or NULL for build/load's bulk in-memory-only
- *              mode (see biscuit_index_single_record()'s doc comment for
- *              the full index==NULL/pending_list_limit contract; identical
- *              here)
- *   idx      – the owning BiscuitIndex (needed for tolower utility)
- *   col      – column number (0-based) selecting column_indices[col]
- *   str      – original UTF-8 string (NOT NUL-terminated beyond byte_len)
- *   byte_len – byte length of str
- *   rec_idx  – record slot being indexed
- *   pending_list_limit – statement-cached BiscuitMetaPageData.pending_list_limit;
- *              ignored when index == NULL
+ * Same index == NULL contract, same do_lengths reasoning, same
+ * compute-lower-once-and-pass-it rule.
  */
 static void
 biscuit_index_column_record(Relation      index,
@@ -1497,164 +1598,56 @@ biscuit_index_column_record(Relation      index,
                              int           rec_idx,
                              uint32        pending_list_limit)
 {
-    ColumnIndex   *cidx       = &idx->column_indices[col];
-    int            byte_pos   = 0;
-    int            char_pos   = 0;
-    int            char_count = biscuit_utf8_char_count(str, byte_len);
-    uint8          mode       = idx->column_case_mode ? idx->column_case_mode[col] : BISCUIT_MODE_BOTH;
-    (void) char_count;  /* no longer used to bump cidx->max_length here; see note below */
+    ColumnIndex   *cidx      = &idx->column_indices[col];
+    uint8          mode      = idx->column_case_mode ? idx->column_case_mode[col]
+                                                     : BISCUIT_MODE_BOTH;
+    char          *str_lower = NULL;
+    int            lower_len = 0;
+    InMemFanoutCtx fc;
 
-    /* ----------------------------------------------------------------
-     * Case-sensitive pass (LIKE-gated)
-     * ---------------------------------------------------------------- */
-    byte_pos = char_pos = 0;
-    while ((mode & BISCUIT_MODE_LIKE) && byte_pos < byte_len)
-    {
-        unsigned char first_byte = (unsigned char) str[byte_pos];
-        int           char_len   = biscuit_utf8_char_length(first_byte);
-        int           b;
-
-        if (byte_pos + char_len > byte_len)
-            char_len = byte_len - byte_pos;
-
-        for (b = 0; b < char_len; b++)
-        {
-            unsigned char  uch = (unsigned char) str[byte_pos + b];
-            RoaringBitmap *bm;
-            int            remaining_chars;
-            int            neg_offset;
-
-            /* positive-position bitmap */
-            bm = biscuit_get_col_pos_bitmap(NULL /* raw live pointer, write path */, cidx, col, uch, char_pos);
-            if (!bm)
-            {
-                bm = biscuit_roaring_create();
-                biscuit_set_col_pos_bitmap(cidx, uch, char_pos, bm);
-            }
-            biscuit_roaring_add(bm, rec_idx);
-            if (index != NULL)
-                biscuit_pending_mutate_structure(index, col, false, BISCUIT_DIR_KIND_POS,
-                                                  uch, char_pos, rec_idx,
-                                                  BISCUIT_PENDING_OP_ADD, pending_list_limit);
-
-            /* negative-position bitmap */
-            remaining_chars = biscuit_utf8_char_count(str + byte_pos, byte_len - byte_pos);
-            neg_offset      = -remaining_chars;
-            bm = biscuit_get_col_neg_bitmap(NULL /* raw live pointer, write path */, cidx, col, uch, neg_offset);
-            if (!bm)
-            {
-                bm = biscuit_roaring_create();
-                biscuit_set_col_neg_bitmap(cidx, uch, neg_offset, bm);
-            }
-            biscuit_roaring_add(bm, rec_idx);
-            if (index != NULL)
-                biscuit_pending_mutate_structure(index, col, false, BISCUIT_DIR_KIND_NEG,
-                                                  uch, neg_offset, rec_idx,
-                                                  BISCUIT_PENDING_OP_ADD, pending_list_limit);
-
-            /* character-presence cache */
-            if (!cidx->char_cache[uch])
-                cidx->char_cache[uch] = biscuit_roaring_create();
-            biscuit_roaring_add(cidx->char_cache[uch], rec_idx);
-            if (index != NULL)
-                biscuit_pending_mutate_structure(index, col, false, BISCUIT_DIR_KIND_CACHE,
-                                                  uch, -1, rec_idx,
-                                                  BISCUIT_PENDING_OP_ADD, pending_list_limit);
-        }
-
-        byte_pos += char_len;
-        char_pos++;
-    }
+    (void) pending_list_limit;   /* see biscuit_index_single_record() */
 
     /*
-     * NOTE: do NOT bump cidx->max_length here.  See the identical note in
-     * biscuit_index_single_record() above: this field tracks the live
-     * allocated capacity of cidx->length_bitmaps/length_ge_bitmaps, not a
-     * scratch "longest string seen" counter. biscuit_build() recomputes it
-     * from scratch after this function returns; biscuit_insert()'s growth
-     * block is the sole owner of keeping it in lockstep with the actual
-     * array size.
+     * Prefer the lowercased copy the caller already computed and stored in
+     * column_data_cache_lower -- biscuit_insert() populates it before
+     * calling here, so recomputing would both waste a lower() call and
+     * risk two derivations of the same bytes. Fall back to computing it
+     * only on the build path, which does not pre-populate that array.
      */
-
-    /* ----------------------------------------------------------------
-     * Case-insensitive pass (ILIKE-gated)
-     * ---------------------------------------------------------------- */
     if (mode & BISCUIT_MODE_ILIKE)
     {
-        char *str_lower      = biscuit_str_tolower(str, byte_len);
-        int   lower_byte_len = (int) strlen(str_lower);
-        int   lower_char_count;
-
-        lower_char_count = biscuit_utf8_char_count(str_lower, lower_byte_len);
-        (void) lower_char_count;  /* no longer used to bump cidx->max_length_lower here; see note below */
-
-        /*
-         * NOTE: do NOT bump cidx->max_length_lower here, for the same
-         * reason as cidx->max_length above.
-         */
-
-        byte_pos = char_pos = 0;
-        while (byte_pos < lower_byte_len)
+        if (idx->column_data_cache_lower &&
+            idx->column_data_cache_lower[col] &&
+            idx->column_data_cache_lower[col][rec_idx])
         {
-            unsigned char first_byte = (unsigned char) str_lower[byte_pos];
-            int           char_len   = biscuit_utf8_char_length(first_byte);
-            int           b;
-
-            if (byte_pos + char_len > lower_byte_len)
-                char_len = lower_byte_len - byte_pos;
-
-            for (b = 0; b < char_len; b++)
-            {
-                unsigned char  uch = (unsigned char) str_lower[byte_pos + b];
-                RoaringBitmap *bm;
-                int            remaining_chars;
-                int            neg_offset;
-
-                /* positive-position (lower) */
-                bm = biscuit_get_col_pos_bitmap_lower(NULL /* raw live pointer, write path */, cidx, col, uch, char_pos);
-                if (!bm)
-                {
-                    bm = biscuit_roaring_create();
-                    biscuit_set_col_pos_bitmap_lower(cidx, uch, char_pos, bm);
-                }
-                biscuit_roaring_add(bm, rec_idx);
-                if (index != NULL)
-                    biscuit_pending_mutate_structure(index, col, true, BISCUIT_DIR_KIND_POS,
-                                                      uch, char_pos, rec_idx,
-                                                      BISCUIT_PENDING_OP_ADD, pending_list_limit);
-
-                /* negative-position (lower) */
-                remaining_chars = biscuit_utf8_char_count(str_lower + byte_pos,
-                                                           lower_byte_len - byte_pos);
-                neg_offset      = -remaining_chars;
-                bm = biscuit_get_col_neg_bitmap_lower(NULL /* raw live pointer, write path */, cidx, col, uch, neg_offset);
-                if (!bm)
-                {
-                    bm = biscuit_roaring_create();
-                    biscuit_set_col_neg_bitmap_lower(cidx, uch, neg_offset, bm);
-                }
-                biscuit_roaring_add(bm, rec_idx);
-                if (index != NULL)
-                    biscuit_pending_mutate_structure(index, col, true, BISCUIT_DIR_KIND_NEG,
-                                                      uch, neg_offset, rec_idx,
-                                                      BISCUIT_PENDING_OP_ADD, pending_list_limit);
-
-                /* character-presence cache (lower) */
-                if (!cidx->char_cache_lower[uch])
-                    cidx->char_cache_lower[uch] = biscuit_roaring_create();
-                biscuit_roaring_add(cidx->char_cache_lower[uch], rec_idx);
-                if (index != NULL)
-                    biscuit_pending_mutate_structure(index, col, true, BISCUIT_DIR_KIND_CACHE,
-                                                      uch, -1, rec_idx,
-                                                      BISCUIT_PENDING_OP_ADD, pending_list_limit);
-            }
-
-            byte_pos += char_len;
-            char_pos++;
+            str_lower = idx->column_data_cache_lower[col][rec_idx];
+            lower_len = (int) strlen(str_lower);
         }
-
-        pfree(str_lower);
+        else
+        {
+            str_lower = biscuit_str_tolower(str, byte_len);
+            lower_len = (int) strlen(str_lower);
+        }
     }
+
+    fc.idx        = idx;
+    fc.cidx       = cidx;
+    fc.do_lengths = (index != NULL);
+
+    biscuit_fanout_string(str, byte_len, str_lower, lower_len,
+                          (int32) col, mode, (uint32) rec_idx,
+                          -1, BISCUIT_PENDING_OP_ADD,
+                          inmem_fanout_emit, &fc);
+
+    /*
+     * Only free a copy this function made. When it came from
+     * column_data_cache_lower it belongs to idx and outlives us.
+     */
+    if (str_lower != NULL &&
+        !(idx->column_data_cache_lower &&
+          idx->column_data_cache_lower[col] &&
+          idx->column_data_cache_lower[col][rec_idx] == str_lower))
+        pfree(str_lower);
 }
 
 /*
@@ -2493,27 +2486,30 @@ biscuit_insert(Relation index,
     ItemPointerCopy(ht_ctid, &idx->tids[slot]);
 
     /*
-     * Batch this row's pending-log appends into one WAL record.
+     * NO ROW BATCH HERE ANY MORE.
      *
-     * Indexing one string emits POS/NEG/CACHE per character per case mode,
-     * plus LEN and one LEN_GE append per length threshold -- on the order
-     * of 8N+4 records for an N-character string. Unbatched, each was its
-     * own GenericXLog transaction, so each paid a full record header and
-     * block reference for a ~24-byte payload; the fixed overhead, not the
-     * data, dominated insert WAL. They all target the same pendlog tail
-     * page, so one open transaction across the row collapses them into a
-     * single record carrying the accumulated page delta.
+     * biscuit_pendlog_batch_begin()/_end() existed because indexing one
+     * string emitted POS/NEG/CACHE per character per case mode plus LEN
+     * and the LEN_GE ladder -- on the order of 8N+4 appends for an
+     * N-character string, each originally its own GenericXLog transaction
+     * paying a full record header and block reference for a ~24-byte
+     * payload. Holding one transaction open across the row collapsed them
+     * into a single WAL record carrying the accumulated page delta, and it
+     * had to defer the drain trigger to batch_end(), because draining
+     * under the tail page's content lock deadlocks.
      *
-     * biscuit_pendlog_batch_end() below is what actually finishes that
-     * transaction and releases the page, and it also runs the drain
-     * trigger that biscuit_pending_mutate_structure() defers while a batch
-     * is open (draining under the tail page's content lock would
-     * deadlock). It must therefore be reached on every path out of the row
-     * write; biscuit_insert has a single exit, and on an error unwind the
-     * buffer lock and GenericXLogState are released by resource-owner
-     * cleanup, so an abort is safe too.
+     * A row is now ONE record, so there is nothing left to batch: the
+     * mechanism would open a GenericXLog transaction, write eight bytes,
+     * and close it again. The append moved to the end of this function,
+     * after the row's text is durable (see there for why the ordering
+     * matters), and the compaction trigger fires from
+     * biscuit_pending_mutate_row() with none of our locks held -- which is
+     * precisely the condition batch_end() was arranging by hand.
+     *
+     * The machinery stays in biscuit_pendlog.c rather than being deleted:
+     * it is correct, it costs nothing unused, and a change that
+     * reintroduces multiple appends per row would want it back.
      */
-    biscuit_pendlog_batch_begin(index);
 
     /* Insert record data */
     if (idx->num_columns == 1)
@@ -2533,106 +2529,20 @@ biscuit_insert(Relation index,
              */
             biscuit_index_single_record(index, idx, str, byte_len, slot, pending_list_limit);
 
-            /* Grow length bitmaps if needed */
-            {
-                int cl = biscuit_utf8_char_count(str, byte_len);
-
-                if (idx->legacy_case_mode & BISCUIT_MODE_LIKE)
-                {
-                if (cl >= idx->max_length_legacy)
-                {
-                    int old_ml = idx->max_length_legacy;
-                    int new_ml = (cl + 1) * 2;
-
-                    /*
-                     * Belt-and-suspenders: these arrays are always allocated
-                     * by biscuit_load_index()/biscuit_build() before we get
-                     * here, but guard the repalloc/palloc0 choice anyway.
-                     */
-                    if (idx->length_bitmaps_legacy)
-                        idx->length_bitmaps_legacy    = (RoaringBitmap **) repalloc(idx->length_bitmaps_legacy,    new_ml * sizeof(RoaringBitmap *));
-                    else
-                        idx->length_bitmaps_legacy    = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
-
-                    if (idx->length_ge_bitmaps_legacy)
-                        idx->length_ge_bitmaps_legacy = (RoaringBitmap **) repalloc(idx->length_ge_bitmaps_legacy, new_ml * sizeof(RoaringBitmap *));
-                    else
-                        idx->length_ge_bitmaps_legacy = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
-
-                    for (int i = old_ml; i < new_ml; i++)
-                    {
-                        idx->length_bitmaps_legacy[i]    = NULL;
-                        idx->length_ge_bitmaps_legacy[i] = biscuit_roaring_create();
-                    }
-                    idx->max_length_legacy = new_ml;
-                }
-                if (!idx->length_bitmaps_legacy[cl])
-                    idx->length_bitmaps_legacy[cl] = biscuit_roaring_create();
-                biscuit_roaring_add(idx->length_bitmaps_legacy[cl], slot);
-                biscuit_pending_mutate_structure(index, -1, false, BISCUIT_DIR_KIND_LEN,
-                                                  -1, cl, slot, BISCUIT_PENDING_OP_ADD,
-                                                  pending_list_limit);
-                for (int i = 0; i <= cl && i < idx->max_length_legacy; i++)
-                {
-                    if (!idx->length_ge_bitmaps_legacy[i])
-                        idx->length_ge_bitmaps_legacy[i] = biscuit_roaring_create();
-                    biscuit_roaring_add(idx->length_ge_bitmaps_legacy[i], slot);
-                    biscuit_pending_mutate_structure(index, -1, false, BISCUIT_DIR_KIND_LEN_GE,
-                                                      -1, i, slot, BISCUIT_PENDING_OP_ADD,
-                                                      pending_list_limit);
-                }
-                }
-
-                /*
-                 * Lowercase length bitmaps (ILIKE-gated).
-                 * data_cache_lower[slot] was populated by biscuit_index_single_record
-                 * above -- which itself only fills it in when legacy_case_mode
-                 * includes BISCUIT_MODE_ILIKE (NULL otherwise), so this guard
-                 * already skips the block correctly for a LIKE-only column.
-                 */
-                if (idx->data_cache_lower[slot])
-                {
-                    int lbl = strlen(idx->data_cache_lower[slot]);
-                    int lcl = biscuit_utf8_char_count(idx->data_cache_lower[slot], lbl);
-                    if (lcl >= idx->max_length_lower)
-                    {
-                        int old_ml = idx->max_length_lower;
-                        int new_ml = (lcl + 1) * 2;
-
-                        if (idx->length_bitmaps_lower)
-                            idx->length_bitmaps_lower    = (RoaringBitmap **) repalloc(idx->length_bitmaps_lower,    new_ml * sizeof(RoaringBitmap *));
-                        else
-                            idx->length_bitmaps_lower    = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
-
-                        if (idx->length_ge_bitmaps_lower)
-                            idx->length_ge_bitmaps_lower = (RoaringBitmap **) repalloc(idx->length_ge_bitmaps_lower, new_ml * sizeof(RoaringBitmap *));
-                        else
-                            idx->length_ge_bitmaps_lower = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
-
-                        for (int i = old_ml; i < new_ml; i++)
-                        {
-                            idx->length_bitmaps_lower[i]    = NULL;
-                            idx->length_ge_bitmaps_lower[i] = biscuit_roaring_create();
-                        }
-                        idx->max_length_lower = new_ml;
-                    }
-                    if (!idx->length_bitmaps_lower[lcl])
-                        idx->length_bitmaps_lower[lcl] = biscuit_roaring_create();
-                    biscuit_roaring_add(idx->length_bitmaps_lower[lcl], slot);
-                    biscuit_pending_mutate_structure(index, -1, true, BISCUIT_DIR_KIND_LEN,
-                                                      -1, lcl, slot, BISCUIT_PENDING_OP_ADD,
-                                                      pending_list_limit);
-                    for (int i = 0; i <= lcl && i < idx->max_length_lower; i++)
-                    {
-                        if (!idx->length_ge_bitmaps_lower[i])
-                            idx->length_ge_bitmaps_lower[i] = biscuit_roaring_create();
-                        biscuit_roaring_add(idx->length_ge_bitmaps_lower[i], slot);
-                        biscuit_pending_mutate_structure(index, -1, true, BISCUIT_DIR_KIND_LEN_GE,
-                                                          -1, i, slot, BISCUIT_PENDING_OP_ADD,
-                                                          pending_list_limit);
-                    }
-                }
-            } /* end cl block */
+            /*
+             * The LEN / LEN_GE arrays used to be grown and populated here,
+             * in four near-identical open-coded blocks (case-sensitive and
+             * lowercase, times legacy and multi-column). They are now
+             * maintained by inmem_fanout_emit(), driven from
+             * biscuit_index_single_record() above via the same
+             * biscuit_fanout_string() the delta builder uses.
+             *
+             * That is the point of the extraction: the length ladder is
+             * part of what a string implies, so it has to come out of the
+             * same function as the character structures, or the delta and
+             * the base can disagree about a row's LEN_GE membership --
+             * which is exactly the membership NOT LIKE inverts against.
+             */
         }
         else
         {
@@ -2690,101 +2600,22 @@ biscuit_insert(Relation index,
                  * operating on this column's ColumnIndex (cidx) instead of
                  * the top-level idx fields.
                  */
-                {
-                    ColumnIndex *cidx = &idx->column_indices[col];
-                    int          cl   = biscuit_utf8_char_count(str, out_len);
-                    uint8        col_mode = idx->column_case_mode ? idx->column_case_mode[col] : BISCUIT_MODE_BOTH;
-
-                    if (col_mode & BISCUIT_MODE_LIKE)
-                    {
-                    if (cl >= cidx->max_length)
-                    {
-                        int old_ml = cidx->max_length;
-                        int new_ml = (cl + 1) * 2;
-
-                        if (cidx->length_bitmaps)
-                            cidx->length_bitmaps    = (RoaringBitmap **) repalloc(cidx->length_bitmaps,    new_ml * sizeof(RoaringBitmap *));
-                        else
-                            cidx->length_bitmaps    = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
-
-                        if (cidx->length_ge_bitmaps)
-                            cidx->length_ge_bitmaps = (RoaringBitmap **) repalloc(cidx->length_ge_bitmaps, new_ml * sizeof(RoaringBitmap *));
-                        else
-                            cidx->length_ge_bitmaps = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
-
-                        for (int i = old_ml; i < new_ml; i++)
-                        {
-                            cidx->length_bitmaps[i]    = NULL;
-                            cidx->length_ge_bitmaps[i] = biscuit_roaring_create();
-                        }
-                        cidx->max_length = new_ml;
-                    }
-                    if (!cidx->length_bitmaps[cl])
-                        cidx->length_bitmaps[cl] = biscuit_roaring_create();
-                    biscuit_roaring_add(cidx->length_bitmaps[cl], slot);
-                    biscuit_pending_mutate_structure(index, col, false, BISCUIT_DIR_KIND_LEN,
-                                                      -1, cl, slot, BISCUIT_PENDING_OP_ADD,
-                                                      pending_list_limit);
-                    for (int i = 0; i <= cl && i < cidx->max_length; i++)
-                    {
-                        if (!cidx->length_ge_bitmaps[i])
-                            cidx->length_ge_bitmaps[i] = biscuit_roaring_create();
-                        biscuit_roaring_add(cidx->length_ge_bitmaps[i], slot);
-                        biscuit_pending_mutate_structure(index, col, false, BISCUIT_DIR_KIND_LEN_GE,
-                                                          -1, i, slot, BISCUIT_PENDING_OP_ADD,
-                                                          pending_list_limit);
-                    }
-                    }
-
-                    /* Lowercase length bitmaps (ILIKE-gated via column_data_cache_lower being NULL when disabled) */
-                    if (idx->column_data_cache_lower)
-                    {
-                        const char *lstr = idx->column_data_cache_lower[col][slot];
-                        if (lstr)
-                        {
-                            int lbl = strlen(lstr);
-                            int lcl = biscuit_utf8_char_count(lstr, lbl);
-
-                            if (lcl >= cidx->max_length_lower)
-                            {
-                                int old_ml = cidx->max_length_lower;
-                                int new_ml = (lcl + 1) * 2;
-
-                                if (cidx->length_bitmaps_lower)
-                                    cidx->length_bitmaps_lower    = (RoaringBitmap **) repalloc(cidx->length_bitmaps_lower,    new_ml * sizeof(RoaringBitmap *));
-                                else
-                                    cidx->length_bitmaps_lower    = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
-
-                                if (cidx->length_ge_bitmaps_lower)
-                                    cidx->length_ge_bitmaps_lower = (RoaringBitmap **) repalloc(cidx->length_ge_bitmaps_lower, new_ml * sizeof(RoaringBitmap *));
-                                else
-                                    cidx->length_ge_bitmaps_lower = (RoaringBitmap **) palloc0(new_ml * sizeof(RoaringBitmap *));
-
-                                for (int i = old_ml; i < new_ml; i++)
-                                {
-                                    cidx->length_bitmaps_lower[i]    = NULL;
-                                    cidx->length_ge_bitmaps_lower[i] = biscuit_roaring_create();
-                                }
-                                cidx->max_length_lower = new_ml;
-                            }
-                            if (!cidx->length_bitmaps_lower[lcl])
-                                cidx->length_bitmaps_lower[lcl] = biscuit_roaring_create();
-                            biscuit_roaring_add(cidx->length_bitmaps_lower[lcl], slot);
-                            biscuit_pending_mutate_structure(index, col, true, BISCUIT_DIR_KIND_LEN,
-                                                              -1, lcl, slot, BISCUIT_PENDING_OP_ADD,
-                                                              pending_list_limit);
-                            for (int i = 0; i <= lcl && i < cidx->max_length_lower; i++)
-                            {
-                                if (!cidx->length_ge_bitmaps_lower[i])
-                                    cidx->length_ge_bitmaps_lower[i] = biscuit_roaring_create();
-                                biscuit_roaring_add(cidx->length_ge_bitmaps_lower[i], slot);
-                                biscuit_pending_mutate_structure(index, col, true, BISCUIT_DIR_KIND_LEN_GE,
-                                                                  -1, i, slot, BISCUIT_PENDING_OP_ADD,
-                                                                  pending_list_limit);
-                            }
-                        }
-                    }
-                } /* end multi-column length-bitmap block */
+                /*
+                 * Multi-column LEN / LEN_GE: likewise now maintained by
+                 * inmem_fanout_emit() from biscuit_index_column_record(),
+                 * not open-coded here.
+                 *
+                 * Worth noting what this block originally fixed, since the
+                 * replacement must keep fixing it:
+                 * biscuit_index_column_record() used to maintain only the
+                 * per-character structures, so newly inserted rows were
+                 * invisible to any length-based predicate on the
+                 * multi-column scan path -- "insert is on disk and in
+                 * data_cache, but queries don't see it". Routing lengths
+                 * through the shared fan-out means that class of omission
+                 * cannot recur: a caller either gets the whole fan-out or
+                 * none of it.
+                 */
             }
             else
             {
@@ -2794,14 +2625,6 @@ biscuit_insert(Relation index,
             }
         }
     }
-
-    /*
-     * Close the row batch: finishes the single GenericXLog transaction
-     * covering every pending-log append made above, releases the tail
-     * page, and then -- holding none of our locks -- runs any drain that
-     * was deferred during the row.
-     */
-    biscuit_pendlog_batch_end();
 
     if (!found_existing)
         idx->insert_count++;
@@ -2867,6 +2690,34 @@ biscuit_insert(Relation index,
                                                found_existing
                                                    ? BISCUIT_SLOT_WRITE_INPLACE
                                                    : BISCUIT_SLOT_WRITE_FRESH);
+
+    /*
+     * NOW record the fact of the row in the pending log: eight bytes,
+     * once, however many columns and characters it has.
+     *
+     * ORDER MATTERS, and it is why this sits here rather than up beside
+     * the bitmap mutations where its per-structure predecessor lived. The
+     * log record is a pointer to text -- whoever reads it goes to STRCACHE
+     * for the bytes and fans them out. Writing the pointer before the text
+     * opens a window in which the log names a slot that has no text yet,
+     * and a crash inside that window leaves a durable record whose
+     * expansion produces nothing.
+     *
+     * That window happens to be survivable: an expansion that finds no
+     * text emits no identities, and a crash before this statement commits
+     * means the heap tuple is not visible either, so an unindexed
+     * invisible row is not a wrong answer. But it is survivable by
+     * accident rather than by construction, and the other ordering costs
+     * nothing. Text first, then the record that refers to it.
+     *
+     * On the UPDATE path this is the ADD half. The REMOVE half was already
+     * appended by biscuit_remove_from_all_indices() above -- crucially,
+     * before the new text overwrote the old in STRCACHE, though the
+     * reconciler does not depend on that, since it withdraws the slot from
+     * base wholesale rather than by re-deriving what it used to match.
+     */
+    biscuit_pending_mutate_row(index, (uint32) slot,
+                                BISCUIT_PENDING_OP_ADD, pending_list_limit);
 
     biscuit_mark_row_identity_dirty(RelationGetRelid(index));
 
