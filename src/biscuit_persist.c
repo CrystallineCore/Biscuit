@@ -301,7 +301,8 @@ biscuit_rowstore_alloc_unlock(Relation index)
  * (its build-time bulk-path sibling), but biscuit_persist_row_identity_write_record()
  * below needs it too and is declared first to sit next to biscuit_persist_write_tid(). */
 static void biscuit_persist_row_identity_write_str(Relation index, int32 col, bool is_lower,
-                                                     uint32 slot_idx, const char *str);
+                                                     uint32 slot_idx, const char *str,
+                                                     BiscuitXlogBatch *batch);
 
 /* ================================================================
  * HEADER / TIDS -- directory-aware wrappers around biscuit_rowstore.c's
@@ -346,7 +347,7 @@ biscuit_persist_write_header_blob(Relation index, const char *data, uint32 len)
  */
 static void
 biscuit_persist_write_tid(Relation index, uint32 slot_idx, const ItemPointerData *tid,
-                           BiscuitSlotWriteMode mode)
+                           BiscuitSlotWriteMode mode, BiscuitXlogBatch *batch)
 {
     BiscuitDirEntry    entry;
     BiscuitDirEntryRef ref;
@@ -362,7 +363,7 @@ biscuit_persist_write_tid(Relation index, uint32 slot_idx, const ItemPointerData
     }
 
     pagedir_root = entry.blob_head;
-    biscuit_rowstore_tid_write(index, &pagedir_root, slot_idx, tid, mode);
+    biscuit_rowstore_tid_write(index, &pagedir_root, slot_idx, tid, mode, batch);
 
     if (pagedir_root != entry.blob_head)
     {
@@ -381,6 +382,8 @@ void
 biscuit_persist_row_identity_write_record(Relation index, BiscuitIndex *idx, uint32 slot_idx,
                                            BiscuitSlotWriteMode mode)
 {
+    BiscuitXlogBatch batch;
+
     /*
      * Serialize the whole sequence, not just the page allocations inside
      * it. Every one of the calls below is a find-or-create against shared
@@ -390,16 +393,31 @@ biscuit_persist_row_identity_write_record(Relation index, BiscuitIndex *idx, uin
      */
     biscuit_rowstore_alloc_lock(index);
 
-    biscuit_persist_write_tid(index, slot_idx, &idx->tids[slot_idx], mode);
+    /*
+     * One shared GenericXLogState for this row's steady-state writes
+     * (TID slot, each column's raw/lower STRCACHE slot), instead of one
+     * GenericXLogStart/Finish pair per page. See BiscuitXlogBatch's
+     * comment in biscuit_common.h for the mechanics and the shape of
+     * the WAL-record-count reduction this buys. A rollover inside any
+     * one of the calls below (a fresh TIDSLOT/STRPTR logical page, a
+     * fresh STRHEAP tail) transparently flushes this batch first and
+     * runs as its own isolated transaction, same as before batching
+     * existed -- the caller here doesn't need to know which happened.
+     */
+    biscuit_xlog_batch_init(&batch, index);
+
+    biscuit_persist_write_tid(index, slot_idx, &idx->tids[slot_idx], mode, &batch);
 
     if (idx->num_columns == 1)
     {
         biscuit_persist_row_identity_write_str(index, BISCUIT_DIR_COL_LEGACY, false,
                                                 slot_idx,
-                                                idx->data_cache ? idx->data_cache[slot_idx] : NULL);
+                                                idx->data_cache ? idx->data_cache[slot_idx] : NULL,
+                                                &batch);
         biscuit_persist_row_identity_write_str(index, BISCUIT_DIR_COL_LEGACY, true,
                                                 slot_idx,
-                                                idx->data_cache_lower ? idx->data_cache_lower[slot_idx] : NULL);
+                                                idx->data_cache_lower ? idx->data_cache_lower[slot_idx] : NULL,
+                                                &batch);
     }
     else
     {
@@ -409,12 +427,19 @@ biscuit_persist_row_identity_write_record(Relation index, BiscuitIndex *idx, uin
         {
             biscuit_persist_row_identity_write_str(index, col, false, slot_idx,
                                                     idx->column_data_cache[col] ?
-                                                        idx->column_data_cache[col][slot_idx] : NULL);
+                                                        idx->column_data_cache[col][slot_idx] : NULL,
+                                                    &batch);
             biscuit_persist_row_identity_write_str(index, col, true, slot_idx,
                                                     idx->column_data_cache_lower[col] ?
-                                                        idx->column_data_cache_lower[col][slot_idx] : NULL);
+                                                        idx->column_data_cache_lower[col][slot_idx] : NULL,
+                                                    &batch);
         }
     }
+
+    /* Flush whatever the batch is still holding -- there is always at
+     * least the TID write left open here in the (common) all-in-place,
+     * no-rollover case. */
+    biscuit_xlog_batch_flush(&batch);
 
     biscuit_rowstore_alloc_unlock(index);
 }
@@ -511,7 +536,8 @@ biscuit_persist_save_length_arrays(Relation index, int32 col, bool is_lower,
  */
 static void
 biscuit_persist_row_identity_write_str(Relation index, int32 col, bool is_lower,
-                                        uint32 slot_idx, const char *str)
+                                        uint32 slot_idx, const char *str,
+                                        BiscuitXlogBatch *batch)
 {
     BiscuitDirEntry     entry;
     BiscuitDirEntryRef  ref;
@@ -531,7 +557,8 @@ biscuit_persist_row_identity_write_str(Relation index, int32 col, bool is_lower,
     heap_tail = entry.strheap_tail;
 
     biscuit_rowstore_str_write(index, &ptr_root, &heap_head, &heap_tail,
-                                slot_idx, str, str ? (int32) strlen(str) : -1);
+                                slot_idx, str, str ? (int32) strlen(str) : -1,
+                                batch);
 
     changed = (ptr_root != entry.blob_head ||
                heap_head != entry.strheap_head ||
@@ -554,10 +581,18 @@ biscuit_persist_save_strcache(Relation index, int32 col,
 
     for (i = 0; i < num_records; i++)
     {
+        /*
+         * NULL batch: this is the build-time bulk path (index build,
+         * REINDEX), which already amortizes its cost across the whole
+         * relation scan rather than per-row, and isn't the steady-state
+         * insert path the batching in biscuit_persist_row_identity_
+         * write_record() targets. Left as one transaction per page, same
+         * as before.
+         */
         biscuit_persist_row_identity_write_str(index, col, false, (uint32) i,
-                                                cache ? cache[i] : NULL);
+                                                cache ? cache[i] : NULL, NULL);
         biscuit_persist_row_identity_write_str(index, col, true, (uint32) i,
-                                                cache_lower ? cache_lower[i] : NULL);
+                                                cache_lower ? cache_lower[i] : NULL, NULL);
     }
 }
 
@@ -611,7 +646,7 @@ biscuit_persist_save(Oid indexoid, BiscuitIndex *idx)
              * check applies.
              */
             biscuit_persist_write_tid(index, (uint32) i, &idx->tids[i],
-                                       BISCUIT_SLOT_WRITE_INPLACE);
+                                       BISCUIT_SLOT_WRITE_INPLACE, NULL);
 
         /* ---- tombstones ---- */
         biscuit_persist_write_bitmap(index, BISCUIT_DIR_COL_SINGLETON, false,

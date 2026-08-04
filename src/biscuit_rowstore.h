@@ -101,6 +101,13 @@
  * (biscuit_persist_row_identity_write_record()) must persist the new
  * value back into the directory entry.
  *
+ * batch, if non-NULL, folds this write's page(s) into the caller's
+ * shared BiscuitXlogBatch instead of opening a standalone
+ * GenericXLogStart/Finish pair -- see BiscuitXlogBatch's comment in
+ * biscuit_common.h. Pass NULL for the original one-transaction-per-page
+ * behavior (used by biscuit_persist_save()'s whole-snapshot bulk
+ * rewrite, which has no per-row batch to join).
+ *
  * Covers all three mutation cases the implementation summary calls out
  * uniformly: a slot on an already-allocated logical page is a single
  * in-place GenericXLog write to that one TIDSLOT page; a slot whose
@@ -123,7 +130,8 @@ extern void biscuit_rowstore_tid_write(Relation index,
                                         BlockNumber *pagedir_root,
                                         uint32 slot_idx,
                                         const ItemPointerData *tid,
-                                        BiscuitSlotWriteMode mode);
+                                        BiscuitSlotWriteMode mode,
+                                        BiscuitXlogBatch *batch);
 
 /*
  * biscuit_rowstore_tid_read
@@ -163,6 +171,11 @@ extern void biscuit_rowstore_tid_read_all(Relation index,
  * biscuit_common.h); all three are in/out for the same reason as
  * biscuit_rowstore_tid_write()'s pagedir_root.
  *
+ * batch: same contract as biscuit_rowstore_tid_write()'s batch parameter
+ * above -- non-NULL folds the heap-append and pointer-slot writes into
+ * the caller's shared transaction, NULL keeps the original standalone
+ * behavior.
+ *
  * len < 0 means NULL (absent) -- writes a BiscuitStrPtr with
  * blkno == InvalidBlockNumber and touches neither the pointer-array
  * PAGEDIR nor the value heap beyond the one pointer-slot write. len >= 0
@@ -179,7 +192,8 @@ extern void biscuit_rowstore_str_write(Relation index,
                                         BlockNumber *heap_tail,
                                         uint32 slot_idx,
                                         const char *str,
-                                        int32 len);
+                                        int32 len,
+                                        BiscuitXlogBatch *batch);
 
 /*
  * biscuit_rowstore_str_read

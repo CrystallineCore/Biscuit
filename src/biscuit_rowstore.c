@@ -17,6 +17,64 @@
 
 #define BiscuitPageDataPtr(page)  ((char *) (page) + SizeOfPageHeaderData)
 
+/* ================================================================
+ * XLOG BATCHING -- see biscuit_common.h's BiscuitXlogBatch comment for
+ * the full rationale. init()/flush() are the two calls a driving caller
+ * (biscuit_persist.c) needs; biscuit_xlog_batch_register() is the one
+ * every batch-aware steady-state write in this file funnels through, and
+ * stays static/internal to this translation unit.
+ * ================================================================ */
+
+void
+biscuit_xlog_batch_init(BiscuitXlogBatch *batch, Relation index)
+{
+    batch->index = index;
+    batch->state = NULL;
+    batch->nbufs = 0;
+}
+
+void
+biscuit_xlog_batch_flush(BiscuitXlogBatch *batch)
+{
+    int i;
+
+    if (batch->state == NULL)
+        return;
+
+    GenericXLogFinish(batch->state);
+    for (i = 0; i < batch->nbufs; i++)
+        UnlockReleaseBuffer(batch->bufs[i]);
+
+    batch->state = NULL;
+    batch->nbufs = 0;
+}
+
+/*
+ * Register buf -- already pinned and exclusive-locked by the caller --
+ * into batch, returning the writable page. Starts a new GenericXLogState
+ * if batch is empty; flushes and starts a fresh one first if batch is
+ * already holding MAX_GENERIC_XLOG_PAGES buffers.
+ *
+ * Ownership transfers to the batch on a successful call: the caller must
+ * NOT call GenericXLogFinish() or UnlockReleaseBuffer() on buf itself.
+ * biscuit_xlog_batch_flush() does both, once, for every buffer the batch
+ * is holding, whenever it is next called (explicitly by the driving
+ * caller, or implicitly by a later registration that overflows the
+ * batch).
+ */
+static Page
+biscuit_xlog_batch_register(BiscuitXlogBatch *batch, Buffer buf, int flags)
+{
+    if (batch->nbufs >= MAX_GENERIC_XLOG_PAGES)
+        biscuit_xlog_batch_flush(batch);
+
+    if (batch->state == NULL)
+        batch->state = GenericXLogStart(batch->index);
+
+    batch->bufs[batch->nbufs++] = buf;
+    return GenericXLogRegisterBuffer(batch->state, buf, flags);
+}
+
 static inline void
 BiscuitPageSetLower(Page page, Size used)
 {
@@ -487,7 +545,7 @@ biscuit_pagedir_free_all(Relation index, BlockNumber root)
 void
 biscuit_rowstore_tid_write(Relation index, BlockNumber *pagedir_root,
                             uint32 slot_idx, const ItemPointerData *tid,
-                            BiscuitSlotWriteMode mode)
+                            BiscuitSlotWriteMode mode, BiscuitXlogBatch *batch)
 {
     uint32      slots_per_page = BiscuitTidSlotsPerPage(BLCKSZ);
     uint32      logical        = slot_idx / slots_per_page;
@@ -565,16 +623,35 @@ biscuit_rowstore_tid_write(Relation index, BlockNumber *pagedir_root,
             }
         }
 
-        state = GenericXLogStart(index);
-        page  = GenericXLogRegisterBuffer(state, buf, 0);
+        if (batch != NULL)
+        {
+            /*
+             * Batched: register into the caller's shared transaction and
+             * leave buf pinned+locked. biscuit_xlog_batch_flush() (called
+             * by the driving caller once the whole row is written, or
+             * earlier if the batch overflows) owns GenericXLogFinish() and
+             * UnlockReleaseBuffer() for this buffer.
+             */
+            page = biscuit_xlog_batch_register(batch, buf, 0);
 
-        slots         = (ItemPointerData *) BiscuitPageDataPtr(page);
-        slots[offset] = *tid;
+            slots         = (ItemPointerData *) BiscuitPageDataPtr(page);
+            slots[offset] = *tid;
 
-        BiscuitPageBumpLower(page, (Size) (offset + 1) * sizeof(ItemPointerData));
+            BiscuitPageBumpLower(page, (Size) (offset + 1) * sizeof(ItemPointerData));
+        }
+        else
+        {
+            state = GenericXLogStart(index);
+            page  = GenericXLogRegisterBuffer(state, buf, 0);
 
-        GenericXLogFinish(state);
-        UnlockReleaseBuffer(buf);
+            slots         = (ItemPointerData *) BiscuitPageDataPtr(page);
+            slots[offset] = *tid;
+
+            BiscuitPageBumpLower(page, (Size) (offset + 1) * sizeof(ItemPointerData));
+
+            GenericXLogFinish(state);
+            UnlockReleaseBuffer(buf);
+        }
     }
 }
 
@@ -673,7 +750,8 @@ biscuit_rowstore_free_tid_chain(Relation index, BlockNumber pagedir_root)
 
 static void
 biscuit_strptr_write(Relation index, BlockNumber *pagedir_root,
-                      uint32 slot_idx, const BiscuitStrPtr *sp)
+                      uint32 slot_idx, const BiscuitStrPtr *sp,
+                      BiscuitXlogBatch *batch)
 {
     uint32      ptrs_per_page = BiscuitStrPtrSlotsPerPage(BLCKSZ);
     uint32      logical       = slot_idx / ptrs_per_page;
@@ -693,16 +771,31 @@ biscuit_strptr_write(Relation index, BlockNumber *pagedir_root,
         BiscuitStrPtr    *slots;
 
         LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-        state = GenericXLogStart(index);
-        page  = GenericXLogRegisterBuffer(state, buf, 0);
 
-        slots         = (BiscuitStrPtr *) BiscuitPageDataPtr(page);
-        slots[offset] = *sp;
+        if (batch != NULL)
+        {
+            /* See biscuit_rowstore_tid_write()'s batched branch above --
+             * same ownership transfer, buf stays pinned+locked. */
+            page = biscuit_xlog_batch_register(batch, buf, 0);
 
-        BiscuitPageBumpLower(page, (Size) (offset + 1) * sizeof(BiscuitStrPtr));
+            slots         = (BiscuitStrPtr *) BiscuitPageDataPtr(page);
+            slots[offset] = *sp;
 
-        GenericXLogFinish(state);
-        UnlockReleaseBuffer(buf);
+            BiscuitPageBumpLower(page, (Size) (offset + 1) * sizeof(BiscuitStrPtr));
+        }
+        else
+        {
+            state = GenericXLogStart(index);
+            page  = GenericXLogRegisterBuffer(state, buf, 0);
+
+            slots         = (BiscuitStrPtr *) BiscuitPageDataPtr(page);
+            slots[offset] = *sp;
+
+            BiscuitPageBumpLower(page, (Size) (offset + 1) * sizeof(BiscuitStrPtr));
+
+            GenericXLogFinish(state);
+            UnlockReleaseBuffer(buf);
+        }
     }
 }
 
@@ -745,7 +838,8 @@ biscuit_strptr_read(Relation index, BlockNumber pagedir_root, uint32 slot_idx)
 static void
 biscuit_strheap_append(Relation index, BlockNumber *head, BlockNumber *tail,
                         const char *data, uint32 len,
-                        BlockNumber *out_blkno, uint32 *out_offset)
+                        BlockNumber *out_blkno, uint32 *out_offset,
+                        BiscuitXlogBatch *batch)
 {
     Size   specialSize = MAXALIGN(sizeof(BiscuitPageOpaqueData));
     uint32 payload_max = BiscuitStrHeapMaxPayload(BLCKSZ);
@@ -754,12 +848,23 @@ biscuit_strheap_append(Relation index, BlockNumber *head, BlockNumber *tail,
 
     if (*head == InvalidBlockNumber)
     {
-        Buffer                buf = biscuit_page_alloc(index, BISCUIT_PAGE_STRHEAP);
+        /*
+         * Allocating the chain's first page, same as biscuit_pagedir_
+         * ensure()'s fresh-logical-page branch and the rollover branch
+         * further down: its own self-contained transaction, not folded
+         * into an in-progress batch (see BiscuitXlogBatch's comment in
+         * biscuit_common.h). Flush first so the two stay disjoint.
+         */
+        Buffer                buf;
         GenericXLogState     *state;
         Page                  page;
         BiscuitStrHeapHeader *hdr;
         BiscuitPageOpaque     opaque;
 
+        if (batch != NULL)
+            biscuit_xlog_batch_flush(batch);
+
+        buf   = biscuit_page_alloc(index, BISCUIT_PAGE_STRHEAP);
         state = GenericXLogStart(index);
         page  = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
 
@@ -799,26 +904,54 @@ biscuit_strheap_append(Relation index, BlockNumber *head, BlockNumber *tail,
 
         if ((Size) hdr->used + len <= hdr->avail)
         {
-            GenericXLogState     *state = GenericXLogStart(index);
-            Page                   p2   = GenericXLogRegisterBuffer(state, buf, 0);
-            BiscuitStrHeapHeader  *h2   = (BiscuitStrHeapHeader *) BiscuitPageDataPtr(p2);
-            uint32                 off  = h2->used;
+            if (batch != NULL)
+            {
+                /* See biscuit_rowstore_tid_write()'s batched branch --
+                 * same ownership transfer, buf stays pinned+locked. */
+                Page                   p2  = biscuit_xlog_batch_register(batch, buf, 0);
+                BiscuitStrHeapHeader  *h2  = (BiscuitStrHeapHeader *) BiscuitPageDataPtr(p2);
+                uint32                 off = h2->used;
 
-            if (len > 0)
-                memcpy((char *) h2 + MAXALIGN(sizeof(BiscuitStrHeapHeader)) + off, data, len);
-            h2->used += len;
+                if (len > 0)
+                    memcpy((char *) h2 + MAXALIGN(sizeof(BiscuitStrHeapHeader)) + off, data, len);
+                h2->used += len;
 
-            BiscuitPageSetLower(p2, MAXALIGN(sizeof(BiscuitStrHeapHeader)) + h2->used);
+                BiscuitPageSetLower(p2, MAXALIGN(sizeof(BiscuitStrHeapHeader)) + h2->used);
 
-            GenericXLogFinish(state);
-            *out_blkno  = *tail;
-            *out_offset = off;
-            UnlockReleaseBuffer(buf);
-            return;
+                *out_blkno  = *tail;
+                *out_offset = off;
+                return;
+            }
+            else
+            {
+                GenericXLogState     *state = GenericXLogStart(index);
+                Page                   p2   = GenericXLogRegisterBuffer(state, buf, 0);
+                BiscuitStrHeapHeader  *h2   = (BiscuitStrHeapHeader *) BiscuitPageDataPtr(p2);
+                uint32                 off  = h2->used;
+
+                if (len > 0)
+                    memcpy((char *) h2 + MAXALIGN(sizeof(BiscuitStrHeapHeader)) + off, data, len);
+                h2->used += len;
+
+                BiscuitPageSetLower(p2, MAXALIGN(sizeof(BiscuitStrHeapHeader)) + h2->used);
+
+                GenericXLogFinish(state);
+                *out_blkno  = *tail;
+                *out_offset = off;
+                UnlockReleaseBuffer(buf);
+                return;
+            }
         }
 
-        /* Tail full: allocate + link a new tail page, same nested-lock
-         * pattern as biscuit_pendlog_append()'s page-rollover branch. */
+        /*
+         * Tail full: allocate + link a new tail page, same nested-lock
+         * pattern as biscuit_pendlog_append()'s page-rollover branch --
+         * its own self-contained transaction, not folded into an
+         * in-progress batch (see BiscuitXlogBatch's comment in
+         * biscuit_common.h). Flush first so the two stay disjoint.
+         */
+        if (batch != NULL)
+            biscuit_xlog_batch_flush(batch);
         {
             Buffer                 newbuf = biscuit_page_alloc(index, BISCUIT_PAGE_STRHEAP);
             GenericXLogState      *state;
@@ -869,7 +1002,8 @@ biscuit_strheap_append(Relation index, BlockNumber *head, BlockNumber *tail,
 void
 biscuit_rowstore_str_write(Relation index, BlockNumber *ptr_pagedir_root,
                             BlockNumber *heap_head, BlockNumber *heap_tail,
-                            uint32 slot_idx, const char *str, int32 len)
+                            uint32 slot_idx, const char *str, int32 len,
+                            BiscuitXlogBatch *batch)
 {
     BiscuitStrPtr sp;
 
@@ -887,9 +1021,16 @@ biscuit_rowstore_str_write(Relation index, BlockNumber *ptr_pagedir_root,
 
         if ((uint32) len > payload_max)
         {
-            /* Oversized value: dedicated chunked blob chain (existing
+            /*
+             * Oversized value: dedicated chunked blob chain (existing
              * biscuit_page_write_blob() primitive already handles
-             * arbitrary length). */
+             * arbitrary length, and already combines its own chunk-chain
+             * buffers per-transaction -- see biscuit_blob.c). Not
+             * batch-aware: this is not the steady-state single-page write
+             * the batch targets, and an oversized value is rare enough
+             * (and its own chunk chain already amortized) that folding it
+             * in would add complexity for no measurable gain.
+             */
             BlockNumber blob_head;
             uint32      written;
 
@@ -901,12 +1042,12 @@ biscuit_rowstore_str_write(Relation index, BlockNumber *ptr_pagedir_root,
         else
         {
             biscuit_strheap_append(index, heap_head, heap_tail, str, (uint32) len,
-                                    &sp.blkno, &sp.offset);
+                                    &sp.blkno, &sp.offset, batch);
             sp.length = (uint32) len;
         }
     }
 
-    biscuit_strptr_write(index, ptr_pagedir_root, slot_idx, &sp);
+    biscuit_strptr_write(index, ptr_pagedir_root, slot_idx, &sp, batch);
 }
 
 char *

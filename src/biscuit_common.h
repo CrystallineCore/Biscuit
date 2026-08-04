@@ -211,7 +211,7 @@ typedef struct {
 #define CHAR_RANGE                      256
 #define TOMBSTONE_CLEANUP_THRESHOLD     1000
 #define RADIX_SORT_THRESHOLD            5000
-#define BISCUIT_LIBRARY_VERSION         "3.0.0 - Costly Cookies - v10"
+#define BISCUIT_LIBRARY_VERSION         "3.0.0 - Costly Cookies - v12"
 
 /* ==================== MEMORY MANAGEMENT MACROS ==================== */
 
@@ -653,6 +653,60 @@ typedef enum BiscuitSlotWriteMode
      */
     BISCUIT_SLOT_WRITE_INPLACE = 1
 } BiscuitSlotWriteMode;
+
+/*
+ * BiscuitXlogBatch
+ *
+ * Lets a caller that needs to durably write several pages for what is
+ * logically one row -- biscuit_persist_row_identity_write_record()'s one
+ * TIDS slot plus up to two STRCACHE slots per indexed column -- pay for
+ * one GenericXLogStart/Finish pair per up-to-MAX_GENERIC_XLOG_PAGES pages
+ * instead of one pair per page. This is the same combining
+ * biscuit_blob.c's chunk-chain linking and biscuit_dir.c's rollover
+ * branch already do for two buffers at once, just threaded through more
+ * call layers. See biscuit_rowstore.c's biscuit_xlog_batch_register()
+ * (static, internal) and biscuit_xlog_batch_flush() for the mechanics,
+ * and biscuit_persist.c's biscuit_persist_row_identity_write_record() for
+ * the driving caller.
+ *
+ * A batch holds at most MAX_GENERIC_XLOG_PAGES buffers -- the hard
+ * ceiling GenericXLogRegisterBuffer() itself enforces -- pinned and
+ * exclusive-locked between registrations. Registering a buffer beyond
+ * that count flushes (finishes the WAL record for, and releases) the
+ * buffers already held before opening a new transaction for the rest, so
+ * a row wider than the limit still gets batched, just split across two
+ * (or more) transactions instead of one per page.
+ *
+ * This covers only the steady-state "page already exists, update it in
+ * place" writes (biscuit_rowstore_tid_write()'s slot write,
+ * biscuit_strptr_write(), biscuit_strheap_append()'s in-place-append
+ * branch). A write that must allocate and link a brand new page (a fresh
+ * TIDSLOT/STRPTR logical page via biscuit_pagedir_ensure(), a fresh
+ * STRHEAP tail via biscuit_strheap_append()'s rollover branch) keeps
+ * doing that in its own self-contained GenericXLogStart/Finish exactly as
+ * before -- that PageInit + link is its own atomic unit, mirroring
+ * biscuit_blob.c's and biscuit_dir.c's existing rollover transactions,
+ * and folding it into an in-progress batch would make the batch's scope
+ * depend on how full an unrelated page happened to be. When a rollover
+ * is hit mid-batch, biscuit_rowstore.c flushes the batch first so the two
+ * transactions stay disjoint rather than interleaved.
+ *
+ * A caller not interested in batching (biscuit_persist_save()'s
+ * whole-snapshot bulk rewrite, biscuit_persist_write_header_blob(), any
+ * read path) simply passes a NULL BiscuitXlogBatch pointer down; every
+ * batch-aware function falls back to its original one-transaction-per-page
+ * behavior in that case.
+ */
+typedef struct BiscuitXlogBatch
+{
+    Relation          index;
+    GenericXLogState *state;
+    Buffer            bufs[MAX_GENERIC_XLOG_PAGES];
+    int               nbufs;
+} BiscuitXlogBatch;
+
+extern void biscuit_xlog_batch_init(BiscuitXlogBatch *batch, Relation index);
+extern void biscuit_xlog_batch_flush(BiscuitXlogBatch *batch);
 
 /*
  * BiscuitPageOpaqueData
