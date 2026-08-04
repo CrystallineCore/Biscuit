@@ -315,27 +315,18 @@ biscuit_metapage_data(Page page)
 void
 biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
 {
-    Buffer             buf;
-    Page               page;
-    GenericXLogState  *state;
+    Buffer               buf;
+    Page                 page;
+    GenericXLogState    *state;
     BiscuitMetaPageData *meta;
-    bool               is_new_page;
+    bool                 is_new_page;
+    BlockNumber          nblocks = RelationGetNumberOfBlocks(index);
 
     /*
      * This function is called repeatedly over an index's lifetime
      * (unconditionally from every biscuit_insert()/biscuit_bulkdelete()
-     * call, to keep gen current -- see callers). Only gen actually
-     * changes on those calls (num_records is now advanced under lock by
-     * biscuit_claim_new_slot() and is carried forward here rather than
-     * written from the caller's copy -- see below); the directory
-     * roots, FSM bootstrap state, and pending-list tuning/stats
-     * (allocated/maintained by later phases, not yet by anything in this
-     * one) must survive every such call, not be reset to "nothing
-     * allocated yet" each time. So: read the existing page's values
-     * first (if any), and carry them forward across the PageInit below
-     * rather than reinitializing them.
+     * call, to keep gen current -- see callers).
      */
-    BlockNumber nblocks = RelationGetNumberOfBlocks(index);
     is_new_page = (nblocks == 0);
 
     if (is_new_page)
@@ -345,142 +336,96 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
 
     LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 
-    state = GenericXLogStart(index);
-    page  = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
-
     /*
-     * Snapshot the carry-forward fields before PageInit() wipes the page
-     * (PageInit() zeroes the whole page including the special area, so
-     * this must happen while `page` still holds the pre-init contents;
-     * on a freshly-extended P_NEW page there is nothing meaningful to
-     * carry forward, so fall back to defaults instead).
+     * FAST PATH -- existing, current-format metapage. This is what every
+     * ordinary biscuit_insert()/biscuit_bulkdelete() call hits. Only
+     * num_records/gen ever change here (num_records is already advanced
+     * under this same buffer's lock by biscuit_claim_new_slot(); this just
+     * republishes Max(page's value, caller's value) -- see the
+     * CONCURRENCY FIX comment below), so update them IN PLACE with a
+     * plain (non-FULL_IMAGE) registration instead of PageInit()-ing and
+     * rewriting the whole page.
+     *
+     * This function used to run PageInit() + GENERIC_XLOG_FULL_IMAGE
+     * unconditionally on every call: an unconditional full BLCKSZ WAL
+     * image (forced every time, unlike ordinary full-page-write
+     * suppression which only fires once per checkpoint) to persist what
+     * is, on this path, a one-or-two-field counter bump -- dwarfing by
+     * roughly three orders of magnitude the entire point of
+     * biscuit_pendlog.c's row-batching redesign, and holding the
+     * metapage's one global exclusive lock far longer than the update
+     * needs. biscuit_claim_new_slot(), a few dozen lines up, already does
+     * the cheap version of this; this now matches it.
+     *
+     * biscuit_metapage_data() is the correct validity test here (not
+     * PageIsEmpty()/PageIsNew() -- see that function's own comment for
+     * why PageIsEmpty() is always true for a valid Biscuit metapage), and
+     * it also gives us the structural bounds checks it does before
+     * dereferencing the special area, which a bare magic-field peek would
+     * not.
      */
-    BlockNumber prev_dir_roots[BISCUIT_MAX_DIR_COLUMNS];
-    int32       prev_num_dir_columns;
-    BlockNumber prev_fsm_root;
-    BlockNumber prev_pendlog_head, prev_pendlog_tail;
-    BlockNumber prev_pendlog_draining;
-    uint32      prev_pendlog_npages;
-    uint32      prev_fsm_page_count;
-    uint32      prev_pending_list_limit;
-    uint64      prev_total_pending_bytes;
-    uint64      prev_total_drains;
-    uint32      prev_reserved[5];
-    /*
-     * CONCURRENCY FIX (slot-allocation race).
-     *
-     * num_records and gen are now carry-forward fields too, exactly like
-     * dir_roots/fsm_root above -- they are NOT written from the caller's
-     * idx unconditionally any more.
-     *
-     * Why: slot numbers are claimed from meta->num_records under the
-     * metapage's exclusive buffer lock (see biscuit_claim_new_slot()), so
-     * the metapage is the authoritative counter and any backend's
-     * idx->num_records is a process-local copy that goes stale the moment
-     * another backend claims a slot. This function runs unconditionally at
-     * the end of every biscuit_insert()/biscuit_bulkdelete(), well after
-     * the claim and its lock have been released. Blindly writing
-     * meta->num_records = idx->num_records here would let a backend that
-     * claimed slot 5 (leaving the counter at 6) stamp 6 back over a 7 that
-     * a concurrent backend had since committed -- handing the *same* slot
-     * number out twice and silently clobbering a row. That is the exact
-     * failure mode this fix exists to close, so re-introducing it here
-     * would defeat the locked claim entirely.
-     *
-     * Max() rather than a plain carry-forward because both counters are
-     * monotonically non-decreasing over an index's lifetime (bulkdelete
-     * tombstones slots, it never shrinks num_records) and because the
-     * caller's value legitimately leads the page's in one case: the very
-     * first write after biscuit_build(). Build always runs against a fresh
-     * relfilenode, i.e. nblocks == 0 / is_new_page, so it takes the
-     * defaults branch below and Max() is never asked to reconcile a
-     * populated page against a rebuilt-from-zero idx.
-     */
-    uint32      prev_num_records;
-    uint64      prev_gen;
-
-    /*
-     * Decide whether the current page already holds a real biscuit
-     * metapage whose carry-forward fields (dir_roots, fsm, pending stats)
-     * must be preserved across the PageInit() below.
-     *
-     * We must NOT use PageIsEmpty()/PageIsNew() as that gate here: a
-     * biscuit metapage keeps ALL of its data in the page's special area
-     * (BiscuitMetaPageData via PageGetSpecialPointer), never in the main
-     * body, so pd_lower stays at SizeOfPageHeaderData and PageIsEmpty()
-     * is *always* true for a validly-written metapage. Gating on it made
-     * this branch never taken on a populated metapage, so every rewrite
-     * after build (every insert/bulkdelete) discarded dir_roots -- resetting
-     * them to InvalidBlockNumber and orphaning the entire on-disk directory
-     * (compacted blobs, pending lists, HEADER entry), which then made every
-     * subsequent cold biscuit_persist_load() fail with "no on-disk snapshot
-     * found". The magic check below is the correct, sufficient validity
-     * test for a special-area format: it confirms the special area really
-     * holds a biscuit metapage before we trust its contents. PageIsNew() is
-     * still worth screening for, since PageGetSpecialPointer() on a
-     * never-initialized (all-zero) page would index past a zero-sized
-     * special area.
-     */
-    if (!is_new_page && !PageIsNew(page))
+    if (!is_new_page)
     {
-        BiscuitMetaPageData *old = (BiscuitMetaPageData *) PageGetSpecialPointer(page);
+        page = BufferGetPage(buf);
+        meta = biscuit_metapage_data(page);
 
-        if (old->magic == BISCUIT_MAGIC)
+        if (meta != NULL)
         {
-            prev_num_dir_columns = old->num_dir_columns;
-            memcpy(prev_dir_roots, old->dir_roots, sizeof(prev_dir_roots));
-            prev_fsm_root             = old->fsm_root;
-            prev_fsm_page_count       = old->fsm_page_count;
-            prev_pending_list_limit   = old->pending_list_limit;
-            prev_total_pending_bytes  = old->total_pending_bytes;
-            prev_total_drains         = old->total_drains;
-            prev_pendlog_head         = old->pendlog_head;
-            prev_pendlog_tail         = old->pendlog_tail;
-            prev_pendlog_npages       = old->pendlog_npages;
-            prev_pendlog_draining     = old->pendlog_draining;
-            memcpy(prev_reserved, old->reserved, sizeof(prev_reserved));
-            prev_num_records          = old->num_records;
-            prev_gen                  = old->gen;
-            goto have_prev_values;
+            uint32 new_num_records;
+            uint64 new_gen;
+
+            state = GenericXLogStart(index);
+            page  = GenericXLogRegisterBuffer(state, buf, 0);
+            meta  = (BiscuitMetaPageData *) PageGetSpecialPointer(page);
+
+            /*
+             * CONCURRENCY FIX (slot-allocation race).
+             *
+             * num_records is NOT written from idx->num_records
+             * unconditionally: slot numbers are claimed from
+             * meta->num_records under the metapage's exclusive buffer
+             * lock (see biscuit_claim_new_slot()), so the metapage is the
+             * authoritative counter and any backend's idx->num_records is
+             * a process-local copy that goes stale the moment another
+             * backend claims a slot. This function runs well after that
+             * claim and its lock have been released, so blindly writing
+             * meta->num_records = idx->num_records here would let a
+             * backend that claimed slot 5 (leaving the counter at 6)
+             * stamp 6 back over a 7 that a concurrent backend had since
+             * committed -- handing the *same* slot number out twice and
+             * silently clobbering a row. Max() instead, since both
+             * counters are monotonically non-decreasing over an index's
+             * lifetime (bulkdelete tombstones slots, it never shrinks
+             * num_records). BiscuitMetaPageData.num_records is uint32
+             * while BiscuitIndex.num_records is int, so clamp before
+             * comparing to keep Max() away from a signed/unsigned
+             * promotion.
+             */
+            new_num_records = Max(meta->num_records, (uint32) Max(idx->num_records, 0));
+            new_gen         = Max(meta->gen, idx->gen);
+
+            meta->num_records = new_num_records;
+            meta->gen         = new_gen;
+
+            GenericXLogFinish(state);
+            UnlockReleaseBuffer(buf);
+            return;
         }
     }
 
-    /* No usable prior page (new relation, or an unrecognized/foreign one): defaults. */
-    prev_num_dir_columns = 0;
-    for (int i = 0; i < BISCUIT_MAX_DIR_COLUMNS; i++)
-        prev_dir_roots[i] = InvalidBlockNumber;
-    prev_fsm_root            = InvalidBlockNumber;
-    prev_fsm_page_count      = 0;
-    prev_pending_list_limit  = BISCUIT_DEFAULT_PENDING_LIST_LIMIT;
-    prev_total_pending_bytes = 0;
-    prev_total_drains        = 0;
     /*
-     * MUST be InvalidBlockNumber, not 0. A zero-filled metapage special
-     * area leaves these at 0, which is a perfectly valid-looking block
-     * number -- and block 0 is the metapage itself. The shared-log append
-     * path then reads the metapage as if it were a log page, decides the
-     * "tail" is full, and tries to lock block 0 while already holding it,
-     * self-deadlocking on the buffer content lock on an index's very first
-     * insert. Defaulting these explicitly is the fix.
+     * SLOW / INIT PATH -- a brand-new page (biscuit_build()'s one-time
+     * write against a fresh relfilenode), or an existing block 0 that
+     * biscuit_metapage_data() didn't recognize as a current-format
+     * Biscuit metapage (unrecognized/foreign/corrupt page, or an old
+     * version-1 layout). Both are rare and not a per-row cost, so paying
+     * for a full PageInit() + FULL_IMAGE rewrite here is the right trade:
+     * there is no prior state worth preserving (or safe to trust) in
+     * either case, so everything but idx's own values resets to
+     * defaults -- same defaults the old carry-forward fallback used.
      */
-    prev_pendlog_head        = InvalidBlockNumber;
-    prev_pendlog_tail        = InvalidBlockNumber;
-    prev_pendlog_npages      = 0;
-    /*
-     * Same reasoning as pendlog_head/tail above: a zeroed BlockNumber is
-     * block 0, the metapage itself, and a later drain would read it as an
-     * abandoned log chain.
-     */
-    prev_pendlog_draining    = InvalidBlockNumber;
-    memset(prev_reserved, 0, sizeof(prev_reserved));
-    /*
-     * No prior metapage to reconcile against: the caller's idx is the only
-     * source of truth (this is the biscuit_build() path).
-     */
-    prev_num_records         = (uint32) Max(idx->num_records, 0);
-    prev_gen                 = idx->gen;
-
-have_prev_values:
+    state = GenericXLogStart(index);
+    page  = GenericXLogRegisterBuffer(state, buf, GENERIC_XLOG_FULL_IMAGE);
 
     PageInit(page, BufferGetPageSize(buf), sizeof(BiscuitMetaPageData));
 
@@ -488,27 +433,30 @@ have_prev_values:
     meta->magic   = BISCUIT_MAGIC;
     meta->version = BISCUIT_VERSION;
     meta->page_format_version = BISCUIT_PAGE_FORMAT_VERSION;
-    /* Carry-forward + monotonic max, NOT a blind overwrite -- see the
-     * long comment on prev_num_records/prev_gen above. BiscuitMetaPageData
-     * .num_records is uint32 while BiscuitIndex.num_records is int, so
-     * clamp before comparing to keep Max() away from a signed/unsigned
-     * promotion. */
-    meta->num_records = Max(prev_num_records, (uint32) Max(idx->num_records, 0));
-    meta->gen         = Max(prev_gen, idx->gen);
+    meta->num_records = (uint32) Max(idx->num_records, 0);
+    meta->gen         = idx->gen;
 
-    /* Carried forward from the previous page contents (or defaults). */
-    meta->num_dir_columns = prev_num_dir_columns;
-    memcpy(meta->dir_roots, prev_dir_roots, sizeof(meta->dir_roots));
-    meta->fsm_root            = prev_fsm_root;
-    meta->fsm_page_count      = prev_fsm_page_count;
-    meta->pending_list_limit  = prev_pending_list_limit;
-    meta->total_pending_bytes = prev_total_pending_bytes;
-    meta->total_drains        = prev_total_drains;
-    meta->pendlog_head        = prev_pendlog_head;
-    meta->pendlog_tail        = prev_pendlog_tail;
-    meta->pendlog_npages      = prev_pendlog_npages;
-    meta->pendlog_draining    = prev_pendlog_draining;
-    memcpy(meta->reserved, prev_reserved, sizeof(meta->reserved));
+    meta->num_dir_columns = 0;
+    for (int i = 0; i < BISCUIT_MAX_DIR_COLUMNS; i++)
+        meta->dir_roots[i] = InvalidBlockNumber;
+    meta->fsm_root            = InvalidBlockNumber;
+    meta->fsm_page_count      = 0;
+    meta->pending_list_limit  = BISCUIT_DEFAULT_PENDING_LIST_LIMIT;
+    meta->total_pending_bytes = 0;
+    meta->total_drains        = 0;
+    /*
+     * MUST be InvalidBlockNumber, not left at 0 by a zeroed struct. A
+     * zero-filled metapage special area would leave these at block 0, the
+     * metapage itself -- and the shared-log append path reads the
+     * metapage as if it were a log page, decides the "tail" is full, and
+     * tries to lock block 0 while already holding it, self-deadlocking on
+     * the buffer content lock on an index's very first insert.
+     */
+    meta->pendlog_head        = InvalidBlockNumber;
+    meta->pendlog_tail        = InvalidBlockNumber;
+    meta->pendlog_npages      = 0;
+    meta->pendlog_draining    = InvalidBlockNumber;
+    memset(meta->reserved, 0, sizeof(meta->reserved));
 
     GenericXLogFinish(state);
     UnlockReleaseBuffer(buf);
