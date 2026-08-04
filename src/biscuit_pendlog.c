@@ -12,6 +12,7 @@
 #include "biscuit_delta.h"
 #include "storage/bufpage.h"
 #include "utils/memutils.h"
+#include "access/xact.h"
 
 #define BiscuitPageDataPtr(page)  ((char *) (page) + SizeOfPageHeaderData)
 
@@ -63,9 +64,17 @@ PendLogRecords(BiscuitPendLogPageHeader *hdr)
  *
  * The batch is process-local and non-reentrant by construction: it wraps
  * one row's write inside one backend. begin/end must be paired; end() is
- * idempotent so an error path that unwinds without it leaves nothing
- * locked (the buffer content lock and GenericXLogState are both released
- * by resource-owner cleanup on abort).
+ * idempotent, and the buffer content lock and GenericXLogState are both
+ * released by resource-owner cleanup if an ERROR unwinds without end()
+ * running.
+ *
+ * That resource-owner cleanup is NOT enough on its own, though: it frees
+ * the buffer pin/lock and the GenericXLogState's memory, but
+ * biscuit_batch/biscuit_batch_open are plain process-local statics that
+ * resource-owner cleanup knows nothing about, so they keep pointing at
+ * those now-invalid resources after an abort. See the abort-callback
+ * block below (biscuit_batch_xact_callback / biscuit_batch_subxact_
+ * callback) for why that mismatch is dangerous and how it is closed.
  * ================================================================ */
 
 typedef struct BiscuitPendLogBatch
@@ -78,15 +87,146 @@ typedef struct BiscuitPendLogBatch
                                      * BufferGetPage(buf), or they bypass WAL */
     uint64              last_bytes; /* log size reported by the last append */
     bool                want_drain; /* a deferred drain trigger fired */
+    SubTransactionId    owner_subid; /* subxact that acquired buf/state, or
+                                      * InvalidSubTransactionId if neither is
+                                      * currently held */
 } BiscuitPendLogBatch;
 
-static BiscuitPendLogBatch biscuit_batch      = { NULL, NULL, InvalidBuffer, NULL, 0, false };
+static BiscuitPendLogBatch biscuit_batch      = { NULL, NULL, InvalidBuffer, NULL, 0, false, InvalidSubTransactionId };
 static bool                biscuit_batch_open = false;
 
 bool
 biscuit_pendlog_batch_active(void)
 {
     return biscuit_batch_open;
+}
+
+/* ================================================================
+ * BATCH ABORT SAFETY
+ *
+ * A batch is meant to be opened and closed strictly within one row's
+ * write. But if an ERROR is raised anywhere in between -- from any of the
+ * fan-out calls the batch wraps -- the transaction (or subtransaction)
+ * aborts before biscuit_pendlog_batch_end() ever runs. Postgres's
+ * resource-owner and memory-context machinery correctly release the tail
+ * buffer's pin/lock and free the GenericXLogState's backing memory on
+ * that abort. What that cleanup does NOT do is touch biscuit_batch /
+ * biscuit_batch_open, because those are plain process-local statics with
+ * no resource-owner registration of their own.
+ *
+ * Left alone, biscuit_batch_open would stay true and biscuit_batch.buf /
+ * .state would keep pointing at resources that no longer belong to this
+ * backend. The next biscuit_pendlog_batch_begin() would then see
+ * biscuit_batch_open and call batch_flush(), which would call
+ * GenericXLogFinish() on a dangling GenericXLogState pointer and
+ * UnlockReleaseBuffer() on a buffer this backend no longer holds a pin
+ * on -- undefined behaviour at best, and in a non-assert build, silent
+ * release of a buffer pin that may since have been reused by something
+ * else entirely.
+ *
+ * The fix is to reset the bookkeeping on abort, NOT to call
+ * batch_flush(): by the time either callback below runs, the buffer
+ * pin/lock and the GenericXLogState are already gone (that is exactly
+ * the problem), so touching them again would just be a second use of
+ * already-freed resources. We only need to make biscuit_batch_open /
+ * biscuit_batch agree with reality again.
+ *
+ * Both a top-level and a subtransaction callback are registered:
+ * SUBXACT_EVENT_ABORT_SUB catches a batch whose tail buffer was acquired
+ * inside a subtransaction (e.g. a PL/pgSQL exception block) that aborts
+ * on its own, and XACT_EVENT_ABORT / XACT_EVENT_PARALLEL_ABORT catch a
+ * top-level abort. Registration is idempotent and happens lazily from
+ * biscuit_pendlog_batch_begin(), so a backend that never opens a batch
+ * never pays for it.
+ *
+ * A subtransaction abort only releases resources owned by THAT
+ * subtransaction's resource owner -- not an ancestor's. A batch can be
+ * opened at one subxact level and still be open when code further down
+ * (inside one of the fan-out calls it wraps) enters and aborts a *deeper*,
+ * unrelated subtransaction that gets caught (again, the PL/pgSQL
+ * exception-block case). If we reset unconditionally on any
+ * SUBXACT_EVENT_ABORT_SUB while a batch happens to be open, we would
+ * discard biscuit_batch.buf/.state in exactly that case even though the
+ * buffer's pin/lock and the GenericXLogState were acquired at the
+ * surviving outer level and are still perfectly valid -- orphaning a live
+ * content lock for the rest of the transaction instead of freeing a dead
+ * one, which is the same class of bug this whole block exists to prevent.
+ * So biscuit_batch.owner_subid records which subxact actually acquired
+ * the buffer (set in batch_page_with_room(), cleared by batch_flush()),
+ * and the subxact callback only resets when the aborting subxact matches.
+ * ================================================================ */
+
+static bool biscuit_batch_abort_callbacks_registered = false;
+
+static inline void
+biscuit_batch_reset_bookkeeping(void)
+{
+    biscuit_batch.index       = NULL;
+    biscuit_batch.state       = NULL;
+    biscuit_batch.buf         = InvalidBuffer;
+    biscuit_batch.scratch     = NULL;
+    biscuit_batch.last_bytes  = 0;
+    biscuit_batch.want_drain  = false;
+    biscuit_batch.owner_subid = InvalidSubTransactionId;
+    biscuit_batch_open        = false;
+}
+
+static void
+biscuit_batch_xact_callback(XactEvent event, void *arg)
+{
+    (void) arg;
+
+    if (!biscuit_batch_open)
+        return;
+
+    switch (event)
+    {
+        case XACT_EVENT_ABORT:
+        case XACT_EVENT_PARALLEL_ABORT:
+            biscuit_batch_reset_bookkeeping();
+            break;
+        default:
+            break;
+    }
+}
+
+static void
+biscuit_batch_subxact_callback(SubXactEvent event, SubTransactionId mySubid,
+                                SubTransactionId parentSubid, void *arg)
+{
+    (void) parentSubid;
+    (void) arg;
+
+    if (!biscuit_batch_open)
+        return;
+
+    if (event != SUBXACT_EVENT_ABORT_SUB)
+        return;
+
+    /*
+     * Nothing live to protect -- either no buffer is currently held (the
+     * batch is between rollovers, or hasn't acquired a tail page yet), or
+     * the buffer we do hold belongs to a different subxact than the one
+     * that just aborted. In the latter case resource-owner cleanup for
+     * THIS subxact did not touch it: it's still ours, still valid, and
+     * resetting here would leak its pin and content lock. Only reset when
+     * the aborting subxact is the one that actually acquired it.
+     */
+    if (BufferIsValid(biscuit_batch.buf) &&
+        biscuit_batch.owner_subid == mySubid)
+        biscuit_batch_reset_bookkeeping();
+}
+
+/* Idempotent; safe to call from biscuit_pendlog_batch_begin() every time. */
+static void
+biscuit_batch_register_abort_callbacks(void)
+{
+    if (!biscuit_batch_abort_callbacks_registered)
+    {
+        RegisterXactCallback(biscuit_batch_xact_callback, NULL);
+        RegisterSubXactCallback(biscuit_batch_subxact_callback, NULL);
+        biscuit_batch_abort_callbacks_registered = true;
+    }
 }
 
 /* Finish the open GenericXLog transaction, if any, and release the page. */
@@ -103,7 +243,8 @@ batch_flush(void)
         UnlockReleaseBuffer(biscuit_batch.buf);
         biscuit_batch.buf = InvalidBuffer;
     }
-    biscuit_batch.scratch = NULL;
+    biscuit_batch.scratch     = NULL;
+    biscuit_batch.owner_subid = InvalidSubTransactionId;
 }
 
 /*
@@ -170,10 +311,17 @@ batch_page_with_room(Relation index)
         return NULL;
     }
 
-    biscuit_batch.state   = GenericXLogStart(index);
-    lpage                 = GenericXLogRegisterBuffer(biscuit_batch.state,
-                                                      biscuit_batch.buf, 0);
-    biscuit_batch.scratch = lpage;
+    /*
+     * Record the subxact that owns this pin/lock so the abort callback
+     * can tell "mine, and now gone" apart from "an unrelated nested
+     * subxact aborted, this is still live" -- see the BATCH ABORT SAFETY
+     * comment above.
+     */
+    biscuit_batch.owner_subid = GetCurrentSubTransactionId();
+    biscuit_batch.state       = GenericXLogStart(index);
+    lpage                     = GenericXLogRegisterBuffer(biscuit_batch.state,
+                                                           biscuit_batch.buf, 0);
+    biscuit_batch.scratch     = lpage;
     return (BiscuitPendLogPageHeader *) BiscuitPageDataPtr(lpage);
 }
 
@@ -189,13 +337,16 @@ biscuit_pendlog_batch_begin(Relation index)
     if (biscuit_batch_open)
         batch_flush();
 
-    biscuit_batch.index      = index;
-    biscuit_batch.state      = NULL;
-    biscuit_batch.buf        = InvalidBuffer;
-    biscuit_batch.scratch    = NULL;
-    biscuit_batch.last_bytes = 0;
-    biscuit_batch.want_drain = false;
-    biscuit_batch_open       = true;
+    biscuit_batch_register_abort_callbacks();
+
+    biscuit_batch.index       = index;
+    biscuit_batch.state       = NULL;
+    biscuit_batch.buf         = InvalidBuffer;
+    biscuit_batch.scratch     = NULL;
+    biscuit_batch.last_bytes  = 0;
+    biscuit_batch.want_drain  = false;
+    biscuit_batch.owner_subid = InvalidSubTransactionId;
+    biscuit_batch_open        = true;
 }
 
 void
