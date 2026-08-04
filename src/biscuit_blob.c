@@ -549,6 +549,49 @@ biscuit_page_read_blob(Relation index, BlockNumber head, char **out_data, uint32
     page = BufferGetPage(buf);
     hdr  = (BiscuitBlobChunkHeader *) BiscuitPageDataPtr(page);
 
+    /*
+     * RACE: the caller resolved `head` from a directory entry, then this
+     * function is the first thing that takes any lock on the chain. In the
+     * gap between those two steps, a concurrent compaction drain
+     * (biscuit_pendlog_drain_all()/biscuit_pendlog_compact()) can have
+     * repointed the directory entry at a freshly-written chain and retired
+     * this one -- biscuit_page_free_blob() -> biscuit_retire_page_locked()
+     * unconditionally overwrites this page's opaque.next with a freelist
+     * link the instant it runs, with no horizon wait (the horizon/
+     * recycle_xid check in biscuit_page_alloc() only gates *reuse* of a
+     * retired page's contents, not the retirement step itself).
+     *
+     * Once that has happened, this page's own chunk header
+     * (total_len/total_chunks/chunk_seq) is untouched -- retirement never
+     * touches it -- so it still looks like a perfectly good chunk 0. What's
+     * broken is opaque.next: it no longer points at chunk 1 of this chain,
+     * it points at whatever used to be the freelist head. Walking it lands
+     * on an unrelated page whose header doesn't match, which previously
+     * surfaced several chunks later as a generic "chain inconsistency"
+     * DATA_CORRUPTED error, with a misleading REINDEX hint attached by
+     * whatever caller translated it.
+     *
+     * Every other page in the chain is protected from this by the
+     * lock-coupled walk below: retirement cannot advance past a page this
+     * function is currently holding locked (it needs BUFFER_LOCK_EXCLUSIVE
+     * to retire, which blocks behind our SHARE lock). The head page is the
+     * one spot where we haven't taken any lock yet at the moment the race
+     * can happen, so it's the only place that needs an explicit check.
+     * Catching it here, deterministically, means the "chain inconsistency"
+     * error later in this function really is corruption -- not this
+     * benign, expected race against a concurrent drain.
+     */
+    if (TransactionIdIsValid(((BiscuitPageOpaque) PageGetSpecialPointer(page))->recycle_xid))
+    {
+        UnlockReleaseBuffer(buf);
+        ereport(ERROR,
+                (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+                 errmsg("biscuit: blob chain at block %u was concurrently compacted", head),
+                 errdetail("A VACUUM or background compaction retired this chain between "
+                           "directory lookup and read. The index is not corrupt."),
+                 errhint("Retry the read; it will resolve against the directory's current entry.")));
+    }
+
     total_len    = hdr->total_len;
     total_chunks = hdr->total_chunks;
 
@@ -575,8 +618,33 @@ biscuit_page_read_blob(Relation index, BlockNumber head, char **out_data, uint32
             hdr->total_chunks != total_chunks ||
             hdr->chunk_seq != seq)
         {
+            /*
+             * Should not be reachable in practice: the head-page check
+             * above catches the only window where this function itself
+             * hasn't yet taken a lock, and the lock-coupled walk (below,
+             * once we're past this check) prevents retirement from
+             * advancing past a page we're currently holding. Kept as a
+             * defense-in-depth distinction anyway, in case some other
+             * caller of biscuit_retire_page_locked() is ever added that
+             * doesn't go through the alloc-time horizon gate: report it as
+             * the same benign, retryable race rather than corruption
+             * whenever the evidence (recycle_xid) supports that reading,
+             * and only fall back to a true corruption report otherwise.
+             */
+            bool retired = TransactionIdIsValid(
+                ((BiscuitPageOpaque) PageGetSpecialPointer(page))->recycle_xid);
+
             UnlockReleaseBuffer(buf);
             pfree(result);
+
+            if (retired)
+                ereport(ERROR,
+                        (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+                         errmsg("biscuit: blob chain at block %u was concurrently compacted", cur),
+                         errdetail("A VACUUM or background compaction retired this chain "
+                                   "mid-read. The index is not corrupt."),
+                         errhint("Retry the read; it will resolve against the directory's current entry.")));
+
             ereport(ERROR,
                     (errcode(ERRCODE_DATA_CORRUPTED),
                      errmsg("biscuit: blob chunk chain inconsistency at block %u (expected seq %u)",

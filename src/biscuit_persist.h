@@ -110,6 +110,32 @@ extern void biscuit_persist_row_identity_write_record(Relation index,
                                                         BiscuitSlotWriteMode mode);
 
 /*
+ * biscuit_rowstore_alloc_lock / biscuit_rowstore_alloc_unlock
+ *
+ * The heavyweight page lock (LockPage on BISCUIT_ROWSTORE_LOCK_BLKNO)
+ * biscuit_persist_row_identity_write_record() holds across its whole
+ * BiscuitXlogBatch -- TIDS plus every column's STRCACHE slot for one row.
+ * See its definition in biscuit_persist.c for the full scope/ordering
+ * contract.
+ *
+ * Exported (rather than static to biscuit_persist.c) solely so
+ * biscuit_pendlog.c's drain can take it too, around the span in which it
+ * reads STRCACHE back out via biscuit_delta_expand_slots()
+ * (pendlog_drain_internal(), biscuit_pendlog.c). That read is a plain
+ * LWLock (LockBuffer SHARE), invisible to the deadlock detector; without
+ * this shared lock, a drain in one backend and an open batch in another
+ * could each block on an LWLock the other holds, with no heavyweight edge
+ * connecting them for the detector to see -- a silent hang instead of a
+ * caught-and-aborted deadlock. Do not call this from anywhere else:
+ * ordering is total only because the drain is the sole caller that nests
+ * it inside BISCUIT_METAPAGE_BLKNO, and an ordinary row-identity write
+ * never takes BISCUIT_METAPAGE_BLKNO at all. A third caller with its own
+ * nesting order would reopen exactly the hazard this closes.
+ */
+extern void biscuit_rowstore_alloc_lock(Relation index);
+extern void biscuit_rowstore_alloc_unlock(Relation index);
+
+/*
  * Remove the on-disk snapshot for this index (DROP INDEX / REINDEX).
  * Safe to call even if no snapshot exists.
  */

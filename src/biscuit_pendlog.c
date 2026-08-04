@@ -10,6 +10,9 @@
 #include "biscuit_pendlog.h"
 #include "biscuit_fanout.h"
 #include "biscuit_delta.h"
+#include "biscuit_persist.h"   /* biscuit_rowstore_alloc_lock()/_unlock() --
+                                 * see pendlog_drain_internal()'s call site
+                                 * for why the drain now takes this too */
 #include "storage/bufpage.h"
 #include "utils/memutils.h"
 #include "access/xact.h"
@@ -2129,8 +2132,51 @@ pendlog_drain_internal(Relation index, bool wait, uint32 max_pages)
      * Expand once, after both chains are in. The drain builds a fresh
      * snapshot every time, so need_rebuild cannot fire here -- nothing was
      * expanded before this call.
+     *
+     * CROSS-BACKEND LOCK-ORDER FIX.
+     *
+     * pendlog_expand_touched() calls biscuit_delta_expand_slots(), which
+     * reads each touched slot's text back out of STRCACHE via plain
+     * LockBuffer(SHARE) -- an LWLock, invisible to the deadlock detector.
+     * A concurrent row-identity write (biscuit_persist_row_identity_
+     * write_record(), biscuit_persist.c) can be holding one of those very
+     * STRCACHE pages EXCLUSIVE, pinned open in its BiscuitXlogBatch for
+     * the span of the whole row, while it is itself blocked -- via that
+     * same backend's own alloc_lock hold -- behind nothing this drain
+     * holds... UNLESS some third backend's wait chain threads the two
+     * together. With no ordering rule between "a batch is open" and "a
+     * drain is reading STRCACHE", that combination hangs rather than gets
+     * caught: PG's deadlock detector only walks the heavyweight lock
+     * wait-for graph, and a backend blocked on an LWLock is invisible to
+     * it, so a cycle that closes through even one LWLock hop never fires
+     * the detector.
+     *
+     * Fix: take the same heavyweight lock biscuit_persist_row_identity_
+     * write_record() takes around its whole batch (biscuit_rowstore_
+     * alloc_lock() / biscuit_persist.c) for the span in which this drain
+     * reads STRCACHE. That makes "a batch is open" and "a drain is
+     * reading STRCACHE" mutually exclusive via one heavyweight primitive
+     * instead of racing through independent LWLocks -- by the time this
+     * lock is granted, no writer's batch can still be holding a STRCACHE
+     * page open, because a writer flushes its batch before releasing this
+     * same lock (see biscuit_persist_row_identity_write_record()).
+     *
+     * Ordering stays total and cannot itself introduce a new cycle: this
+     * is the only place that nests alloc_lock inside BISCUIT_METAPAGE_BLKNO
+     * (already held above), and an ordinary row-identity write never takes
+     * BISCUIT_METAPAGE_BLKNO at all -- so there is no path back the other
+     * way for a cycle to close. See biscuit_rowstore_alloc_lock()'s comment
+     * in biscuit_persist.c for the other half of this invariant.
+     *
+     * Scoped tightly to just this call, not the whole drain: the merge
+     * loop below only touches directory pages and blobs, never the
+     * specific STRCACHE row pages a batch could be holding, so holding
+     * writers off for the whole O(index size) merge would cost far more
+     * concurrency than the actual hazard requires.
      */
+    biscuit_rowstore_alloc_lock(index);
     pendlog_expand_touched(index, snap);
+    biscuit_rowstore_alloc_unlock(index);
     Assert(!snap->need_rebuild);
 
     /*

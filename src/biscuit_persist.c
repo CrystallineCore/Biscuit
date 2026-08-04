@@ -271,27 +271,46 @@ biscuit_persist_write_bitmap(Relation index,
  *
  * Scope and ordering:
  *   - Taken before any buffer lock in this path and released after all of
- *     them are dropped, so it never participates in a buffer-lock cycle.
+ *     them are dropped, so it never participates in a buffer-lock cycle
+ *     *within this backend*.
  *   - biscuit_page_alloc() takes the metapage buffer lock and
  *     LockRelationForExtension() beneath us; nothing anywhere takes those
  *     and then reaches for this lock, so the order is total.
- *   - biscuit_pendlog_drain_all() serializes on BISCUIT_METAPAGE_BLKNO, a
- *     different tag. A backend never holds both: biscuit_insert() does all
- *     of its pendlog work (including any opportunistic drain) before it
- *     reaches the row-identity write.
+ *   - biscuit_pendlog_drain_all() serializes drainers against each other on
+ *     BISCUIT_METAPAGE_BLKNO, a different tag. A single backend never
+ *     holds both at once -- biscuit_insert() does all of its pendlog work
+ *     (including any opportunistic drain) before it reaches the
+ *     row-identity write -- but that says nothing about two *different*
+ *     backends, and until the fix below, nothing did: a drain running in
+ *     one backend and a row-identity write's BiscuitXlogBatch running in
+ *     another could each be waiting on a buffer content LWLock the other
+ *     holds (the drain reading STRCACHE via biscuit_delta_expand_slots(),
+ *     the batch holding a STRCACHE/TID page open across the row), with
+ *     nothing but that LWLock pair connecting them. LWLocks are invisible
+ *     to the deadlock detector, so that cycle hangs forever instead of
+ *     getting caught and aborted.
+ *
+ *     The fix: biscuit_pendlog.c's pendlog_drain_internal() now takes this
+ *     same lock (see its call site) for the span in which it reads
+ *     STRCACHE, so "a batch is open" and "a drain is reading STRCACHE"
+ *     become mutually exclusive via one heavyweight primitive instead of
+ *     racing through independent LWLocks. Ordering stays total: only the
+ *     drain ever nests it inside BISCUIT_METAPAGE_BLKNO; an ordinary
+ *     row-identity write never takes BISCUIT_METAPAGE_BLKNO at all, so
+ *     there is no path back the other way for a cycle to close.
  *
  * No PG_TRY is needed to release on error: heavyweight locks are dropped
  * by the lock manager at transaction end, including abort. The explicit
  * unlock is just early release so a long transaction does not hold the
  * index's allocation lock across statements.
  */
-static void
+void
 biscuit_rowstore_alloc_lock(Relation index)
 {
     LockPage(index, BISCUIT_ROWSTORE_LOCK_BLKNO, ExclusiveLock);
 }
 
-static void
+void
 biscuit_rowstore_alloc_unlock(Relation index)
 {
     UnlockPage(index, BISCUIT_ROWSTORE_LOCK_BLKNO, ExclusiveLock);
@@ -452,6 +471,84 @@ biscuit_persist_row_identity_write_record(Relation index, BiscuitIndex *idx, uin
 static long biscuit_diag_decode_count = 0;
 
 /*
+ * biscuit_persist_read_blob_retry
+ *
+ * biscuit_page_read_blob() now raises ERRCODE_T_R_SERIALIZATION_FAILURE
+ * (see biscuit_blob.c) when the chain it was asked to read was
+ * concurrently retired by a compaction drain between the caller's
+ * directory lookup and biscuit_page_read_blob()'s first lock acquisition.
+ * That is not corruption -- the directory entry has simply moved on to a
+ * new compacted chain in the meantime -- so the correct response is to
+ * re-resolve the entry by its (col, is_lower, kind, ch, position) identity
+ * and read again, not to abort the statement.
+ *
+ * Every caller in this file that pairs a biscuit_dir_find() with a
+ * biscuit_page_read_blob() has exactly the identity it needs to retry
+ * this way, since biscuit_dir_find() always re-reads the directory fresh
+ * from disk (biscuit_dir.c takes no lock across calls, so this costs
+ * nothing when there's no race to retry).
+ *
+ * Bounded at a handful of attempts: a single drain retires a given
+ * structure's old chain at most once, so genuinely hitting this more than
+ * once or twice in a row would mean something else is wrong, and this
+ * should not become an unbounded spin.
+ */
+static void
+biscuit_persist_read_blob_retry(Relation index,
+                                 int32 col, bool is_lower, uint8 kind,
+                                 int32 ch, int32 position,
+                                 BlockNumber initial_head,
+                                 char **out_data, uint32 *out_len)
+{
+    BlockNumber head = initial_head;
+    int         attempt;
+
+    for (attempt = 0; ; attempt++)
+    {
+        MemoryContext oldcxt = CurrentMemoryContext;
+
+        PG_TRY();
+        {
+            biscuit_page_read_blob(index, head, out_data, out_len);
+            return;
+        }
+        PG_CATCH();
+        {
+            ErrorData     *edata;
+            BiscuitDirEntry fresh;
+
+            MemoryContextSwitchTo(oldcxt);
+            edata = CopyErrorData();
+
+            if (edata->sqlerrcode != ERRCODE_T_R_SERIALIZATION_FAILURE ||
+                attempt >= 4)
+            {
+                /* Not our race, or retries exhausted: propagate as-is. */
+                ReThrowError(edata);
+            }
+            FlushErrorState();
+
+            if (!biscuit_dir_find(index, col, is_lower, kind, ch, position,
+                                   &fresh, NULL) ||
+                fresh.blob_head == InvalidBlockNumber)
+            {
+                /*
+                 * The structure is gone entirely now (e.g. genuinely
+                 * emptied out from under us) -- nothing left to read.
+                 */
+                *out_data = NULL;
+                *out_len  = 0;
+                return;
+            }
+
+            head = fresh.blob_head;
+            /* loop and retry with the freshly-resolved head */
+        }
+        PG_END_TRY();
+    }
+}
+
+/*
  * Decode one directory entry's compacted blob, merging in its pending
  * chain if it has one. Returns NULL for a genuinely absent structure
  * (blob_head == InvalidBlockNumber and no pending records either) --
@@ -471,10 +568,15 @@ biscuit_persist_decode_entry(Relation index, const BiscuitDirEntry *entry)
         char   *data;
         uint32  len;
 
-        biscuit_page_read_blob(index, entry->blob_head, &data, &len);
-        bm = biscuit_roaring_deserialize(data, len);
+        biscuit_persist_read_blob_retry(index,
+                                         entry->col, entry->is_lower, entry->kind,
+                                         entry->ch, entry->position,
+                                         entry->blob_head, &data, &len);
         if (data)
+        {
+            bm = biscuit_roaring_deserialize(data, len);
             pfree(data);
+        }
     }
 
     /*
@@ -1085,280 +1187,382 @@ biscuit_persist_load_column(Relation index, int32 col,
     }
 }
 
+/*
+ * biscuit_persist_load() makes dozens of independent (biscuit_dir_find ->
+ * biscuit_page_read_blob) round trips, one per structure, with nothing
+ * tying them together -- so a concurrent drain can repoint a directory
+ * entry and retire its old chain (biscuit_retire_page_locked() repurposes
+ * a retired page's opaque->next into a freelist link immediately and
+ * unconditionally, with no horizon check -- the recycle_xid horizon in
+ * biscuit_page_alloc() only gates *reuse* of a retired page's content, a
+ * separate later step) while this function is still mid-walk against the
+ * *old* chain it read earlier in the same call. That is the "blob chunk
+ * chain inconsistency (expected seq N)" corruption reported against v14.
+ *
+ * The fix is NOT a lock. An earlier attempt serialized the whole load
+ * against the whole drain with a heavyweight LockPage() on
+ * BISCUIT_METAPAGE_BLKNO, matching pendlog_drain_internal()'s
+ * ExclusiveLock on the same tag -- correct in isolation, but it let this
+ * function hold that heavyweight lock across a long walk that also
+ * acquires and lock-couples ordinary buffer-content LWLocks throughout.
+ * That combination reintroduced the v12 hang as a genuine, undetectable
+ * deadlock: a cycle that passes through an LWLock is invisible to
+ * PostgreSQL's (heavyweight-lock-only) deadlock detector, so two backends
+ * each holding one class of lock while waiting on the other's simply wait
+ * forever with nothing logged.
+ *
+ * Retrying is the right tool here, not locking, and the metapage already
+ * carries exactly the counter needed to detect a torn read:
+ * total_drains (see BiscuitMetaPageData / biscuit_read_pending_stats()).
+ * A drain always bumps it, under its own lock, before this function could
+ * possibly observe the directory entries it touched. So: snapshot
+ * total_drains before the walk and again after; if it moved, some drain
+ * ran (at least partly) concurrently with this attempt and the read must
+ * be treated as unreliable regardless of whether it happened to also
+ * throw -- retry rather than trusting a read that got lucky, and rather
+ * than discarding one that got unlucky. Only a load that sees a *stable*
+ * total_drains across the whole attempt and still fails is genuine
+ * corruption worth the WARNING + REINDEX hint.
+ *
+ * biscuit_read_pending_stats() only takes the metapage's own
+ * buffer-content lock, momentarily, exactly like every other reader here
+ * -- it adds no new lock class and therefore no new deadlock surface.
+ */
+#define BISCUIT_LOAD_MAX_ATTEMPTS 8
+
 BiscuitIndex *
 biscuit_persist_load(Relation index)
 {
     Oid            indexoid = RelationGetRelid(index);
     int            natts    = index->rd_index->indnatts;
-    BiscuitIndex  *idx      = NULL;
-    MemoryContext  oldcontext;
-    BiscuitDirEntry header_entry;
+    MemoryContext  oldcontext = CurrentMemoryContext;
     instr_time     diag_start;   /* DIAGNOSTIC ONLY */
+    int            attempt;
 
     biscuit_diag_decode_count = 0;   /* DIAGNOSTIC ONLY */
     INSTR_TIME_SET_CURRENT(diag_start);
 
-    if (!biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_HEADER,
-                           -1, -1, &header_entry, NULL))
-        return NULL;   /* nothing saved yet -- normal, caller falls back to a rebuild */
-
-    oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
-
-    PG_TRY();
+    for (attempt = 1; attempt <= BISCUIT_LOAD_MAX_ATTEMPTS; attempt++)
     {
-        PCur    hcur;
-        char   *hdata;
-        uint32  hlen;
-        int32   num_columns;
-        int32   raw_capacity;
-        uint64  live_gen;
-        int     unused_records, unused_columns, unused_max_len;
+        BiscuitIndex   *idx = NULL;
+        BiscuitDirEntry header_entry;
+        uint32          pll_before, pll_after;
+        uint64          tpb_before, tpb_after;
+        uint64          drains_before, drains_after;
+        bool            caught_error = false;
+        ErrorData      *edata = NULL;
 
-        /* HEADER lives on a single in-place page now, not a blob chain --
-         * see biscuit_common.h's "Field repurposing" comment. */
-        biscuit_rowstore_header_read(index, header_entry.blob_head, &hdata, &hlen);
-        pcur_init(&hcur, hdata, hlen);
+        biscuit_read_pending_stats(index, &pll_before, &tpb_before, &drains_before);
 
-        idx = (BiscuitIndex *) palloc0(sizeof(BiscuitIndex));
+        if (!biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_HEADER,
+                               -1, -1, &header_entry, NULL))
+            return NULL;   /* nothing saved yet -- normal, caller falls back to a rebuild */
 
-        idx->num_records = pcur_get_i32(&hcur);
-        raw_capacity      = pcur_get_i32(&hcur);
-        idx->capacity     = Max(raw_capacity, 1);
-        idx->max_len              = pcur_get_i32(&hcur);
-        idx->max_length_legacy    = pcur_get_i32(&hcur);
-        idx->max_length_lower     = pcur_get_i32(&hcur);
-        idx->insert_count         = pcur_get_i64(&hcur);
-        idx->update_count         = pcur_get_i64(&hcur);
-        idx->delete_count         = pcur_get_i64(&hcur);
-        idx->tombstone_count      = pcur_get_i32(&hcur);
-        num_columns                = pcur_get_i32(&hcur);
-        idx->num_columns           = num_columns;
+        MemoryContextSwitchTo(CacheMemoryContext);
 
-        if (hcur.error || num_columns != natts || idx->num_records < 0 ||
-            idx->capacity < idx->num_records)
-            ereport(ERROR,
-                    (errmsg("biscuit: directory header mismatch for index %u", indexoid)));
-
-        /*
-         * Case-mode gating is deliberately NOT part of the persisted
-         * state (design doc) -- always recomputed fresh from the live
-         * Relation's opclass, so a REINDEX under a different opclass can
-         * never serve the wrong structure set from stale data.
-         */
-        if (num_columns == 1)
+        PG_TRY();
         {
-            idx->legacy_case_mode = biscuit_get_column_case_mode(index, 0);
-        }
-        else
-        {
-            int i;
+            PCur    hcur;
+            char   *hdata;
+            uint32  hlen;
+            int32   num_columns;
+            int32   raw_capacity;
+            uint64  live_gen;
+            int     unused_records, unused_columns, unused_max_len;
 
-            idx->column_case_mode = (uint8 *) palloc(num_columns * sizeof(uint8));
-            for (i = 0; i < num_columns; i++)
-                idx->column_case_mode[i] = biscuit_get_column_case_mode(index, i);
-        }
+            /* HEADER lives on a single in-place page now, not a blob chain --
+             * see biscuit_common.h's "Field repurposing" comment. */
+            biscuit_rowstore_header_read(index, header_entry.blob_head, &hdata, &hlen);
+            pcur_init(&hcur, hdata, hlen);
 
-        if (num_columns > 1)
-        {
-            int i;
+            idx = (BiscuitIndex *) palloc0(sizeof(BiscuitIndex));
 
-            idx->column_types   = (Oid *) palloc(natts * sizeof(Oid));
-            idx->output_funcs   = (FmgrInfo *) palloc(natts * sizeof(FmgrInfo));
-            idx->column_indices = (ColumnIndex *) palloc0(natts * sizeof(ColumnIndex));
+            idx->num_records = pcur_get_i32(&hcur);
+            raw_capacity      = pcur_get_i32(&hcur);
+            idx->capacity     = Max(raw_capacity, 1);
+            idx->max_len              = pcur_get_i32(&hcur);
+            idx->max_length_legacy    = pcur_get_i32(&hcur);
+            idx->max_length_lower     = pcur_get_i32(&hcur);
+            idx->insert_count         = pcur_get_i64(&hcur);
+            idx->update_count         = pcur_get_i64(&hcur);
+            idx->delete_count         = pcur_get_i64(&hcur);
+            idx->tombstone_count      = pcur_get_i32(&hcur);
+            num_columns                = pcur_get_i32(&hcur);
+            idx->num_columns           = num_columns;
 
-            for (i = 0; i < num_columns; i++)
-            {
-                Oid  typoutput;
-                bool typIsVarlena;
-
-                idx->column_types[i] = pcur_get_u32(&hcur);
-                idx->column_indices[i].max_length       = pcur_get_i32(&hcur);
-                idx->column_indices[i].max_length_lower = pcur_get_i32(&hcur);
-
-                getTypeOutputInfo(idx->column_types[i], &typoutput, &typIsVarlena);
-                fmgr_info(typoutput, &idx->output_funcs[i]);
-            }
-        }
-
-        if (hcur.error)
-            ereport(ERROR, (errmsg("biscuit: truncated directory header for index %u", indexoid)));
-        if (hdata)
-            pfree(hdata);
-
-        /* ---- tids ---- */
-        idx->tids = (ItemPointerData *) palloc0(idx->capacity * sizeof(ItemPointerData));
-        if (idx->num_records > 0)
-        {
-            BiscuitDirEntry tids_entry;
-
-            if (!biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_TIDS,
-                                   -1, -1, &tids_entry, NULL) ||
-                tids_entry.blob_head == InvalidBlockNumber)
-                ereport(ERROR, (errmsg("biscuit: missing tid array for index %u", indexoid)));
+            if (hcur.error || num_columns != natts || idx->num_records < 0 ||
+                idx->capacity < idx->num_records)
+                ereport(ERROR,
+                        (errmsg("biscuit: directory header mismatch for index %u", indexoid)));
 
             /*
-             * tids_entry.blob_head is the TIDS page-directory root now, not
-             * a blob chain -- see biscuit_common.h's "Field repurposing"
-             * comment. The old explicit "tlen != num_records * sizeof(...)"
-             * check is subsumed by biscuit_rowstore_tid_read_all(), which
-             * ERRORs if the directory doesn't cover num_records slots.
-             *
-             * Note idx->tids is palloc0'd (was plain palloc): the read fills
-             * exactly [0, num_records), and the tail [num_records, capacity)
-             * must start zeroed the same way a freshly-built index's does,
-             * since the steady-state insert path writes into that tail
-             * without initializing it first.
+             * Case-mode gating is deliberately NOT part of the persisted
+             * state (design doc) -- always recomputed fresh from the live
+             * Relation's opclass, so a REINDEX under a different opclass can
+             * never serve the wrong structure set from stale data.
              */
-            biscuit_rowstore_tid_read_all(index, tids_entry.blob_head,
-                                           (uint32) idx->num_records, idx->tids);
-        }
-
-        /* ---- tombstones ---- */
-        {
-            BiscuitDirEntry tomb_entry;
-
-            if (biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_TOMBSTONES,
-                                  -1, -1, &tomb_entry, NULL))
-                idx->tombstones = biscuit_persist_decode_entry(index, &tomb_entry);
-            if (!idx->tombstones)
-                idx->tombstones = biscuit_roaring_create();
-        }
-
-        /* ---- free list ---- */
-        {
-            BiscuitDirEntry fl_entry;
-
-            idx->free_count = 0;
-            if (biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_FREELIST,
-                                  -1, -1, &fl_entry, NULL) &&
-                fl_entry.blob_head != InvalidBlockNumber)
+            if (num_columns == 1)
             {
-                char   *fdata;
-                uint32  flen;
-
-                biscuit_page_read_blob(index, fl_entry.blob_head, &fdata, &flen);
-                idx->free_count    = (int) (flen / sizeof(uint32_t));
-                idx->free_capacity = Max(idx->free_count, 64);
-                idx->free_list     = (uint32_t *) palloc(idx->free_capacity * sizeof(uint32_t));
-                if (idx->free_count > 0)
-                    memcpy(idx->free_list, fdata, idx->free_count * sizeof(uint32_t));
-                if (fdata)
-                    pfree(fdata);
+                idx->legacy_case_mode = biscuit_get_column_case_mode(index, 0);
             }
             else
             {
-                idx->free_capacity = 64;
-                idx->free_list     = (uint32_t *) palloc(idx->free_capacity * sizeof(uint32_t));
+                int i;
+
+                idx->column_case_mode = (uint8 *) palloc(num_columns * sizeof(uint8));
+                for (i = 0; i < num_columns; i++)
+                    idx->column_case_mode[i] = biscuit_get_column_case_mode(index, i);
             }
-        }
 
-        if (num_columns == 1)
-        {
-            idx->data_cache       = biscuit_persist_load_strcache(index, BISCUIT_DIR_COL_LEGACY, false, idx->num_records, idx->capacity);
-            idx->data_cache_lower = biscuit_persist_load_strcache(index, BISCUIT_DIR_COL_LEGACY, true, idx->num_records, idx->capacity);
-
-            biscuit_persist_load_column(index, BISCUIT_DIR_COL_LEGACY,
-                                         idx->max_length_legacy, idx->max_length_lower,
-                                         idx->pos_idx_legacy, idx->neg_idx_legacy, idx->char_cache_legacy,
-                                         idx->pos_idx_lower, idx->neg_idx_lower, idx->char_cache_lower,
-                                         &idx->length_bitmaps_legacy, &idx->length_ge_bitmaps_legacy,
-                                         &idx->length_bitmaps_lower, &idx->length_ge_bitmaps_lower);
-        }
-        else
-        {
-            int col;
-
-            idx->column_data_cache       = (char ***) palloc(natts * sizeof(char **));
-            idx->column_data_cache_lower = (char ***) palloc(natts * sizeof(char **));
-
-            for (col = 0; col < num_columns; col++)
+            if (num_columns > 1)
             {
-                idx->column_data_cache[col] =
-                    biscuit_persist_load_strcache(index, col, false, idx->num_records, idx->capacity);
-                idx->column_data_cache_lower[col] =
-                    biscuit_persist_load_strcache(index, col, true, idx->num_records, idx->capacity);
+                int i;
+
+                idx->column_types   = (Oid *) palloc(natts * sizeof(Oid));
+                idx->output_funcs   = (FmgrInfo *) palloc(natts * sizeof(FmgrInfo));
+                idx->column_indices = (ColumnIndex *) palloc0(natts * sizeof(ColumnIndex));
+
+                for (i = 0; i < num_columns; i++)
+                {
+                    Oid  typoutput;
+                    bool typIsVarlena;
+
+                    idx->column_types[i] = pcur_get_u32(&hcur);
+                    idx->column_indices[i].max_length       = pcur_get_i32(&hcur);
+                    idx->column_indices[i].max_length_lower = pcur_get_i32(&hcur);
+
+                    getTypeOutputInfo(idx->column_types[i], &typoutput, &typIsVarlena);
+                    fmgr_info(typoutput, &idx->output_funcs[i]);
+                }
             }
 
-            for (col = 0; col < num_columns; col++)
-            {
-                ColumnIndex *cidx = &idx->column_indices[col];
+            if (hcur.error)
+                ereport(ERROR, (errmsg("biscuit: truncated directory header for index %u", indexoid)));
+            if (hdata)
+                pfree(hdata);
 
-                biscuit_persist_load_column(index, col,
-                                             cidx->max_length, cidx->max_length_lower,
-                                             cidx->pos_idx, cidx->neg_idx, cidx->char_cache,
-                                             cidx->pos_idx_lower, cidx->neg_idx_lower, cidx->char_cache_lower,
-                                             &cidx->length_bitmaps, &cidx->length_ge_bitmaps,
-                                             &cidx->length_bitmaps_lower, &cidx->length_ge_bitmaps_lower);
+            /* ---- tids ---- */
+            idx->tids = (ItemPointerData *) palloc0(idx->capacity * sizeof(ItemPointerData));
+            if (idx->num_records > 0)
+            {
+                BiscuitDirEntry tids_entry;
+
+                if (!biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_TIDS,
+                                       -1, -1, &tids_entry, NULL) ||
+                    tids_entry.blob_head == InvalidBlockNumber)
+                    ereport(ERROR, (errmsg("biscuit: missing tid array for index %u", indexoid)));
+
+                /*
+                 * tids_entry.blob_head is the TIDS page-directory root now, not
+                 * a blob chain -- see biscuit_common.h's "Field repurposing"
+                 * comment. The old explicit "tlen != num_records * sizeof(...)"
+                 * check is subsumed by biscuit_rowstore_tid_read_all(), which
+                 * ERRORs if the directory doesn't cover num_records slots.
+                 *
+                 * Note idx->tids is palloc0'd (was plain palloc): the read fills
+                 * exactly [0, num_records), and the tail [num_records, capacity)
+                 * must start zeroed the same way a freshly-built index's does,
+                 * since the steady-state insert path writes into that tail
+                 * without initializing it first.
+                 */
+                biscuit_rowstore_tid_read_all(index, tids_entry.blob_head,
+                                               (uint32) idx->num_records, idx->tids);
+            }
+
+            /* ---- tombstones ---- */
+            {
+                BiscuitDirEntry tomb_entry;
+
+                if (biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_TOMBSTONES,
+                                      -1, -1, &tomb_entry, NULL))
+                    idx->tombstones = biscuit_persist_decode_entry(index, &tomb_entry);
+                if (!idx->tombstones)
+                    idx->tombstones = biscuit_roaring_create();
+            }
+
+            /* ---- free list ---- */
+            {
+                BiscuitDirEntry fl_entry;
+
+                idx->free_count = 0;
+                if (biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_FREELIST,
+                                      -1, -1, &fl_entry, NULL) &&
+                    fl_entry.blob_head != InvalidBlockNumber)
+                {
+                    char   *fdata;
+                    uint32  flen;
+
+                    biscuit_persist_read_blob_retry(index,
+                                                     BISCUIT_DIR_COL_SINGLETON, false,
+                                                     BISCUIT_DIR_KIND_FREELIST, -1, -1,
+                                                     fl_entry.blob_head, &fdata, &flen);
+                    idx->free_count    = (int) (flen / sizeof(uint32_t));
+                    idx->free_capacity = Max(idx->free_count, 64);
+                    idx->free_list     = (uint32_t *) palloc(idx->free_capacity * sizeof(uint32_t));
+                    if (idx->free_count > 0 && fdata != NULL)
+                        memcpy(idx->free_list, fdata, idx->free_count * sizeof(uint32_t));
+                    if (fdata)
+                        pfree(fdata);
+                }
+                else
+                {
+                    idx->free_capacity = 64;
+                    idx->free_list     = (uint32_t *) palloc(idx->free_capacity * sizeof(uint32_t));
+                }
+            }
+
+            if (num_columns == 1)
+            {
+                idx->data_cache       = biscuit_persist_load_strcache(index, BISCUIT_DIR_COL_LEGACY, false, idx->num_records, idx->capacity);
+                idx->data_cache_lower = biscuit_persist_load_strcache(index, BISCUIT_DIR_COL_LEGACY, true, idx->num_records, idx->capacity);
+
+                biscuit_persist_load_column(index, BISCUIT_DIR_COL_LEGACY,
+                                             idx->max_length_legacy, idx->max_length_lower,
+                                             idx->pos_idx_legacy, idx->neg_idx_legacy, idx->char_cache_legacy,
+                                             idx->pos_idx_lower, idx->neg_idx_lower, idx->char_cache_lower,
+                                             &idx->length_bitmaps_legacy, &idx->length_ge_bitmaps_legacy,
+                                             &idx->length_bitmaps_lower, &idx->length_ge_bitmaps_lower);
+            }
+            else
+            {
+                int col;
+
+                idx->column_data_cache       = (char ***) palloc(natts * sizeof(char **));
+                idx->column_data_cache_lower = (char ***) palloc(natts * sizeof(char **));
+
+                for (col = 0; col < num_columns; col++)
+                {
+                    idx->column_data_cache[col] =
+                        biscuit_persist_load_strcache(index, col, false, idx->num_records, idx->capacity);
+                    idx->column_data_cache_lower[col] =
+                        biscuit_persist_load_strcache(index, col, true, idx->num_records, idx->capacity);
+                }
+
+                for (col = 0; col < num_columns; col++)
+                {
+                    ColumnIndex *cidx = &idx->column_indices[col];
+
+                    biscuit_persist_load_column(index, col,
+                                                 cidx->max_length, cidx->max_length_lower,
+                                                 cidx->pos_idx, cidx->neg_idx, cidx->char_cache,
+                                                 cidx->pos_idx_lower, cidx->neg_idx_lower, cidx->char_cache_lower,
+                                                 &cidx->length_bitmaps, &cidx->length_ge_bitmaps,
+                                                 &cidx->length_bitmaps_lower, &cidx->length_ge_bitmaps_lower);
+                }
+            }
+
+            /* DIAGNOSTIC ONLY */
+            {
+                instr_time diag_now;
+
+                INSTR_TIME_SET_CURRENT(diag_now);
+                INSTR_TIME_SUBTRACT(diag_now, diag_start);
+                elog(DEBUG1,
+                     "biscuit: cold load decoded %ld structure(s) for index %u in %.3f ms",
+                     biscuit_diag_decode_count, indexoid,
+                     INSTR_TIME_GET_MILLISEC(diag_now));
+            }
+
+            /*
+             * gen/gen_at_last_snapshot: no more "is this stale relative to
+             * the metapage" check (see file header) -- what we just read *is*
+             * the live durable state by construction. Still populated from
+             * the metapage's current gen since idx->gen is the in-memory
+             * generation counter consulted elsewhere (e.g. cache
+             * invalidation bookkeeping); gen_at_last_snapshot is kept in
+             * lockstep with it here purely for field-consistency, not
+             * because anything still compares the two to decide whether to
+             * re-save.
+             */
+            if (biscuit_read_metadata_from_disk(index, &unused_records, &unused_columns,
+                                                 &unused_max_len, &live_gen))
+            {
+                idx->gen                  = live_gen;
+                idx->gen_at_last_snapshot = live_gen;
             }
         }
-
-        /* DIAGNOSTIC ONLY */
+        PG_CATCH();
         {
-            instr_time diag_now;
+            /*
+             * Order matters here: switch back to the caller's (long-lived)
+             * context FIRST, then CopyErrorData() so the copy is allocated in
+             * a context that survives FlushErrorState(), then flush. Copying
+             * while still notionally "inside" the failed load and freeing the
+             * copy only after tearing down the error state was producing a
+             * wild-pointer free that segfaulted in FreeErrorData().
+             *
+             * Do NOT decide here whether this is real corruption -- that
+             * depends on whether total_drains moved during this attempt,
+             * checked below once we're back at a safe point. idx itself
+             * (in CacheMemoryContext, which we don't reset) is simply
+             * abandoned; nothing outside this function has seen the
+             * pointer yet.
+             */
+            MemoryContextSwitchTo(oldcontext);
+            edata = CopyErrorData();
+            FlushErrorState();
+            caught_error = true;
+        }
+        PG_END_TRY();
 
-            INSTR_TIME_SET_CURRENT(diag_now);
-            INSTR_TIME_SUBTRACT(diag_now, diag_start);
+        if (!caught_error)
+            MemoryContextSwitchTo(oldcontext);
+
+        biscuit_read_pending_stats(index, &pll_after, &tpb_after, &drains_after);
+
+        if (drains_before != drains_after)
+        {
+            /*
+             * A drain committed at least part of its work while this
+             * attempt was in flight. Whether or not this attempt happened
+             * to throw, its view of the directory cannot be trusted -- retry
+             * from scratch rather than either believing a read that got
+             * lucky or discarding one that got unlucky.
+             */
+            if (caught_error)
+                FreeErrorData(edata);
             elog(DEBUG1,
-                 "biscuit: cold load decoded %ld structure(s) for index %u in %.3f ms",
-                 biscuit_diag_decode_count, indexoid,
-                 INSTR_TIME_GET_MILLISEC(diag_now));
+                 "biscuit: cold load for index %u overlapped a concurrent drain (total_drains "
+                 UINT64_FORMAT " -> " UINT64_FORMAT "), retrying (attempt %d/%d)",
+                 indexoid, drains_before, drains_after, attempt, BISCUIT_LOAD_MAX_ATTEMPTS);
+            continue;
         }
 
-        /*
-         * gen/gen_at_last_snapshot: no more "is this stale relative to
-         * the metapage" check (see file header) -- what we just read *is*
-         * the live durable state by construction. Still populated from
-         * the metapage's current gen since idx->gen is the in-memory
-         * generation counter consulted elsewhere (e.g. cache
-         * invalidation bookkeeping); gen_at_last_snapshot is kept in
-         * lockstep with it here purely for field-consistency, not
-         * because anything still compares the two to decide whether to
-         * re-save.
-         */
-        if (biscuit_read_metadata_from_disk(index, &unused_records, &unused_columns,
-                                             &unused_max_len, &live_gen))
+        if (caught_error)
         {
-            idx->gen                  = live_gen;
-            idx->gen_at_last_snapshot = live_gen;
+            /*
+             * total_drains held steady across the whole attempt and it
+             * still failed: this is genuine corrupt/inconsistent directory
+             * state, not a torn read. biscuit_load_index() treats a NULL
+             * return as "nothing readable" and raises an ERROR with a
+             * REINDEX hint -- there is no from-heap rebuild fallback to
+             * defer to anymore.
+             */
+            elog(WARNING, "biscuit: discarding unreadable directory-backed state for index %u (%s)",
+                 indexoid, edata->message);
+            FreeErrorData(edata);
+            return NULL;
         }
+
+        elog(DEBUG1, "biscuit: loaded directory-backed state for index %u (%d records, gen " UINT64_FORMAT ")",
+             indexoid, idx->num_records, idx->gen);
+
+        return idx;
     }
-    PG_CATCH();
-    {
-        /*
-         * Corrupt/inconsistent directory state -- discard everything
-         * (it's all in CacheMemoryContext, which we don't reset, so just
-         * drop the pointer) and return NULL. biscuit_load_index() treats
-         * a NULL return as "nothing readable" and raises an ERROR with a
-         * REINDEX hint -- there is no from-heap rebuild fallback to defer
-         * to anymore.
-         *
-         * Order matters here: switch back to the caller's (long-lived)
-         * context FIRST, then CopyErrorData() so the copy is allocated in
-         * a context that survives FlushErrorState(), then flush. Copying
-         * while still notionally "inside" the failed load and freeing the
-         * copy only after tearing down the error state was producing a
-         * wild-pointer free that segfaulted in FreeErrorData().
-         */
-        ErrorData *edata;
 
-        MemoryContextSwitchTo(oldcontext);
-        edata = CopyErrorData();
-        FlushErrorState();
-
-        elog(WARNING, "biscuit: discarding unreadable directory-backed state for index %u (%s)",
-             indexoid, edata->message);
-        FreeErrorData(edata);
-        return NULL;
-    }
-    PG_END_TRY();
-
-    MemoryContextSwitchTo(oldcontext);
-
-    elog(DEBUG1, "biscuit: loaded directory-backed state for index %u (%d records, gen " UINT64_FORMAT ")",
-         indexoid, idx->num_records, idx->gen);
-
-
-    return idx;
+    /*
+     * Every attempt raced a drain. Under the documented drain cadence
+     * (opportunistic compaction every biscuit.delta_compaction_slots rows,
+     * plus VACUUM) this is not expected to happen in practice -- it would
+     * take a drain landing inside this specific window on every single
+     * attempt. Treat exhausting the budget as observability, not silent
+     * data loss: warn and let the caller's REINDEX-hinted ERROR fire
+     * exactly as it would for real corruption.
+     */
+    elog(WARNING,
+         "biscuit: giving up cold load for index %u after %d attempts, each overlapping a concurrent drain",
+         indexoid, BISCUIT_LOAD_MAX_ATTEMPTS);
+    return NULL;
 }
 
 /* ================================================================

@@ -1050,6 +1050,59 @@ biscuit_rowstore_str_write(Relation index, BlockNumber *ptr_pagedir_root,
     biscuit_strptr_write(index, ptr_pagedir_root, slot_idx, &sp, batch);
 }
 
+/*
+ * biscuit_rowstore_read_oversize_retry
+ *
+ * Same race as biscuit_persist_read_blob_retry() in biscuit_persist.c
+ * (see that function's comment for the full mechanism), just resolved by
+ * (ptr_pagedir_root, slot_idx) via biscuit_strptr_read() instead of a
+ * directory identity: a concurrent compaction drain can retire an
+ * oversized STRCACHE blob's chain between when we read the pointer and
+ * when biscuit_page_read_blob() takes its first lock. Re-reading the
+ * pointer gets the current one; biscuit_strptr_read() always reads fresh
+ * from disk, so this costs nothing when there's nothing to retry.
+ */
+static void
+biscuit_rowstore_read_oversize_retry(Relation index, BlockNumber ptr_pagedir_root,
+                                      uint32 slot_idx, BiscuitStrPtr sp,
+                                      char **out_data, uint32 *out_len)
+{
+    int attempt;
+
+    for (attempt = 0; ; attempt++)
+    {
+        MemoryContext oldcxt = CurrentMemoryContext;
+
+        PG_TRY();
+        {
+            biscuit_page_read_blob(index, sp.blkno, out_data, out_len);
+            return;
+        }
+        PG_CATCH();
+        {
+            ErrorData *edata;
+
+            MemoryContextSwitchTo(oldcxt);
+            edata = CopyErrorData();
+
+            if (edata->sqlerrcode != ERRCODE_T_R_SERIALIZATION_FAILURE ||
+                attempt >= 4)
+                ReThrowError(edata);
+            FlushErrorState();
+
+            sp = biscuit_strptr_read(index, ptr_pagedir_root, slot_idx);
+            if (sp.blkno == InvalidBlockNumber)
+            {
+                *out_data = NULL;
+                *out_len  = 0;
+                return;
+            }
+            /* loop and retry with the freshly-resolved pointer */
+        }
+        PG_END_TRY();
+    }
+}
+
 char *
 biscuit_rowstore_str_read(Relation index, BlockNumber ptr_pagedir_root,
                            uint32 slot_idx, MemoryContext cxt, int *out_len)
@@ -1070,7 +1123,8 @@ biscuit_rowstore_str_read(Relation index, BlockNumber ptr_pagedir_root,
         char   *data;
         uint32  len;
 
-        biscuit_page_read_blob(index, sp.blkno, &data, &len);
+        biscuit_rowstore_read_oversize_retry(index, ptr_pagedir_root, slot_idx, sp,
+                                              &data, &len);
         old    = MemoryContextSwitchTo(cxt);
         result = pnstrdup(data ? data : "", len);
         MemoryContextSwitchTo(old);
