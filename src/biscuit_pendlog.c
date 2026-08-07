@@ -1099,7 +1099,38 @@ biscuit_pendlog_snapshot(Relation index)
              */
             if (!snap->need_rebuild)
             {
+                /*
+                 * CROSS-BACKEND LOCK-ORDER FIX (second call site).
+                 *
+                 * pendlog_expand_touched() reads each touched slot's text
+                 * back out of STRCACHE via plain LockBuffer(SHARE) -- an
+                 * LWLock, invisible to the deadlock detector. A concurrent
+                 * row-identity write (biscuit_persist_row_identity_write_
+                 * record(), biscuit_persist.c) can be holding one of those
+                 * very STRCACHE pages EXCLUSIVE, pinned open in its
+                 * BiscuitXlogBatch for the span of the whole row.
+                 *
+                 * pendlog_drain_internal() already closes this race for its
+                 * own call to pendlog_expand_touched() further down in this
+                 * file by taking biscuit_rowstore_alloc_lock() around it --
+                 * see that call site for the full mechanism. This is the
+                 * *other* caller: the ordinary per-query snapshot path that
+                 * every index scan goes through whenever there are pending
+                 * inserts to reconcile, which is the far more common of the
+                 * two and was left unprotected. Without this lock, an
+                 * ordinary SELECT racing an ordinary INSERT can hang
+                 * exactly the same way a drain racing an INSERT used to.
+                 *
+                 * Same ordering argument applies unchanged: this function
+                 * never holds BISCUIT_METAPAGE_BLKNO, so there is no path
+                 * back the other way for a cycle to close, and by the time
+                 * this lock is granted no writer's batch can still be
+                 * holding a STRCACHE page open (a writer flushes its batch
+                 * before releasing this same lock).
+                 */
+                biscuit_rowstore_alloc_lock(index);
                 pendlog_expand_touched(index, snap);
+                biscuit_rowstore_alloc_unlock(index);
                 snap->built_at_count = count;
                 return snap;
             }
@@ -1137,7 +1168,16 @@ biscuit_pendlog_snapshot(Relation index)
     if (head != InvalidBlockNumber)
         pendlog_ingest_from(index, snap, head, 0);
 
+    /*
+     * CROSS-BACKEND LOCK-ORDER FIX (third call site, same hazard).
+     * See the incremental-extend branch above for the full explanation;
+     * this is the fresh-build path taken the first time a backend asks
+     * for this index's snapshot (or after a drain invalidated the cached
+     * one). Same fix, same reasoning.
+     */
+    biscuit_rowstore_alloc_lock(index);
     pendlog_expand_touched(index, snap);
+    biscuit_rowstore_alloc_unlock(index);
 
     slot                    = pendlog_slot_acquire();
     slot->snap              = snap;

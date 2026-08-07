@@ -748,6 +748,28 @@ biscuit_rowstore_free_tid_chain(Relation index, BlockNumber pagedir_root)
  * STRCACHE -- pointer array
  * ================================================================ */
 
+/*
+ * LOCK ORDER, WRITE SIDE: STRHEAP before STRPTR.
+ *
+ * biscuit_rowstore_str_write() calls biscuit_strheap_append() (which, under
+ * an open BiscuitXlogBatch, leaves the STRHEAP tail page pinned+locked --
+ * ownership transferred into the batch, not released) and only then calls
+ * this function, which locks the STRPTR page below while that STRHEAP lock
+ * is still held. So a batched row write takes STRHEAP-then-STRPTR.
+ *
+ * The read side (biscuit_rowstore_str_read_all() / _str_read_slots() in
+ * this file) must never take STRPTR-then-STRHEAP as a result -- it used to,
+ * via biscuit_strptr_materialize() being called while the caller's STRPTR
+ * page was still locked, and that was an exact ABBA inversion of this
+ * order: two ordinary buffer-content LWLocks, invisible to PostgreSQL's
+ * deadlock detector, so a reader and a writer converging on the same
+ * (STRPTR page, STRHEAP page) pair simply hung forever instead of one
+ * being aborted. Both read functions now copy pointers out and release
+ * their STRPTR page before calling biscuit_strptr_materialize(), so they
+ * never hold both locks at once and there is nothing left to invert
+ * against this order. Do not reintroduce a caller that holds a STRPTR
+ * page locked across a call to biscuit_strptr_materialize().
+ */
 static void
 biscuit_strptr_write(Relation index, BlockNumber *pagedir_root,
                       uint32 slot_idx, const BiscuitStrPtr *sp,
@@ -1252,6 +1274,7 @@ biscuit_rowstore_str_read_all(Relation index, BlockNumber ptr_pagedir_root,
         Page                  dpage;
         BiscuitPageDirHeader *dhdr;
         BlockNumber          *dslots;
+        BlockNumber          *dslots_copy;
         BiscuitPageOpaque     dopaque;
         BlockNumber           next;
         uint32                i, n;
@@ -1262,11 +1285,53 @@ biscuit_rowstore_str_read_all(Relation index, BlockNumber ptr_pagedir_root,
         dslots = (BlockNumber *) ((char *) dhdr + MAXALIGN(sizeof(BiscuitPageDirHeader)));
         n      = dhdr->num_entries;
 
+        /*
+         * Copy this directory page's entries (and its chain-next pointer)
+         * out and release dbuf BEFORE touching any STRPTR/STRHEAP page.
+         *
+         * The previous version held this PAGEDIR page's share lock across
+         * the whole entries loop below, including the calls into
+         * biscuit_strptr_materialize() (via the STRPTR-copy path further
+         * down), on the theory that a directory page's lock is cheap to
+         * hold. It is not: biscuit_strptr_materialize() acquires a
+         * value-heap (STRHEAP) page's buffer lock, and the write path
+         * takes the two locks in the opposite order. When a
+         * BiscuitXlogBatch is open, biscuit_strheap_append() leaves its
+         * STRHEAP page pinned+locked (ownership transferred into the
+         * batch), and biscuit_rowstore_str_write() then calls
+         * biscuit_strptr_write(), which resolves its STRPTR page via
+         * biscuit_pagedir_ensure()/biscuit_pagedir_append() -- taking a
+         * PAGEDIR page's buffer lock while that STRHEAP lock is still
+         * held. So the write path takes STRHEAP-then-PAGEDIR while this
+         * function, unpatched, took PAGEDIR-then-STRHEAP -- an exact ABBA
+         * inversion on two ordinary buffer-content LWLocks, invisible to
+         * PostgreSQL's (heavyweight-lock-only) deadlock detector, so a
+         * reader and a writer converging on the same (PAGEDIR page,
+         * STRHEAP page) pair simply hang forever instead of one being
+         * aborted. This is the same class of bug already fixed once below
+         * for STRPTR-vs-STRHEAP (see that comment) -- it just recurred one
+         * level up, at the PAGEDIR page this loop was still holding.
+         *
+         * The fix is the same shape: never hold the PAGEDIR page's lock
+         * at the same time as anything that can reach STRHEAP. Copy the
+         * (small, fixed-size) BlockNumber array of STRPTR page pointers
+         * out while dbuf is locked, drop dbuf immediately, and only then
+         * walk those STRPTR pages (which themselves apply the very same
+         * treatment before calling materialize()).
+         */
+        dslots_copy = (BlockNumber *) palloc(n * sizeof(BlockNumber));
+        memcpy(dslots_copy, dslots, (Size) n * sizeof(BlockNumber));
+
+        dopaque = (BiscuitPageOpaque) PageGetSpecialPointer(dpage);
+        next    = dopaque->next;
+        UnlockReleaseBuffer(dbuf);
+
         for (i = 0; i < n && written < num_records; i++)
         {
-            Buffer         pbuf = ReadBuffer(index, dslots[i]);
+            Buffer         pbuf = ReadBuffer(index, dslots_copy[i]);
             Page           ppage;
             BiscuitStrPtr *pslots;
+            BiscuitStrPtr *sp_copy;
             uint32         take = Min(num_records - written, ptrs_per_page);
             uint32         k;
 
@@ -1274,28 +1339,32 @@ biscuit_rowstore_str_read_all(Relation index, BlockNumber ptr_pagedir_root,
             ppage  = BufferGetPage(pbuf);
             pslots = (BiscuitStrPtr *) BiscuitPageDataPtr(ppage);
 
+            /*
+             * Copy every pointer out and release this STRPTR page BEFORE
+             * materializing any of them. Same ABBA hazard as the PAGEDIR
+             * page above, one level down: biscuit_strptr_materialize()
+             * acquires a STRHEAP page's buffer lock, and the write path
+             * takes STRHEAP-then-STRPTR (biscuit_strheap_append() leaves
+             * its STRHEAP page pinned+locked under an open batch, then
+             * biscuit_strptr_write() locks the STRPTR page). So this
+             * function must never hold the STRPTR page locked across a
+             * materialize() call either.
+             */
+            sp_copy = (BiscuitStrPtr *) palloc(take * sizeof(BiscuitStrPtr));
+            memcpy(sp_copy, pslots, (Size) take * sizeof(BiscuitStrPtr));
+            UnlockReleaseBuffer(pbuf);
+
             for (k = 0; k < take; k++)
             {
-                /*
-                 * Copy the pointer out before materializing: materializing
-                 * may acquire a different value-heap buffer, and holding
-                 * this STRPTR page's share lock across that is fine, but
-                 * relying on `pslots` staying valid afterwards is not worth
-                 * the subtlety -- the struct is 12 bytes.
-                 */
-                BiscuitStrPtr sp = pslots[k];
-
                 out_arr[written + k] =
-                    biscuit_strptr_materialize(index, &sp, cxt, &heap_buf, &heap_blk);
+                    biscuit_strptr_materialize(index, &sp_copy[k], cxt, &heap_buf, &heap_blk);
             }
 
-            UnlockReleaseBuffer(pbuf);
+            pfree(sp_copy);
             written += take;
         }
 
-        dopaque = (BiscuitPageOpaque) PageGetSpecialPointer(dpage);
-        next    = dopaque->next;
-        UnlockReleaseBuffer(dbuf);
+        pfree(dslots_copy);
         cur = next;
     }
 
@@ -1361,6 +1430,7 @@ biscuit_rowstore_str_read_slots(Relation index, BlockNumber ptr_pagedir_root,
         Page                  dpage;
         BiscuitPageDirHeader *dhdr;
         BlockNumber          *dslots;
+        BlockNumber          *dslots_copy;
         BiscuitPageOpaque     dopaque;
         BlockNumber           next;
         uint32                i, n;
@@ -1371,6 +1441,24 @@ biscuit_rowstore_str_read_slots(Relation index, BlockNumber ptr_pagedir_root,
         dslots = (BlockNumber *) ((char *) dhdr + MAXALIGN(sizeof(BiscuitPageDirHeader)));
         n      = dhdr->num_entries;
 
+        /*
+         * Copy this directory page's entries (and its chain-next pointer)
+         * out and release dbuf BEFORE touching any STRPTR/STRHEAP page.
+         * Same ABBA hazard as biscuit_rowstore_str_read_all() -- see that
+         * function's comment. The write path takes STRHEAP-then-PAGEDIR
+         * (via biscuit_pagedir_ensure()/biscuit_pagedir_append() while an
+         * open batch still holds a STRHEAP page locked); holding this
+         * PAGEDIR page locked across the entries loop below, which can
+         * reach STRHEAP via biscuit_strptr_materialize(), inverted that
+         * order.
+         */
+        dslots_copy = (BlockNumber *) palloc(n * sizeof(BlockNumber));
+        memcpy(dslots_copy, dslots, (Size) n * sizeof(BlockNumber));
+
+        dopaque = (BiscuitPageOpaque) PageGetSpecialPointer(dpage);
+        next    = dopaque->next;
+        UnlockReleaseBuffer(dbuf);
+
         for (i = 0; i < n && next_slot < nslots; i++, logical_page++)
         {
             uint32 first = logical_page * ptrs_per_page;
@@ -1378,6 +1466,10 @@ biscuit_rowstore_str_read_slots(Relation index, BlockNumber ptr_pagedir_root,
             Buffer pbuf;
             Page   ppage;
             BiscuitStrPtr *pslots;
+            BiscuitStrPtr *sp_copy;
+            int    *idx_copy;
+            int     ncopy = 0;
+            int     j;
 
             /*
              * Skip this pointer page entirely if no requested slot falls
@@ -1387,33 +1479,54 @@ biscuit_rowstore_str_read_slots(Relation index, BlockNumber ptr_pagedir_root,
             if (slots[next_slot] >= past)
                 continue;
 
-            pbuf = ReadBuffer(index, dslots[i]);
+            pbuf = ReadBuffer(index, dslots_copy[i]);
             LockBuffer(pbuf, BUFFER_LOCK_SHARE);
             ppage  = BufferGetPage(pbuf);
             pslots = (BiscuitStrPtr *) BiscuitPageDataPtr(ppage);
 
+            /*
+             * Copy every pointer this page will serve out, and release
+             * pbuf, BEFORE materializing any of them.
+             *
+             * Same ABBA hazard as biscuit_rowstore_str_read_all(): holding
+             * this STRPTR page's share lock while biscuit_strptr_materialize()
+             * reaches for a STRHEAP page's lock inverts against the write
+             * path's STRHEAP-then-STRPTR order under an open
+             * BiscuitXlogBatch (biscuit_strheap_append() leaves its STRHEAP
+             * page pinned+locked, then biscuit_strptr_write() locks STRPTR).
+             * Both sides are ordinary buffer-content LWLocks, so the
+             * inversion is invisible to the deadlock detector -- see
+             * biscuit_strptr_write()'s comment. Bounded by ptrs_per_page,
+             * so the copy is small and worst-case one BLCKSZ page's worth.
+             */
+            sp_copy  = (BiscuitStrPtr *) palloc(ptrs_per_page * sizeof(BiscuitStrPtr));
+            idx_copy = (int *) palloc(ptrs_per_page * sizeof(int));
+
             while (next_slot < nslots && slots[next_slot] < past)
             {
-                /*
-                 * Copy the pointer out before materializing: materializing
-                 * may acquire a different value-heap buffer, and relying
-                 * on `pslots` remaining valid across that is not worth the
-                 * subtlety for a 12-byte struct. Same reasoning as
-                 * biscuit_rowstore_str_read_all().
-                 */
-                BiscuitStrPtr sp = pslots[slots[next_slot] - first];
-
-                out_arr[next_slot] =
-                    biscuit_strptr_materialize(index, &sp, cxt, &heap_buf, &heap_blk);
+                Assert(ncopy < (int) ptrs_per_page);   /* slots[] is ascending
+                                                          * and drawn from a
+                                                          * bitmap, so this
+                                                          * page can serve at
+                                                          * most ptrs_per_page
+                                                          * of them */
+                sp_copy[ncopy]  = pslots[slots[next_slot] - first];
+                idx_copy[ncopy] = next_slot;
+                ncopy++;
                 next_slot++;
             }
 
             UnlockReleaseBuffer(pbuf);
+
+            for (j = 0; j < ncopy; j++)
+                out_arr[idx_copy[j]] =
+                    biscuit_strptr_materialize(index, &sp_copy[j], cxt, &heap_buf, &heap_blk);
+
+            pfree(sp_copy);
+            pfree(idx_copy);
         }
 
-        dopaque = (BiscuitPageOpaque) PageGetSpecialPointer(dpage);
-        next    = dopaque->next;
-        UnlockReleaseBuffer(dbuf);
+        pfree(dslots_copy);
         cur = next;
     }
 
