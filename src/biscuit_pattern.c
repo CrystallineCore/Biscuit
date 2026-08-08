@@ -2566,6 +2566,10 @@ biscuit_query_pattern_ilike_masked(Relation index, BiscuitIndex *idx, const char
     int            plen = strlen(pattern);
     char          *pl;
     RoaringBitmap *result;
+    ParsedPattern *parsed = NULL;
+    int            min_len, i;
+    int            wildcard_count = 0, percent_count = 0;
+    bool           only_wildcards = true;
 
     if (mask && biscuit_roaring_is_empty(mask))
         return biscuit_roaring_create();
@@ -2589,11 +2593,6 @@ biscuit_query_pattern_ilike_masked(Relation index, BiscuitIndex *idx, const char
 
     /* delegate with lowercased pattern, using _lower accessors implicitly
        via biscuit_match_part_at_pos_ilike / _end_ilike / get_length_ge_lower */
-
-    ParsedPattern *parsed = NULL;
-    int            min_len, i;
-    int            wildcard_count = 0, percent_count = 0;
-    bool           only_wildcards = true;
 
     plen = strlen(pl);
 

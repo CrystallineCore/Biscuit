@@ -500,8 +500,8 @@ biscuit_persist_read_blob_retry(Relation index,
                                  BlockNumber initial_head,
                                  char **out_data, uint32 *out_len)
 {
-    BlockNumber head = initial_head;
-    int         attempt;
+    volatile BlockNumber head = initial_head;
+    volatile int attempt;
 
     for (attempt = 0; ; attempt++)
     {
@@ -1237,20 +1237,20 @@ biscuit_persist_load(Relation index)
     int            natts    = index->rd_index->indnatts;
     MemoryContext  oldcontext = CurrentMemoryContext;
     instr_time     diag_start;   /* DIAGNOSTIC ONLY */
-    int            attempt;
+    volatile int   attempt;
 
     biscuit_diag_decode_count = 0;   /* DIAGNOSTIC ONLY */
     INSTR_TIME_SET_CURRENT(diag_start);
 
     for (attempt = 1; attempt <= BISCUIT_LOAD_MAX_ATTEMPTS; attempt++)
     {
-        BiscuitIndex   *idx = NULL;
+        BiscuitIndex   * volatile idx = NULL;
         BiscuitDirEntry header_entry;
         uint32          pll_before, pll_after;
         uint64          tpb_before, tpb_after;
         uint64          drains_before, drains_after;
-        bool            caught_error = false;
-        ErrorData      *edata = NULL;
+        volatile bool   caught_error = false;
+        ErrorData      * volatile edata = NULL;
 
         biscuit_read_pending_stats(index, &pll_before, &tpb_before, &drains_before);
 

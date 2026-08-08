@@ -1089,7 +1089,7 @@ biscuit_rowstore_read_oversize_retry(Relation index, BlockNumber ptr_pagedir_roo
                                       uint32 slot_idx, BiscuitStrPtr sp,
                                       char **out_data, uint32 *out_len)
 {
-    int attempt;
+    volatile int attempt;
 
     for (attempt = 0; ; attempt++)
     {
