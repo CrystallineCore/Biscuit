@@ -318,6 +318,13 @@ typedef struct BiscuitPendLogSnapshot
  * resume point rather than rebuilt -- see BiscuitPendLogSnapshot's
  * resume_blk/resume_off. A full rebuild happens only when total_drains
  * moves, i.e. when a drain has folded the old deltas into the blobs.
+ *
+ * NOTE that this is called once per BITMAP FETCH, not once per statement --
+ * the metapage is re-read every time -- so successive calls within one scan
+ * can legitimately observe different log states. That is fine for appends
+ * (they extend incrementally) and NOT fine for drains, which is what the
+ * scan-lifetime guard below exists to catch. Every call to this function
+ * feeds that guard when it is armed.
  */
 extern BiscuitPendLogSnapshot *biscuit_pendlog_snapshot(Relation index);
 
@@ -369,6 +376,77 @@ extern bool biscuit_pendlog_has_kills(const BiscuitPendLogSnapshot *snap);
 
 /* Drop any cached snapshot (relcache invalidation, drain, index drop). */
 extern void biscuit_pendlog_invalidate(Oid indexoid);
+
+/* ==================== SCAN-LIFETIME DRAIN GUARD ==================== */
+
+/*
+ * A scan is not a point in time, and the read path used to assume it was.
+ *
+ * biscuit_pendlog_snapshot() above is called on EVERY bitmap fetch, and one
+ * ILIKE 'alpha%' costs six of them (five biscuit_get_pos_bitmap_lower()
+ * calls out of biscuit_match_part_at_pos_ilike(), plus one
+ * biscuit_get_length_ge_lower()). The only thing that notices another
+ * backend's drain is biscuit_get_current_index()'s meta->gen check
+ * (biscuit_index.h), and that runs exactly twice per scan node: at
+ * beginscan and at rescan. So a scan validated its base once and then
+ * re-read the log five more times without re-validating anything.
+ *
+ * A drain landing in that window leaves the reader holding in-memory base
+ * bitmaps built from the PRE-drain blobs -- nothing updates them, since the
+ * drain operates directly on the on-disk directory with no BiscuitIndex
+ * involved -- alongside a log that no longer mentions the merged slots. So
+ * biscuit_pendlog_snapshot() correctly returns NULL, biscuit_reconcile_
+ * pending() takes its "log empty, fully drained" early return, and hands
+ * back that stale base verbatim. Every post-build row is then in neither
+ * half of the read path for every fetch after the drain, and since those
+ * bitmaps are AND-ed together the result collapses to exactly the
+ * membership base had at load time -- which is why the observed failures
+ * landed on precisely the CREATE INDEX row count whatever the workload
+ * size, why every concurrent reader hit it in the same narrow window, and
+ * why it cleared by itself when their next beginscan reloaded.
+ *
+ * The gen bump at pendlog_detach()/pendlog_clear_draining() is correct as
+ * far as it goes. It just does not cover a scan already in flight.
+ *
+ * Contract:
+ *   - begin/end must be paired around ONE candidate-set build. end() is
+ *     idempotent, and a re-arm resets the state wholesale, so a guard left
+ *     armed by an aborted scan cannot make a later one report a false
+ *     divergence.
+ *
+ *   - begin() MUST be called BEFORE biscuit_get_current_index(), never
+ *     after. The two metapage reads cannot be made atomic with respect to
+ *     each other and the ordering decides which way the gap fails: arming
+ *     first can cost one unnecessary rebuild, arming second misses the
+ *     drain entirely and reintroduces the defect this exists to close.
+ *
+ *   - moved() must be read BEFORE end(). A true return means the candidate
+ *     set just built mixes pre- and post-drain bitmaps and must be
+ *     discarded whole -- not filtered, counted, or collected from. That
+ *     includes an EMPTY candidate set: "no rows" reached under a drain is
+ *     exactly as untrustworthy as a short count, since an AND against a
+ *     post-drain-but-pre-reload bitmap can empty the set outright.
+ *
+ *   - The caller must then reload (biscuit_get_current_index() will, since
+ *     the drain bumped meta->gen) and rebuild. Retry rather than lock: a
+ *     drain is rare relative to scans, and excluding one for the duration
+ *     of every scan would cost far more than occasionally redoing one.
+ *
+ * DELIBERATELY TRACKS ONLY (total_drains, pendlog_draining), NOT gen. gen
+ * advances on every committed INSERT/UPDATE/DELETE, and ordinary appends
+ * arriving mid-scan are handled correctly in flight -- that is exactly what
+ * the incremental-extend path in biscuit_pendlog_snapshot() is for.
+ * Retrying on those would livelock a scan under any sustained write load
+ * while fixing nothing. Only a drain relocates membership out from under a
+ * live reader.
+ *
+ * One guard, not a stack: index scans do not nest within a backend at this
+ * layer. The sole caller is biscuit_rescan() (biscuit_scan.c); see its
+ * retry loop.
+ */
+extern void biscuit_pendlog_scan_begin(Relation index);
+extern bool biscuit_pendlog_scan_moved(void);
+extern void biscuit_pendlog_scan_end(void);
 
 /* ==================== DRAIN ==================== */
 

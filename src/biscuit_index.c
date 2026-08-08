@@ -2545,24 +2545,56 @@ biscuit_load_index(Relation index)
                  errhint("The index may be corrupt; consider running REINDEX.")));
 
     /*
-     * biscuit_persist_load() never touches idx->gen /
-     * idx->gen_at_last_snapshot (the snapshot format deliberately doesn't
-     * carry them -- see the field comments in BiscuitIndex). The
-     * authoritative generation counter lives in the metapage, so pull it
-     * from there now; a missing/unreadable metapage just leaves us at
-     * generation 0, which is safe (it only means the next mutation's bump
-     * is the first one this process observes).
+     * GEN CONSISTENCY -- do not clobber what biscuit_persist_load() already
+     * set.
+     *
+     * biscuit_persist_load() now captures idx->gen from the exact same
+     * metapage read it uses to reconcile idx->num_records (see its GEN
+     * CONSISTENCY comment), so the two describe one consistent snapshot:
+     * any commit not reflected in num_records necessarily bumped gen after
+     * that read, which is what lets biscuit_get_current_index()'s staleness
+     * check (disk_gen <= idx->gen) correctly trigger a reload once such a
+     * commit lands.
+     *
+     * This block used to unconditionally overwrite idx->gen with a *second*,
+     * fresh biscuit_read_metadata_from_disk() call made here -- i.e. after
+     * biscuit_persist_load() had already finished decoding every bitmap and
+     * STRCACHE column for potentially thousands of rows. Under concurrent
+     * writers that decode window is long enough for meta->gen to advance far
+     * past what idx->num_records actually covers, so the overwritten
+     * idx->gen ends up "ahead of itself" relative to the data actually
+     * loaded. Every subsequent commit's gen bump then still looks like it
+     * happened before this load, so biscuit_get_current_index() never
+     * reloads again -- freezing this backend's readers at whatever
+     * num_records this particular load happened to reconcile, often exactly
+     * the build-time count. This was a second copy of the exact race
+     * biscuit_persist_load()'s GEN CONSISTENCY fix already closed one call
+     * frame down; overwriting its result here reopened it.
+     *
+     * Only fall back to a fresh read for the (essentially never, but cheap
+     * to guard) case where biscuit_persist_load() left idx->gen at its
+     * palloc0 default of 0 -- e.g. a metapage read that failed at
+     * reconciliation time despite the HEADER having been found. A
+     * genuinely fresh index with no post-build activity also reads back
+     * gen 0 either way, so this fallback is safe to take unconditionally
+     * on that value: it either reproduces the same 0, or fills in a value
+     * biscuit_persist_load() never got the chance to set.
      */
     {
         int    disk_records = 0;
         int    unused_columns, unused_max_len;
         uint64 disk_gen = 0;
+        bool   have_disk_meta;
 
-        biscuit_read_metadata_from_disk(index, &disk_records,
+        have_disk_meta = biscuit_read_metadata_from_disk(index, &disk_records,
                                         &unused_columns, &unused_max_len,
                                         &disk_gen);
-        idx->gen                  = disk_gen;
-        idx->gen_at_last_snapshot = disk_gen;
+
+        if (idx->gen == 0)
+        {
+            idx->gen                  = disk_gen;
+            idx->gen_at_last_snapshot = disk_gen;
+        }
 
         /*
          * The record count used to be discarded here (into a variable
@@ -2580,7 +2612,7 @@ biscuit_load_index(Relation index)
          * for the rows it does know about, and erroring here would take out
          * every read of a merely-truncated index.
          */
-        if (disk_records > idx->num_records)
+        if (have_disk_meta && disk_records > idx->num_records)
             elog(WARNING,
                  "biscuit: index \"%s\" loaded %d records but metapage reports %d; "
                  "%d slot(s) will not be visible to this backend",

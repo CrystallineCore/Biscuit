@@ -14,6 +14,13 @@
 #include "utils/memutils.h"
 
 /*
+ * Defined in biscuit_scan.c, registered as biscuit.diag_scan_trace in
+ * _PG_init(). Same forward declaration biscuit_pattern.c already uses for
+ * the same reason -- see that file's comment.
+ */
+extern bool biscuit_diag_scan_trace;
+
+/*
  * How many zero-identity slots in one expansion before it is worth a
  * WARNING rather than a DEBUG1. See the report block at the end of
  * biscuit_delta_expand_slots() for why this is a threshold and not a
@@ -199,6 +206,18 @@ biscuit_delta_expand_slots(Relation index,
         int          i;
 
         /*
+         * DIAGNOSTIC ONLY (biscuit.diag_scan_trace), reset per column --
+         * see the report emitted at the bottom of this column's block for
+         * what these measure and why.
+         */
+        int    diag_min_len = -1;
+        int    diag_max_len = -1;
+        int64  diag_len_sum = 0;
+        int    diag_len_n   = 0;
+        uint32 diag_short_example_slot  = 0;
+        bool   diag_have_short_example  = false;
+
+        /*
          * The opclass gating, re-derived from the catalog exactly as
          * biscuit_load_index() does. This must not be inferred from
          * "is there lowercase text for this slot": biscuit_ilike_ops
@@ -235,6 +254,33 @@ biscuit_delta_expand_slots(Relation index,
 
             produced[i] = true;
 
+            if (unlikely(biscuit_diag_scan_trace))
+            {
+                /*
+                 * Measure the RAW read length specifically -- the raw
+                 * pass is what pos=0/1/2 of a case-sensitive LIKE/ILIKE
+                 * anchor probe (e.g. the "alpha%" reconcile trace) reads
+                 * from. `l` is tracked into the same min/max only when
+                 * there is no raw pass for this mode, so a LIKE-only
+                 * column's numbers aren't diluted by a lowercase length
+                 * that was never fanned out for it.
+                 */
+                int len = s ? (int) strlen(s) : (int) strlen(l);
+
+                if (diag_min_len < 0 || len < diag_min_len)
+                    diag_min_len = len;
+                if (len > diag_max_len)
+                    diag_max_len = len;
+                diag_len_sum += len;
+                diag_len_n++;
+
+                if (len <= 1 && !diag_have_short_example)
+                {
+                    diag_short_example_slot = slots[i];
+                    diag_have_short_example = true;
+                }
+            }
+
             /*
              * len_ge_bound = -1: unbounded.
              *
@@ -252,6 +298,20 @@ biscuit_delta_expand_slots(Relation index,
                                   dc->col, mode, slots[i],
                                   -1, op, emit, ctx);
         }
+
+        if (unlikely(biscuit_diag_scan_trace) && diag_len_n > 0)
+            ereport(WARNING,
+                    (errmsg("biscuit: diag delta read-length col=%d n=%d "
+                            "min_len=%d max_len=%d avg_len=%.1f",
+                            dc->col, diag_len_n, diag_min_len, diag_max_len,
+                            (double) diag_len_sum / diag_len_n),
+                     diag_have_short_example ?
+                         errdetail("First slot with a <=1 byte read: %u.",
+                                   diag_short_example_slot) : 0,
+                     errhint("min_len==max_len==1 with n close to nslots means "
+                             "biscuit_rowstore_str_read_slots() is returning a "
+                             "truncated read for this column's post-build rows, "
+                             "not that expansion or reconciliation dropped them.")));
     }
 
     for (c = 0; c < nslots; c++)

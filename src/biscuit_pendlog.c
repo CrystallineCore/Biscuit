@@ -25,6 +25,13 @@
 #include "utils/memutils.h"
 #include "access/xact.h"
 
+/*
+ * Defined in biscuit_scan.c, registered as biscuit.diag_scan_trace in
+ * _PG_init(). Same forward declaration biscuit_pattern.c and biscuit_delta.c
+ * already carry, for the same reason -- see biscuit_pattern.c's comment.
+ */
+extern bool biscuit_diag_scan_trace;
+
 #define BiscuitPageDataPtr(page)  ((char *) (page) + SizeOfPageHeaderData)
 
 static inline void
@@ -830,6 +837,142 @@ static void pendlog_ingest_from(Relation index, BiscuitPendLogSnapshot *snap,
                                  BlockNumber start_blk, uint32 start_off);
 static void pendlog_expand_touched(Relation index, BiscuitPendLogSnapshot *snap);
 
+/* ==================== SCAN-LIFETIME DRAIN GUARD ==================== */
+
+/*
+ * A scan is not a point in time, and until now the read path assumed it was.
+ *
+ * biscuit_get_current_index() (biscuit_index.c) is the ONLY thing that
+ * notices another backend's drain, via meta->gen, and it runs exactly twice
+ * per scan node: at beginscan and at rescan. But biscuit_pendlog_snapshot()
+ * below re-reads the metapage on EVERY bitmap fetch, and one ILIKE 'alpha%'
+ * costs six of them (five biscuit_get_pos_bitmap_lower() calls out of
+ * biscuit_match_part_at_pos_ilike(), plus one biscuit_get_length_ge_lower()).
+ * So a scan validates its base once and then re-reads the log five more
+ * times without re-validating anything.
+ *
+ * If a drain lands in that window the reader is left holding:
+ *
+ *   - in-memory base bitmaps built from the PRE-drain blobs, which nothing
+ *     updates (pendlog_detach() operates directly on the on-disk directory
+ *     with no BiscuitIndex involved);
+ *   - a log that no longer mentions the drained slots, because the drain
+ *     consumed it -- so biscuit_pendlog_snapshot() correctly returns NULL,
+ *     biscuit_reconcile_pending() takes its "log empty" early return, and
+ *     hands back that stale base verbatim;
+ *   - no reload, because meta->gen is not re-checked until the next
+ *     beginscan/rescan.
+ *
+ * Every post-build row is then in neither half of the read path, for every
+ * bitmap fetched after the drain. Since those bitmaps are AND-ed together,
+ * the result collapses to exactly the membership the base had at load time
+ * -- which is why the observed failure always lands on precisely the
+ * CREATE INDEX row count, whatever the workload size, and why it is bursty
+ * (all concurrent readers straddle the same drain) and then clears (their
+ * next beginscan reloads).
+ *
+ * The bump at pendlog_detach()/pendlog_clear_draining() is correct and its
+ * comment ("meta->gen is the one counter every backend already re-checks on
+ * beginscan/rescan ... so bumping it here forces the reload") is true as far
+ * as it goes. It just does not cover a scan already in flight.
+ *
+ * This guard closes that. A scan arms it with the (total_drains,
+ * pendlog_draining) pair it is about to build its candidate set against;
+ * every snapshot fetch inside that scan compares and records a divergence;
+ * the scan checks once at the end and, on a divergence, throws the candidate
+ * set away, reloads the index and rebuilds. Optimistic retry rather than
+ * locking, because a drain is rare relative to scans and holding anything
+ * across a whole scan to exclude it would be far more expensive than
+ * occasionally redoing one.
+ *
+ * DELIBERATELY ONLY (total_drains, pendlog_draining), NOT gen. gen advances
+ * on every committed INSERT/UPDATE/DELETE, and ordinary appends are handled
+ * correctly in flight -- that is exactly what the incremental-extend branch
+ * of biscuit_pendlog_snapshot() is for. Retrying on those would make this
+ * scan livelock under any sustained write load while fixing nothing. Only a
+ * drain relocates membership out from under a live reader.
+ *
+ * One guard, not a stack: index scans do not nest within a backend at this
+ * layer, and a re-arm resets the state wholesale, so a guard left armed by
+ * an aborted scan cannot make a later one report a false divergence.
+ */
+typedef struct PendLogScanGuard
+{
+    bool        active;
+    Oid         indexoid;
+    uint64      drains;      /* meta->total_drains as of scan start */
+    BlockNumber draining;    /* meta->pendlog_draining as of scan start */
+    bool        moved;       /* a fetch inside the scan saw either change */
+} PendLogScanGuard;
+
+static PendLogScanGuard pendlog_scan_guard = {
+    false, InvalidOid, 0, InvalidBlockNumber, false
+};
+
+/*
+ * Arm the guard for one candidate-set build over `index`.
+ *
+ * MUST be called BEFORE biscuit_get_current_index(), not after. The two
+ * reads cannot be atomic with respect to each other, so the ordering is
+ * what decides which way the unavoidable gap fails:
+ *
+ *   guard first: a drain landing in the gap is seen by
+ *   biscuit_get_current_index() (which reloads to post-drain state) but not
+ *   by the guard (which primed pre-drain), so the very first fetch reports
+ *   moved and the scan retries once needlessly. Correct, costs one rebuild.
+ *
+ *   index first: a drain landing in the gap is missed by both -- the reload
+ *   already happened, and the guard primes on the post-drain values so
+ *   nothing ever diverges -- and the scan proceeds on a base that predates
+ *   the drain. That is the bug this function exists to close, reintroduced.
+ *
+ * Spurious retries are cheap and self-limiting; a missed drain is silent and
+ * wrong. Arm first.
+ */
+void
+biscuit_pendlog_scan_begin(Relation index)
+{
+    Buffer               mbuf;
+    BiscuitMetaPageData *meta;
+
+    pendlog_scan_guard.active   = true;
+    pendlog_scan_guard.indexoid = RelationGetRelid(index);
+    pendlog_scan_guard.moved    = false;
+    pendlog_scan_guard.drains   = 0;
+    pendlog_scan_guard.draining = InvalidBlockNumber;
+
+    if (RelationGetNumberOfBlocks(index) == 0)
+        return;   /* nothing on disk yet; nothing can drain out from under us */
+
+    mbuf = ReadBuffer(index, BISCUIT_METAPAGE_BLKNO);
+    LockBuffer(mbuf, BUFFER_LOCK_SHARE);
+    meta = (BiscuitMetaPageData *) PageGetSpecialPointer(BufferGetPage(mbuf));
+    pendlog_scan_guard.drains   = meta->total_drains;
+    pendlog_scan_guard.draining = meta->pendlog_draining;
+    UnlockReleaseBuffer(mbuf);
+}
+
+/*
+ * Did a drain start or finish while the guard was armed?
+ *
+ * Read before biscuit_pendlog_scan_end(); a true return means the candidate
+ * set just built is not trustworthy and must be discarded rather than
+ * filtered, counted or collected from.
+ */
+bool
+biscuit_pendlog_scan_moved(void)
+{
+    return pendlog_scan_guard.active && pendlog_scan_guard.moved;
+}
+
+void
+biscuit_pendlog_scan_end(void)
+{
+    pendlog_scan_guard.active   = false;
+    pendlog_scan_guard.indexoid = InvalidOid;
+    pendlog_scan_guard.moved    = false;
+}
+
 static void
 pendlog_key_init(BiscuitPendLogKey *k, int32 col, bool is_lower, uint8 kind,
                   int32 ch, int32 position)
@@ -1013,6 +1156,43 @@ biscuit_pendlog_snapshot(Relation index)
     drains   = meta->total_drains;
     draining = meta->pendlog_draining;
     UnlockReleaseBuffer(mbuf);
+
+    /*
+     * SCAN-LIFETIME DRAIN GUARD -- observation point.
+     *
+     * Placed here, immediately after the metapage read and before ANY of the
+     * early returns below, because the most damaging case is precisely the
+     * one that returns earliest: head and draining both Invalid, i.e. the log
+     * was drained out from under this scan. That path returns NULL, the
+     * caller's reconcile treats it as "fully drained, the steady state" and
+     * hands back an in-memory base that predates the merge. Checking after
+     * the early return would miss exactly the failure this guard is for.
+     *
+     * Recording rather than erroring: the caller is mid-way through building
+     * a candidate set out of bitmaps it borrowed from a BiscuitIndex that is
+     * still perfectly valid to *free*, just no longer valid to *trust*.
+     * Unwinding from here would have to do it through every intermediate
+     * bitmap in biscuit_pattern.c. The scan checks once, at a point where it
+     * owns everything.
+     */
+    if (unlikely(pendlog_scan_guard.active) &&
+        pendlog_scan_guard.indexoid == indexoid &&
+        (drains != pendlog_scan_guard.drains ||
+         draining != pendlog_scan_guard.draining))
+    {
+        pendlog_scan_guard.moved = true;
+
+        if (unlikely(biscuit_diag_scan_trace))
+            ereport(WARNING,
+                    (errmsg("biscuit: diag drain observed mid-scan -- "
+                            "total_drains " UINT64_FORMAT " -> " UINT64_FORMAT
+                            ", draining %u -> %u",
+                            pendlog_scan_guard.drains, drains,
+                            pendlog_scan_guard.draining, draining),
+                     errhint("The candidate set built so far mixes pre- and "
+                             "post-drain bitmaps; the scan will discard it, "
+                             "reload and rebuild.")));
+    }
 
     /*
      * Staleness key = (total_drains, npages, records on the tail page).

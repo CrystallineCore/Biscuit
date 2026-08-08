@@ -1309,7 +1309,88 @@ biscuit_persist_load(Relation index)
 
         if (!biscuit_dir_find(index, BISCUIT_DIR_COL_SINGLETON, false, BISCUIT_DIR_KIND_HEADER,
                                -1, -1, &header_entry, NULL))
+        {
+            /*
+             * CONCURRENCY FIX -- do not treat "HEADER not found" as
+             * definitive without first checking it against the same
+             * torn-read guard the rest of this function uses.
+             *
+             * This lookup used to return NULL here unconditionally, which
+             * is correct for the one case the comment below describes
+             * (build has never run) but wrong for a second case that looks
+             * identical from here: a concurrent drain
+             * (pendlog_drain_internal(), biscuit_pendlog.c) restructures
+             * directory entries under its own serializing lock while this
+             * walk is in flight, and biscuit_dir_find() can transiently
+             * fail to find an entry that has been there since CREATE INDEX
+             * simply because it read the directory mid-restructure. Every
+             * other read in this function is protected against exactly
+             * that by the drains_before/drains_after comparison a few
+             * dozen lines down -- this early return used to skip that
+             * protection entirely, because it returns before the retry
+             * loop's torn-read check ever runs. On a single backend this
+             * never fires (a backend's own drain always completes before
+             * that same backend's next load), which is why it survived
+             * single-session testing; a second backend loading
+             * concurrently with the first one's drain hits it
+             * immediately, and biscuit_load_index() turns the resulting
+             * NULL straight into "no on-disk snapshot found for index",
+             * with zero retries.
+             *
+             * Fix: apply the same total_drains check used everywhere else
+             * in this function. If a drain ran (at least partly) while we
+             * were looking, this miss cannot be trusted -- retry the whole
+             * attempt. Only return NULL when total_drains held steady,
+             * which is the genuine "nothing saved yet" case the original
+             * comment describes.
+             */
+            uint32 pll_after_hdr;
+            uint64 tpb_after_hdr;
+            uint64 drains_after_hdr;
+
+            biscuit_read_pending_stats(index, &pll_after_hdr, &tpb_after_hdr,
+                                        &drains_after_hdr);
+
+            if (drains_after_hdr != drains_before)
+            {
+                elog(DEBUG1,
+                     "biscuit: HEADER lookup for index %u overlapped a concurrent drain "
+                     "(total_drains " UINT64_FORMAT " -> " UINT64_FORMAT "), retrying "
+                     "(attempt %d/%d)",
+                     indexoid, drains_before, drains_after_hdr, attempt,
+                     BISCUIT_LOAD_MAX_ATTEMPTS);
+                continue;
+            }
+
+            /*
+             * DIAGNOSTIC -- always log this exact NULL return, not just
+             * under biscuit_diag_scan_trace.
+             *
+             * This is the "genuinely nothing saved yet" case, which should
+             * only ever be reachable before CREATE INDEX's build has
+             * completed. biscuit_load_index() turns a NULL return straight
+             * into the "no on-disk snapshot found for index" ERROR seen at
+             * the client -- if that error is firing against an index whose
+             * build finished, drains_before/drains_after held steady across
+             * this attempt but the HEADER entry still wasn't found is
+             * itself the anomaly worth capturing: it means
+             * biscuit_dir_find() came up empty for BISCUIT_DIR_KIND_HEADER
+             * while total_drains did not move, which the retry logic above
+             * treats as conclusive. Logging indexoid/attempt/drains here
+             * costs nothing on the (expected) pre-build case and gives a
+             * concrete timestamped breadcrumb for the (unexpected)
+             * post-build case, including whether it's the first attempt or
+             * a late one -- which distinguishes "always missing" from
+             * "went missing".
+             */
+            elog(LOG,
+                 "biscuit: HEADER not found for index %u on attempt %d/%d "
+                 "(total_drains steady at " UINT64_FORMAT "); returning NULL "
+                 "(\"nothing saved yet\" if pre-build, otherwise investigate)",
+                 indexoid, attempt, BISCUIT_LOAD_MAX_ATTEMPTS, drains_before);
+
             return NULL;   /* nothing saved yet -- normal, caller falls back to a rebuild */
+        }
 
         MemoryContextSwitchTo(CacheMemoryContext);
 
@@ -1320,8 +1401,9 @@ biscuit_persist_load(Relation index)
             uint32  hlen;
             int32   num_columns;
             int32   raw_capacity;
-            uint64  live_gen;
-            int     unused_records, unused_columns, unused_max_len;
+            uint64  live_gen = 0;
+            bool    have_live_gen = false;
+            int     header_records;
 
             /* HEADER lives on a single in-place page now, not a blob chain --
              * see biscuit_common.h's "Field repurposing" comment. */
@@ -1331,6 +1413,9 @@ biscuit_persist_load(Relation index)
             idx = (BiscuitIndex *) palloc0(sizeof(BiscuitIndex));
 
             idx->num_records = pcur_get_i32(&hcur);
+            header_records    = idx->num_records;   /* pre-reconciliation value;
+                                                       * see the hole-clamp below
+                                                       * the tids read. */
             raw_capacity      = pcur_get_i32(&hcur);
             idx->capacity     = Max(raw_capacity, 1);
             idx->max_len              = pcur_get_i32(&hcur);
@@ -1399,16 +1484,43 @@ biscuit_persist_load(Relation index)
              * page-directory has fewer slots than num_records" below. A loud
              * error there is the correct outcome and is strictly better than
              * the zero-filled tail this reconciliation replaces.
+             *
+             * GEN CONSISTENCY -- this same read is also where idx->gen gets
+             * its value (see the bottom of this function). num_records
+             * here is fixed as of *this* metapage read: nothing below this
+             * point re-reads the metapage to widen num_records further, no
+             * matter how long the rest of the load (every bitmap, every
+             * STRCACHE column) takes to decode. If idx->gen were instead
+             * taken from a *second*, later metapage read after that slow
+             * decode, it would carry every gen bump any backend committed
+             * during the decode -- including bumps from rows this
+             * num_records reconciliation never saw -- while idx->num_records
+             * stayed pinned to this earlier, smaller snapshot. That
+             * combination is self-defeating: biscuit_get_current_index()'s
+             * staleness check is disk_gen <= idx->gen, so an idx->gen that
+             * has already raced ahead of what idx->num_records actually
+             * covers makes every later commit's gen bump look like it
+             * happened before this load, permanently suppressing the reload
+             * that would pick those rows up. That is exactly how a cold
+             * load can freeze num_records at (or below) the build-time
+             * count while gen keeps climbing underneath it -- see
+             * biscuit_get_current_index()'s comment for the read-side half
+             * of this contract. Capturing live_gen here, in the same call
+             * that fixes num_records, keeps the two in lockstep: any commit
+             * this load did not incorporate -- including one that resolves
+             * a trimmed hole below -- necessarily bumped meta->gen after
+             * this read, so disk_gen > idx->gen will correctly hold on the
+             * next access and trigger a fresh reload.
              */
             {
                 int    meta_records = 0;
                 int    meta_columns, meta_max_len;
-                uint64 meta_gen = 0;
 
-                if (biscuit_read_metadata_from_disk(index, &meta_records,
-                                                     &meta_columns, &meta_max_len,
-                                                     &meta_gen) &&
-                    meta_records > idx->num_records)
+                have_live_gen = biscuit_read_metadata_from_disk(index, &meta_records,
+                                                                 &meta_columns, &meta_max_len,
+                                                                 &live_gen);
+
+                if (have_live_gen && meta_records > idx->num_records)
                 {
                     elog(DEBUG1,
                          "biscuit: index %u header records %d behind metapage %d; "
@@ -1498,6 +1610,77 @@ biscuit_persist_load(Relation index)
                  */
                 biscuit_rowstore_tid_read_all(index, tids_entry.blob_head,
                                                (uint32) idx->num_records, idx->tids);
+
+                /*
+                 * CONCURRENCY FIX -- do not let a claimed-but-not-yet-
+                 * durable slot into the visible range.
+                 *
+                 * biscuit_claim_new_slot() (biscuit_index.c) publishes
+                 * meta->num_records the instant a slot is claimed, under
+                 * the metapage lock, and releases that lock before the
+                 * claiming backend writes the slot's actual TID
+                 * (biscuit_persist_row_identity_write_record(), called
+                 * later in the same biscuit_insert()). The SLOT-COUNT
+                 * RECONCILIATION above trusts meta->num_records as the
+                 * boundary of what this load should include, which is
+                 * right for the count but says nothing about whether the
+                 * TID for every slot below that count has actually been
+                 * written yet. A load landing in the gap between another
+                 * backend's claim and its TID write reconciles
+                 * idx->num_records up to include that slot, then reads it
+                 * back as the palloc0 zero-fill biscuit_rowstore_tid_
+                 * read_all() leaves for anything the page directory covers
+                 * but the row write hasn't reached -- a real, in-range
+                 * ItemPointerIsValid()-false entry, indistinguishable at
+                 * this point from corruption. biscuit_collect_sorted_tids_
+                 * single() (biscuit_tid.c) treats exactly that condition
+                 * as fatal ("scan result includes slot N with no valid
+                 * TID"), by design and on purpose -- that check exists to
+                 * catch genuine corruption, so it must not be softened.
+                 *
+                 * The zero-fill is unambiguous: ItemPointerSetInvalid()
+                 * (biscuit_bulkdelete()'s tombstone path) writes block
+                 * 0xFFFFFFFF, never block 0, so a (block 0, offset 0)
+                 * entry can only be the untouched palloc0 default -- a
+                 * slot claimed but not yet (or, for an aborted inserter,
+                 * never going to be) written. Either way this backend has
+                 * no business treating it as part of its live universe:
+                 * scan forward from the point this load already trusted
+                 * (the HEADER's own num_records, durably saved by a
+                 * committed transaction and therefore known-populated)
+                 * and stop at the first such hole, silently trimming
+                 * idx->num_records back to it. That is exactly the "cold
+                 * reader must reload" contract biscuit_claim_new_slot()
+                 * already documents for gap slots above the watermark --
+                 * this just keeps a slot that raced the reconciliation
+                 * window from ever crossing into the watermark in the
+                 * first place. A hole that resolves (the claim's TID
+                 * write lands) becomes visible on this backend's next
+                 * reload, triggered the normal way by that write's own
+                 * meta->gen bump; a hole that never resolves (an aborted
+                 * inserter's leaked slot) stays invisible forever, same
+                 * as it would have been had this backend simply loaded a
+                 * moment earlier.
+                 */
+                {
+                    int scan_from = Min(header_records, idx->num_records);
+                    int i;
+
+                    for (i = scan_from; i < idx->num_records; i++)
+                    {
+                        if (ItemPointerGetBlockNumberNoCheck(&idx->tids[i]) == 0 &&
+                            ItemPointerGetOffsetNumberNoCheck(&idx->tids[i]) == 0)
+                        {
+                            elog(DEBUG1,
+                                 "biscuit: index %u slot %d claimed but not yet durably "
+                                 "written at load time; trimming num_records %d -> %d "
+                                 "until this backend's next reload",
+                                 indexoid, i, idx->num_records, i);
+                            idx->num_records = i;
+                            break;
+                        }
+                    }
+                }
             }
 
             /* ---- tombstones ---- */
@@ -1598,15 +1781,21 @@ biscuit_persist_load(Relation index)
              * gen/gen_at_last_snapshot: no more "is this stale relative to
              * the metapage" check (see file header) -- what we just read *is*
              * the live durable state by construction. Still populated from
-             * the metapage's current gen since idx->gen is the in-memory
-             * generation counter consulted elsewhere (e.g. cache
-             * invalidation bookkeeping); gen_at_last_snapshot is kept in
-             * lockstep with it here purely for field-consistency, not
-             * because anything still compares the two to decide whether to
-             * re-save.
+             * the metapage's gen since idx->gen is the in-memory generation
+             * counter consulted elsewhere (e.g. cache invalidation
+             * bookkeeping); gen_at_last_snapshot is kept in lockstep with it
+             * here purely for field-consistency, not because anything still
+             * compares the two to decide whether to re-save.
+             *
+             * Deliberately NOT a fresh biscuit_read_metadata_from_disk() call
+             * here. live_gen is the value captured by the SLOT-COUNT
+             * RECONCILIATION read above, at the same point idx->num_records
+             * was fixed -- see the GEN CONSISTENCY comment there for why a
+             * second, later read (which is what used to happen here) breaks
+             * the invariant biscuit_get_current_index() depends on to detect
+             * staleness at all.
              */
-            if (biscuit_read_metadata_from_disk(index, &unused_records, &unused_columns,
-                                                 &unused_max_len, &live_gen))
+            if (have_live_gen)
             {
                 idx->gen                  = live_gen;
                 idx->gen_at_last_snapshot = live_gen;
