@@ -377,6 +377,39 @@ extern bool biscuit_pendlog_has_kills(const BiscuitPendLogSnapshot *snap);
 /* Drop any cached snapshot (relcache invalidation, drain, index drop). */
 extern void biscuit_pendlog_invalidate(Oid indexoid);
 
+/*
+ * biscuit_pendlog_drain_state
+ *
+ * Read BOTH halves of the drain state -- total_drains and pendlog_draining
+ * -- under a single share lock on the metapage.
+ *
+ * Anything asking "did a drain interfere with what I just read" must use
+ * both. total_drains is bumped ONCE, by pendlog_detach(), at the START of a
+ * drain; pendlog_clear_draining() does not bump it again at the end. The
+ * counter is therefore constant for the entire duration of the merge --
+ * which is the long part, the part that rewrites blobs and restructures
+ * directory entries. A before/after comparison of total_drains alone is
+ * blind to any operation that both begins and ends inside one merge, and
+ * will confidently declare such an operation uncontended.
+ *
+ * That blind spot has produced two distinct GA defects: the read-side
+ * undercount the scan guard below addresses, and the write-side
+ * "no on-disk snapshot found for index" failure in biscuit_persist_load(),
+ * where a directory walk that transiently missed the HEADER entry
+ * mid-restructure was treated as proof the index had never been built.
+ *
+ * pendlog_draining is InvalidBlockNumber exactly when no merge is in
+ * flight, so callers can ask both "did the counter move" and "was a merge
+ * running at either end of my read".
+ *
+ * ONE lock acquisition, deliberately. Reading the two fields through two
+ * separate calls would let a drain start or finish in between and return a
+ * pair that never simultaneously existed -- the same class of error the
+ * pair is being read to detect.
+ */
+extern void biscuit_pendlog_drain_state(Relation index, uint64 *drains,
+                                        BlockNumber *draining);
+
 /* ==================== SCAN-LIFETIME DRAIN GUARD ==================== */
 
 /*

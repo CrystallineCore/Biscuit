@@ -463,17 +463,73 @@ biscuit_handler(PG_FUNCTION_ARGS)
     amroutine->amendscan             = biscuit_endscan;
     amroutine->ammarkpos             = NULL;
     amroutine->amrestrpos            = NULL;
-    #if PG_VERSION_NUM >= 180000
-    amroutine->amcanparallel            = true;
-    amroutine->amestimateparallelscan   = biscuit_estimateparallelscan;
-    amroutine->aminitparallelscan       = biscuit_initparallelscan;
-    amroutine->amparallelrescan         = biscuit_parallelrescan;
-    #else
+    /*
+     * PARALLEL INDEX SCAN IS DISABLED. This is a correctness decision, not
+     * an oversight, and the machinery below is deliberately left in place
+     * rather than deleted.
+     *
+     * WHY IT CANNOT SHIP AS BUILT
+     * ---------------------------
+     * biscuit_collect_sorted_tids_parallel() (biscuit_tid.c) partitions by
+     * OFFSET RANGE into a sorted TID array that every participant computes
+     * independently -- the initializer publishes [start,end) pairs, then each
+     * process re-evaluates the whole scan locally and keeps its own slice.
+     * That is only correct if every participant produces a byte-identical
+     * array. Its own header states the assumption plainly ("identical result
+     * -- same index, same query, read-only").
+     *
+     * It is not read-only with respect to time. Each participant resolves its
+     * own BiscuitIndex through biscuit_get_current_index(), and a drain by
+     * any other backend between two participants' evaluations moves
+     * membership out of the pending log and into the blobs, changing what a
+     * participant that reloads across that boundary computes. The
+     * scan-lifetime drain guard (biscuit_pendlog.h) makes each participant
+     * INDIVIDUALLY self-consistent, which is what the undercount defect
+     * needed, but it says nothing about two participants agreeing with each
+     * other.
+     *
+     * The failure that produces is worse than the undercount it is adjacent
+     * to. Divergent arrays mean divergent offsets, so Gather assembles a TORN
+     * result: some heap rows returned twice, others never, from a single
+     * query. The count-mismatch check in biscuit_tid.c catches only the case
+     * where the two arrays differ in LENGTH; equal-length arrays with
+     * different contents (one row deleted and one inserted between
+     * evaluations -- the exact shape of the UPDATE workload) pass it silently.
+     *
+     * WHY THE OBVIOUS FIX DOES NOT WORK
+     * ---------------------------------
+     * "Publish the leader's gen through the DSM descriptor and have every
+     * participant pin to it" does not survive contact with this storage
+     * layout. The compacted blobs carry no MVCC and no version history:
+     * biscuit_persist_load() reads whatever is on disk NOW, and gen only ever
+     * moves forward. A participant that finds itself at gen G+1 cannot load
+     * G, so pinning degenerates to waiting for a generation that has already
+     * passed. Making this work needs the initializer's TID array to be
+     * genuinely SHARED rather than recomputed -- which means putting it in
+     * shared memory, which amestimateparallelscan() cannot size because the
+     * result cardinality is not known until the scan runs.
+     *
+     * WHAT DISABLING ACTUALLY COSTS
+     * -----------------------------
+     * Much less than it appears, because this design never parallelized the
+     * index work in the first place. Every participant evaluates the full
+     * candidate set, collects the full TID array and sorts it, then discards
+     * (N-1)/N of the result. The index-side CPU is N x single-threaded; only
+     * the downstream heap fetch is shared. Parallel Bitmap Heap Scan is
+     * unaffected -- it goes through amgetbitmap and a shared TIDBitmap, not
+     * through amcanparallel -- so the aggregate queries most likely to want
+     * parallelism keep it.
+     *
+     * TO RE-ENABLE, in order: (1) share one TID array instead of recomputing
+     * it per participant, or partition on something that does not depend on
+     * cross-participant array identity; (2) make the equal-length,
+     * different-content case detectable, not just the length case; (3) prove
+     * it under the concurrent reproducer, not single-session.
+     */
     amroutine->amcanparallel            = false;
     amroutine->amestimateparallelscan   = NULL;
     amroutine->aminitparallelscan       = NULL;
     amroutine->amparallelrescan         = NULL;
-    #endif
 
     PG_RETURN_POINTER(amroutine);
 }

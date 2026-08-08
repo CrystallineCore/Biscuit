@@ -17,6 +17,19 @@
  * Fix: range-partition the pre-sorted TID array across workers using the
  * atomic chunk counter already present in BiscuitParallelScanDesc.
  *
+ * STATUS: DISABLED. amcanparallel is false (biscuit.c) and none of the
+ * callbacks below are reachable from the planner. The partitioning assumes
+ * every participant computes a byte-identical array -- "identical result --
+ * same index, same query, read-only" below -- and that assumption is false
+ * with respect to TIME, not to mutation: a concurrent pending-log drain
+ * changes what a participant that reloads across it computes, and divergent
+ * arrays mean divergent offsets, i.e. a torn result rather than a merely
+ * short one. See biscuit.c's amcanparallel comment for the full argument,
+ * why pinning participants to one generation is not implementable against
+ * blobs with no version history, and what re-enabling would require. The
+ * code is retained because it is correct under the assumption it states and
+ * a future shared-array design would reuse most of it.
+ *
  *   Leader path  (biscuit_collect_sorted_tids_parallel)
  *   ────────────────────────────────────────────────────
  *   1. Collect the full result set into a palloc'd array exactly once
@@ -223,6 +236,8 @@ biscuit_collect_sorted_tids_single(BiscuitIndex *idx,
     int              idx_out = 0;
     uint32_t         dropped_out_of_range = 0;
     uint32_t         first_dropped        = 0;
+    uint32_t         skipped_not_durable  = 0;
+    uint32_t         first_not_durable    = 0;
 
     count = biscuit_roaring_count(result);
 
@@ -264,30 +279,60 @@ biscuit_collect_sorted_tids_single(BiscuitIndex *idx,
             {
                 /*
                  * A bitmap match names a slot, not a guarantee that
-                 * idx->tids[slot] was ever populated. This should be
-                 * unreachable in steady state; if it isn't, that is an
-                 * index-consistency bug, and the correct response for a
-                 * correctness-critical access method is to fail loudly and
-                 * immediately -- not to quietly drop the row. Silently
-                 * skipping (an earlier revision of this function did, via
-                 * a WARNING) turns a detectable, query-aborting failure
-                 * into an undetectable undercount that looks like a valid
-                 * answer to every caller downstream. That is strictly
-                 * worse for any workload that trusts the result, most of
-                 * all reporting/aggregation. Raise with the offending slot
-                 * number so it's actionable, rather than the bare
-                 * heap-level "tuple offset out of range" a caller would
-                 * otherwise see with no index-side context at all.
+                 * idx->tids[slot] holds a TID. Two different conditions
+                 * reach here and they are not the same thing.
+                 *
+                 * ZERO-FILL (block 0, offset 0) -- benign, and skipping is
+                 * the CORRECT answer, not a tolerated undercount.
+                 * biscuit_claim_new_slot() publishes meta->num_records
+                 * before the claiming backend writes the slot's TID, and
+                 * aborted inserters leak claimed slots permanently -- both
+                 * documented, deliberate properties of a claim counter that
+                 * was put deliberately off the row-write critical path. A
+                 * slot in this state belongs either to a transaction that
+                 * has not committed (invisible to this snapshot anyway) or
+                 * to one that aborted (invisible forever). Returning a TID
+                 * for it would be wrong; refusing to answer the query is
+                 * disproportionate. The encoding is unambiguous:
+                 * ItemPointerSetInvalid() writes block 0xFFFFFFFF, never
+                 * block 0, so this pattern can only mean "never written".
+                 *
+                 * ANY OTHER INVALID FORM -- still fatal, unchanged. That is
+                 * what the v44 hardening was aimed at, and the argument for
+                 * it stands: an undetectable undercount that "looks like a
+                 * valid answer to every caller downstream" is worse than a
+                 * query-aborting error. Nothing below relaxes that. What
+                 * changes is only that a state the design guarantees is
+                 * legal has stopped being reported as corruption.
+                 *
+                 * Counted and reported after the loop either way -- skipping
+                 * silently is what the earlier revision did wrong.
                  */
                 if (unlikely(!ItemPointerIsValid(&idx->tids[rec_idx])))
+                {
+                    if (ItemPointerGetBlockNumberNoCheck(&idx->tids[rec_idx]) == 0 &&
+                        ItemPointerGetOffsetNumberNoCheck(&idx->tids[rec_idx]) == 0)
+                    {
+                        if (skipped_not_durable == 0)
+                            first_not_durable = rec_idx;
+                        skipped_not_durable++;
+                        roaring_uint32_iterator_advance(iter);
+                        continue;
+                    }
+
                     ereport(ERROR,
                             (errcode(ERRCODE_DATA_CORRUPTED),
-                             errmsg("biscuit: scan result includes slot %u with no valid TID",
+                             errmsg("biscuit: scan result includes slot %u with a malformed TID",
                                     rec_idx),
+                             errdetail("Block %u, offset %u -- neither a valid TID nor the "
+                                       "all-zero never-written pattern.",
+                                       ItemPointerGetBlockNumberNoCheck(&idx->tids[rec_idx]),
+                                       ItemPointerGetOffsetNumberNoCheck(&idx->tids[rec_idx])),
                              errhint("This indicates an in-memory/durable state divergence "
                                      "for this backend, not on-disk damage. Reconnecting "
                                      "should clear it; if it recurs, REINDEX and report the "
                                      "occurrence.")));
+                }
 
                 ItemPointerCopy(&idx->tids[rec_idx], &tids[idx_out]);
                 idx_out++;
@@ -317,17 +362,34 @@ biscuit_collect_sorted_tids_single(BiscuitIndex *idx,
             {
                 if (indices[i] < (uint32_t) idx->num_records)
                 {
-                    /* See the HAVE_ROARING branch above: fail loudly on an
-                     * invalid TID rather than silently dropping the row. */
+                    /* See the HAVE_ROARING branch above: the all-zero
+                     * never-written pattern is a legal claimed-but-not-durable
+                     * slot and is skipped and counted; any other invalid form
+                     * is still fatal. */
                     if (unlikely(!ItemPointerIsValid(&idx->tids[indices[i]])))
+                    {
+                        if (ItemPointerGetBlockNumberNoCheck(&idx->tids[indices[i]]) == 0 &&
+                            ItemPointerGetOffsetNumberNoCheck(&idx->tids[indices[i]]) == 0)
+                        {
+                            if (skipped_not_durable == 0)
+                                first_not_durable = indices[i];
+                            skipped_not_durable++;
+                            continue;
+                        }
+
                         ereport(ERROR,
                                 (errcode(ERRCODE_DATA_CORRUPTED),
-                                 errmsg("biscuit: scan result includes slot %u with no valid TID",
+                                 errmsg("biscuit: scan result includes slot %u with a malformed TID",
                                         indices[i]),
+                                 errdetail("Block %u, offset %u -- neither a valid TID nor the "
+                                           "all-zero never-written pattern.",
+                                           ItemPointerGetBlockNumberNoCheck(&idx->tids[indices[i]]),
+                                           ItemPointerGetOffsetNumberNoCheck(&idx->tids[indices[i]])),
                                  errhint("This indicates an in-memory/durable state divergence "
                                          "for this backend, not on-disk damage. Reconnecting "
                                          "should clear it; if it recurs, REINDEX and report the "
                                          "occurrence.")));
+                    }
 
                     ItemPointerCopy(&idx->tids[indices[i]], &tids[idx_out]);
                     idx_out++;
@@ -344,6 +406,28 @@ biscuit_collect_sorted_tids_single(BiscuitIndex *idx,
         }
     }
 #endif
+
+    /*
+     * CLAIMED-BUT-NOT-DURABLE SLOTS: skipped above, reported here.
+     *
+     * DEBUG1, not WARNING, and the distinction from the out-of-range report
+     * below is the point. An out-of-range match means this backend's answer
+     * is genuinely short -- the row exists and was not returned. A
+     * not-durable match means the row's inserting transaction has not
+     * committed (invisible to this snapshot anyway) or aborted (invisible
+     * forever), so the answer is CORRECT and warning about it would train
+     * operators to ignore the line that isn't.
+     *
+     * Reported at all because the count carries information the previous
+     * ERROR destroyed: a handful per scan is the ordinary claim/write window,
+     * a number that grows steadily is inserts aborting, and a large jump is
+     * worth correlating against a drain or a reload.
+     */
+    if (skipped_not_durable > 0)
+        elog(DEBUG1,
+             "biscuit: scan skipped %u matched slot(s) claimed but not durably written "
+             "(first slot %u; %d row(s) returned of num_records=%d)",
+             skipped_not_durable, first_not_durable, idx_out, idx->num_records);
 
     /*
      * OUT-OF-RANGE SLOTS: the one remaining silent undercount in this
@@ -578,24 +662,41 @@ biscuit_collect_sorted_tids_parallel(BiscuitIndex            *idx,
                 return;
 
             /*
-             * Sanity: if the bitmap count differs from what the initializer
-             * saw, something changed between evaluations.  Clamp to avoid
-             * an out-of-bounds read; log a warning so the operator knows.
+             * CROSS-PARTICIPANT AGREEMENT CHECK.
+             *
+             * This whole partitioning scheme rests on every participant
+             * computing a byte-identical sorted array, because the slices are
+             * OFFSET RANGES into it. If two participants disagree, Gather
+             * assembles a torn result -- some heap rows twice, others never.
+             *
+             * This used to WARN and clamp. Clamping is not a repair: it
+             * bounds the read but leaves every offset in this participant's
+             * slice pointing at a different row than the initializer intended,
+             * so the query still returns wrong data, now with a log line
+             * nobody reads. Turn it into a hard failure the client can retry.
+             *
+             * NOTE this only detects a LENGTH difference. Two arrays of equal
+             * length with different contents -- one row deleted and one
+             * inserted between evaluations, which is exactly what an UPDATE
+             * looks like here -- pass silently, and there is no cheap
+             * fingerprint available without a shared-memory field the
+             * descriptor does not have. That gap is why amcanparallel is
+             * currently false (see biscuit.c); this check is the backstop for
+             * whoever re-enables it, not a licence to.
              */
             if ((uint64_t) all_count != pdesc->total_tids)
             {
-                elog(WARNING,
-                     "biscuit: parallel TID count mismatch: expected %llu, "
-                     "got %d; clamping slice",
-                     (unsigned long long) pdesc->total_tids, all_count);
-                if (my_end > (uint64_t) all_count)
-                    my_end = (uint64_t) all_count;
-                if (my_start >= my_end)
-                {
-                    pfree(all_tids);
-                    return;
-                }
-                my_count = (int) (my_end - my_start);
+                pfree(all_tids);
+                ereport(ERROR,
+                        (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+                         errmsg("biscuit: parallel index scan participants disagree "
+                                "about the result set"),
+                         errdetail("Participant %d computed %d TID(s); the initializing "
+                                   "participant published " UINT64_FORMAT ".",
+                                   ParallelWorkerNumber, all_count,
+                                   (uint64) pdesc->total_tids),
+                         errhint("The index changed underneath the scan -- most likely a "
+                                 "concurrent pending-log drain. Retry the statement.")));
             }
 
             /* Copy the assigned slice into a fresh palloc buffer. */

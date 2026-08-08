@@ -730,45 +730,71 @@ biscuit_rowstore_tid_read_all(Relation index, BlockNumber pagedir_root,
     }
 
     /*
-     * A short directory is fatal. This is a deliberate re-revert.
+     * A short directory is fatal ONLY beyond one page's worth of slots.
      *
      * v37 downgraded this to a WARNING, reasoning that the metapage's slot
      * watermark counts slots claimed by transactions that then aborted, so a
-     * small shortfall could be ordinary over-allocation rather than damage,
-     * and that refusing to open the index over a leaked slot would turn a
-     * documented-harmless condition into an outage.
+     * small shortfall could be ordinary over-allocation rather than damage.
+     * v44 re-reverted to ERROR, arguing that a quiet undercount is worse than
+     * a loud abort -- correctly, for the case it had in mind.
      *
-     * That reasoning was wrong on the part that matters. It traded a loud,
-     * bounded failure for a quiet one, in a file whose sibling
-     * (biscuit_collect_sorted_tids_single(), biscuit_tid.c) already carries
-     * an argued precedent against precisely that trade: an earlier revision
-     * there skipped bad slots with a WARNING, and the comment explaining its
-     * removal is explicit that an undetectable undercount which "looks like a
-     * valid answer to every caller downstream" is strictly worse than a
-     * query-aborting error, most of all for reporting workloads. The same
-     * argument applies here and was not weighed against the outage risk.
-     *
-     * The leaked-slot concern is also smaller than it looked: the slot claim
-     * and the row write happen in the same statement, and page allocation is
-     * non-transactional for the same reason the claim is, so an aborted
-     * insert normally leaves its TID page allocated and merely unwritten --
-     * covered by the directory, read back as an all-zero item pointer, and
-     * rejected downstream by ItemPointerIsValid(). Reaching this branch
+     * Both were reasoning about the wrong shortfall. The re-revert's own
+     * argument for why the leaked-slot concern was small is where it goes
+     * wrong: "an aborted insert normally leaves its TID page allocated and
+     * merely unwritten -- covered by the directory ... Reaching this branch
      * requires the directory not to cover the slot at all, which is a
-     * genuinely different condition.
+     * genuinely different condition." It is a different condition, and it is
+     * a REACHABLE and LEGAL one, not corruption:
      *
-     * If this does fire in practice on a healthy index, the fix is to bound
-     * the reconciliation in biscuit_persist_load() against what the directory
-     * covers -- not to let the load succeed with a silently truncated view.
+     *   biscuit_claim_new_slot() publishes meta->num_records under the
+     *   metapage lock and releases it before the claiming backend writes
+     *   anything. The page directory is only extended later, inside
+     *   biscuit_pagedir_ensure() on the way through
+     *   biscuit_persist_row_identity_write_record(). So when a claim lands
+     *   on the FIRST slot of a logical TID page that does not exist yet,
+     *   there is a window -- one per insert, entered ~once every
+     *   slots_per_page inserts -- in which the metapage advertises a slot
+     *   the directory does not cover at all. A concurrent loader reconciling
+     *   num_records against the metapage lands squarely in it.
+     *
+     * That is the "1-2 slots short, rare, on a healthy index" signature, and
+     * it is exactly the case the comment above says to fix by bounding the
+     * reconciliation rather than by softening the check. Bounding it here is
+     * the same fix at the only place that has the directory's actual extent
+     * in hand.
+     *
+     * THE BOUND IS PRINCIPLED, NOT A TOLERANCE KNOB. The directory can only
+     * lag by pages that have not been linked yet, and a claim advances one
+     * slot at a time, so a claim-window shortfall cannot exceed the capacity
+     * of a single unlinked page. A shortfall of slots_per_page or more
+     * cannot be produced by this window and remains what the re-revert
+     * intended to catch: genuine damage, still fatal, still loud.
+     *
+     * The tail stays zero-filled, which is the caller's palloc0 default and
+     * is unambiguous: ItemPointerSetInvalid() writes block 0xFFFFFFFF, never
+     * block 0, so (block 0, offset 0) can only mean "never written". Slots
+     * in that state are recognised as claimed-but-not-durable at read time
+     * by biscuit_collect_sorted_tids_single() and skipped there, which is
+     * the correct answer for a row whose inserting transaction has not
+     * committed anyway.
      */
     if (remaining > 0)
-        ereport(ERROR,
-                (errcode(ERRCODE_DATA_CORRUPTED),
-                 errmsg("biscuit: tid page-directory has fewer slots than num_records (%u short)",
-                        remaining),
-                 errdetail("Read %u of %u slot(s) before the directory ran out.",
-                           written, num_records),
-                 errhint("If this recurs, REINDEX and report the occurrence.")));
+    {
+        if (remaining >= slots_per_page)
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("biscuit: tid page-directory has fewer slots than num_records (%u short)",
+                            remaining),
+                     errdetail("Read %u of %u slot(s) before the directory ran out; "
+                               "a shortfall of %u or more cannot be a claim-in-flight window.",
+                               written, num_records, slots_per_page),
+                     errhint("If this recurs, REINDEX and report the occurrence.")));
+
+        elog(DEBUG1,
+             "biscuit: tid page-directory %u slot(s) short of num_records %u "
+             "(read %u); tail left zero-filled as claimed-but-not-yet-durable",
+             remaining, num_records, written);
+    }
 }
 
 void

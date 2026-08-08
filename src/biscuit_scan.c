@@ -56,6 +56,9 @@
 #include "biscuit_pattern.h"
 #include "biscuit_tid.h"
 #include "biscuit_index.h"
+#include "biscuit_pendlog.h"   /* biscuit_pendlog_scan_begin()/_moved()/_end()
+                                 * -- the scan-lifetime drain guard the rescan
+                                 * retry loop below is built around */
 #include "biscuit_scan.h"
 
 /*
@@ -72,19 +75,6 @@
  * round can be diffed against the healthy round before it.
  */
 bool biscuit_diag_scan_trace = false;
-
-/*
- * Scan-lifetime drain guard, defined in biscuit_pendlog.c. Declared here
- * rather than in a header for the same reason biscuit_pattern.c declares
- * biscuit_diag_scan_trace inline -- the headers are not in this working set;
- * fold these three into biscuit_pendlog.h when convenient.
- *
- * See biscuit_pendlog_scan_begin()'s header for what they guard against and
- * why the arming order relative to biscuit_get_current_index() matters.
- */
-extern void biscuit_pendlog_scan_begin(Relation index);
-extern bool biscuit_pendlog_scan_moved(void);
-extern void biscuit_pendlog_scan_end(void);
 
 /* ================================================================
  * SECTION 1 – beginscan
@@ -855,14 +845,13 @@ biscuit_rescan(IndexScanDesc scan,
          * twice and others never. Only the pure, repeatable half of the scan
          * is retried.
          *
-         * The determinism this path relies on across participants is
-         * unchanged but no stronger than before: each participant still
-         * resolves its own BiscuitIndex, so a drain landing between two
-         * workers' builds can still leave them on different generations. The
-         * guard makes each participant individually self-consistent, which is
-         * what the single-backend failure needed; making a parallel scan
-         * agree on one generation cluster-wide needs the leader to publish
-         * its gen through the DSM descriptor and is a separate change.
+         * pdesc is currently always NULL -- amcanparallel is false, because
+         * the drain guard makes each participant self-consistent but cannot
+         * make two participants agree with each other, and this scheme
+         * partitions by offset into an array every participant recomputes.
+         * See biscuit.c's amcanparallel comment. The split above is kept
+         * regardless: it is what a re-enabled parallel path would need, and
+         * it costs nothing now.
          */
         {
             BiscuitParallelScanDesc *pdesc = NULL;
