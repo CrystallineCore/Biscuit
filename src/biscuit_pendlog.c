@@ -1874,12 +1874,24 @@ pendlog_clear_draining(Relation index)
     meta->pendlog_draining = InvalidBlockNumber;
 
     /*
+     * THE SOLE gen BUMP FOR A DRAIN, and the only one that was ever needed.
+     *
      * The merge is now durable in the blobs and this chain is about to
-     * become unreachable. A backend that reloaded *during* the drain
-     * window holds pre-merge blobs and was ingesting the abandoned chain
-     * to compensate; the moment the marker clears, that chain stops being
-     * ingested, so its copy must be re-read. See the matching bump in
-     * pendlog_detach() for the full rationale.
+     * become unreachable. Every backend holding pre-merge blobs was ingesting
+     * this chain to compensate -- correctly and completely, for the whole
+     * duration of the merge. The moment the marker clears, that chain stops
+     * being ingested, so their copies really are incomplete and really must
+     * be re-read. This is the transition that loses information; the detach
+     * at the other end does not.
+     *
+     * pendlog_detach() and pendlog_detach_prefix() used to bump here as well.
+     * They no longer do: an invalidation issued at the start of a merge wakes
+     * every backend into a cold load against a directory that is actively
+     * being restructured, so the reload it demands cannot succeed until the
+     * merge it announced has finished. See pendlog_detach()'s note for why
+     * that turned ordinary writes into "could not obtain a stable read of
+     * index" failures. Invalidating here instead points backends at a state
+     * that exists.
      */
     meta->gen++;
     newgen = meta->gen;
@@ -2010,16 +2022,51 @@ pendlog_detach(Relation index)
      * fires from autovacuum, with no user action at all.
      *
      * meta->gen is the one counter every backend already re-checks on
-     * beginscan/rescan (biscuit_get_current_index()), so bumping it here
-     * forces the reload. Free: we are already inside this function's
-     * GenericXLog transaction with the metapage exclusively locked.
+     * beginscan/rescan (biscuit_get_current_index()), so bumping it forces
+     * the reload.
      *
-     * Bumped at both ends of the drain -- here, and again in
-     * pendlog_clear_draining() -- because both transitions change what a
-     * given set of blobs plus a given log state add up to. Over-
-     * invalidation costs one reload; under-invalidation is wrong answers.
+     * BUMPED AT THE END OF THE DRAIN ONLY -- in pendlog_clear_draining() --
+     * NOT HERE. This bump used to fire at both ends, on the argument that
+     * "both transitions change what a given set of blobs plus a given log
+     * state add up to. Over-invalidation costs one reload; under-
+     * invalidation is wrong answers."
+     *
+     * The second half of that is right. The first half is not, and it is
+     * what produced the "could not obtain a stable read of index" failures
+     * on ordinary INSERTs and UPDATEs under sustained write load.
+     *
+     * Over-invalidation here does not cost one reload. It schedules every
+     * other backend's reload at the ONE MOMENT IT CANNOT SUCCEED. This bump
+     * lands at t=0 of the merge; every backend observing it immediately
+     * cold-loads; biscuit_persist_load() walks a directory that this drain
+     * is actively restructuring; each attempt is discarded as a torn read
+     * and retried. To succeed, a reload triggered here must outlast the
+     * entire merge. Under multi-writer load with back-to-back drains it may
+     * never get a quiet window, exhaust its retry budget, and fail a user's
+     * write -- a self-inflicted convoy in which the invalidation and the
+     * thing that makes it unserviceable are the same event.
+     *
+     * And it is not needed. The deltas this drain is about to merge remain
+     * fully readable throughout the merge: the chain is published in
+     * meta->pendlog_draining a few lines below, in this same transaction,
+     * and biscuit_pendlog_snapshot() ingests the draining chain alongside
+     * the live head (see its two pendlog_ingest_from() calls). So a backend
+     * holding pre-drain blobs plus this log has a COMPLETE view for the
+     * whole duration of the merge -- there is nothing to invalidate yet.
+     * What it holds only becomes incomplete when pendlog_clear_draining()
+     * frees the chain, and that is exactly where the surviving bump fires.
+     *
+     * So this is not under-invalidation. It moves the single necessary
+     * invalidation from the start of the merge to the end -- from the
+     * moment a reload is guaranteed to race, to the moment the new state is
+     * actually there to be read.
+     *
+     * Note also that nothing depends on gen to detect drain interference:
+     * the scan-lifetime guard and the snapshot slot's staleness key both key
+     * off (total_drains, pendlog_draining), which are still both maintained
+     * here. total_drains++ above is what other code compares against; it has
+     * not moved.
      */
-    meta->gen++;
 
     /*
      * Publish the detached chain so it is recoverable if this merge dies.
@@ -2190,13 +2237,24 @@ pendlog_detach_prefix(Relation index, uint32 max_pages)
                             ? meta->pendlog_npages - shipped : 0;
 
     /*
-     * total_drains and gen both move for the same reason they do in a full
-     * detach: the log's identity changed, and every backend's staleness
-     * key and cached index have to notice. Over-invalidation costs a
-     * reload; under-invalidation is wrong answers.
+     * total_drains moves for the same reason it does in a full detach: the
+     * log's identity changed, and every backend's staleness key has to
+     * notice. That is what the scan-lifetime guard and the snapshot slot
+     * compare against, and it is unconditional.
+     *
+     * meta->gen does NOT move here, and used to. See the long note in
+     * pendlog_detach(): bumping gen at the START of a merge schedules every
+     * other backend's cold load at the one moment the directory is being
+     * restructured underneath it, which is the convoy that failed ordinary
+     * writes with "could not obtain a stable read of index". The prefix case
+     * is if anything worse, because incremental compaction fires far more
+     * often than VACUUM. The deltas stay readable throughout the merge --
+     * the prefix is published in pendlog_draining below and
+     * biscuit_pendlog_snapshot() ingests it alongside the still-live
+     * remainder -- so the invalidation belongs at pendlog_clear_draining(),
+     * where it still happens.
      */
     meta->total_drains++;
-    meta->gen++;
     meta->pendlog_draining = head;
 
     lopaque       = (BiscuitPageOpaque) PageGetSpecialPointer(lpage);

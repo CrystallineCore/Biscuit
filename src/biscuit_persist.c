@@ -1315,6 +1315,77 @@ biscuit_persist_load_column(Relation index, int32 col,
 #define BISCUIT_LOAD_MAX_ATTEMPTS 12
 
 /*
+ * How long a load will wait for an in-flight merge to finish before
+ * attempting anyway. Bounded so an abandoned drain marker -- set by a merge
+ * that died, and cleared only when a later drain adopts the chain -- cannot
+ * hang every load on the index.
+ */
+#define BISCUIT_LOAD_DRAIN_WAIT_US 250000   /* 250 ms */
+
+/*
+ * Wait, holding nothing, until no merge is in flight -- or until we have
+ * waited long enough that proceeding anyway is the better bet.
+ *
+ * The retry loop below discards any attempt that overlapped a drain. Without
+ * this, every retry STARTS its attempt inside the merge it is going to lose
+ * to, does the full expensive directory walk, and throws it away. Twelve
+ * attempts can burn ~400 ms of backoff without ever having begun one in a
+ * quiet window -- which is how a load that would take milliseconds instead
+ * exhausts its budget and fails a user's INSERT.
+ *
+ * Checking pendlog_draining FIRST inverts that: attempts begin when the
+ * directory is quiet, so the after-the-fact torn-read check becomes the
+ * backstop it was meant to be rather than the primary mechanism.
+ *
+ * THIS IS NOT THE LOCK THAT WAS REJECTED. biscuit_persist_load()'s header
+ * records why serializing the load against the drain with a heavyweight
+ * LockPage() reintroduced an undetectable deadlock: it held a heavyweight
+ * lock across a long walk that also lock-couples ordinary buffer-content
+ * LWLocks, producing a cycle invisible to a deadlock detector that only sees
+ * heavyweight locks. Nothing here holds anything. Each probe takes the
+ * metapage's own content lock momentarily, exactly as every other reader in
+ * this path does, and releases it before sleeping. There is no lock to
+ * deadlock on and no ordering to violate -- this is advisory, and being
+ * wrong about it costs at most one wasted attempt.
+ *
+ * Bounded, and deliberately gives up rather than waits forever: a
+ * pendlog_draining that never clears is the abandoned-chain case
+ * pendlog_detach() documents (a drain that died mid-merge). That marker
+ * stays set until some later drain adopts and finishes the chain, so waiting
+ * on it indefinitely would hang every load on the index. After the bound we
+ * proceed and let the retry loop's own check decide -- a torn read is
+ * detectable; a hang is not.
+ */
+static void
+persist_load_await_quiet_drain(Relation index)
+{
+    int total_us = 0;
+
+    for (;;)
+    {
+        uint64      drains;
+        BlockNumber draining;
+
+        biscuit_pendlog_drain_state(index, &drains, &draining);
+        if (draining == InvalidBlockNumber)
+            return;
+
+        if (total_us >= BISCUIT_LOAD_DRAIN_WAIT_US)
+        {
+            elog(DEBUG1,
+                 "biscuit: index %u still shows a drain in flight after %d us; "
+                 "attempting the load anyway",
+                 RelationGetRelid(index), total_us);
+            return;
+        }
+
+        CHECK_FOR_INTERRUPTS();
+        pg_usleep(2000L);
+        total_us += 2000;
+    }
+}
+
+/*
  * Sleep between load attempts that lost to a drain.
  *
  * Retrying immediately is close to useless against the failure this budget
@@ -1362,6 +1433,13 @@ biscuit_persist_load(Relation index)
         BlockNumber     draining_before, draining_after;
         volatile bool   caught_error = false;
         ErrorData      * volatile edata = NULL;
+
+        /*
+         * Begin this attempt in a quiet window if one is available. Costs a
+         * single metapage probe when nothing is draining, which is the
+         * common case.
+         */
+        persist_load_await_quiet_drain(index);
 
         biscuit_pendlog_drain_state(index, &drains_before, &draining_before);
 
