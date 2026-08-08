@@ -221,6 +221,8 @@ biscuit_collect_sorted_tids_single(BiscuitIndex *idx,
     uint64_t         count;
     ItemPointerData *tids;
     int              idx_out = 0;
+    uint32_t         dropped_out_of_range = 0;
+    uint32_t         first_dropped        = 0;
 
     count = biscuit_roaring_count(result);
 
@@ -290,6 +292,16 @@ biscuit_collect_sorted_tids_single(BiscuitIndex *idx,
                 ItemPointerCopy(&idx->tids[rec_idx], &tids[idx_out]);
                 idx_out++;
             }
+            else
+            {
+                /*
+                 * SILENT-DROP INSTRUMENTATION -- see the report block after
+                 * this loop for why this is not an ereport(ERROR).
+                 */
+                if (dropped_out_of_range == 0)
+                    first_dropped = rec_idx;
+                dropped_out_of_range++;
+            }
             roaring_uint32_iterator_advance(iter);
         }
         roaring_uint32_iterator_free(iter);
@@ -320,11 +332,57 @@ biscuit_collect_sorted_tids_single(BiscuitIndex *idx,
                     ItemPointerCopy(&idx->tids[indices[i]], &tids[idx_out]);
                     idx_out++;
                 }
+                else
+                {
+                    /* See the HAVE_ROARING branch. */
+                    if (dropped_out_of_range == 0)
+                        first_dropped = indices[i];
+                    dropped_out_of_range++;
+                }
             }
             pfree(indices);
         }
     }
 #endif
+
+    /*
+     * OUT-OF-RANGE SLOTS: the one remaining silent undercount in this
+     * function, now reported.
+     *
+     * The `rec_idx < idx->num_records` bound above is a real bound and must
+     * stay: idx->tids[] is only idx->capacity long and idx->num_records is
+     * this backend's view of how much of it is populated. But dropping a
+     * matched slot because it falls outside that view is exactly the
+     * failure shape the invalid-TID ereport() a few lines up exists to
+     * prevent -- a bitmap match that produces no row, no error and no log
+     * line, arriving at the caller as a plausible-looking undercount.
+     *
+     * This is deliberately NOT an ERROR, unlike the invalid-TID case. A
+     * matched slot above num_records is *expected* under concurrency: a
+     * pending-log delta appended by another backend legitimately names a
+     * slot this backend has never loaded, which is the documented "cold
+     * reader must reload" contract on biscuit_claim_new_slot(). Erroring
+     * would turn ordinary concurrent DML into query failures. The correct
+     * repair is to notice staleness and reload before the scan, not to
+     * abort inside it -- but until that exists, the condition must at least
+     * be observable, because it is currently indistinguishable from a
+     * correct answer.
+     *
+     * WARNING rather than DEBUG because the whole point is that this
+     * reaches whoever is looking at the wrong row count. The message
+     * carries the first offending slot and the count, which is what
+     * separates "a handful of slots above the watermark" (staleness) from
+     * "a contiguous block" (a boundary/rebuild defect).
+     */
+    if (dropped_out_of_range > 0)
+        ereport(WARNING,
+                (errmsg("biscuit: scan dropped %u matched slot(s) at or above num_records=%d",
+                        dropped_out_of_range, idx->num_records),
+                 errdetail("First dropped slot was %u; %d row(s) returned.",
+                           first_dropped, idx_out),
+                 errhint("This backend's cached index is behind the durable slot "
+                         "watermark. Reconnecting refreshes it; the result of this "
+                         "query is an undercount.")));
 
     *out_count = idx_out;
 

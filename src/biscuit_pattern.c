@@ -13,6 +13,13 @@
 #include "biscuit_pendlog.h"
 #include "biscuit_dir.h"    /* biscuit_dir_find, BiscuitDirEntry */
 
+/*
+ * Defined in biscuit_scan.c, registered as biscuit.diag_scan_trace in
+ * _PG_init(). Declared here rather than in a header because the headers are
+ * not in this working set; fold it into biscuit_scan.h when convenient.
+ */
+extern bool biscuit_diag_scan_trace;
+
 /* ================================================================
  * SECTION 0 – Read-time shared-log reconciliation
  * ================================================================
@@ -70,9 +77,51 @@ biscuit_reconcile_pending(Relation index, RoaringBitmap *cached,
      */
     snap = biscuit_pendlog_snapshot(index);
     if (snap == NULL)
+    {
+        if (unlikely(biscuit_diag_scan_trace))
+            ereport(WARNING,
+                    (errmsg("biscuit: diag reconcile col=%d lower=%d kind=%u ch=%d pos=%d "
+                            "-> no snapshot (log empty)",
+                            col, is_lower ? 1 : 0, kind, ch, position)));
         return cached;   /* log empty -- fully drained, the steady state */
+    }
 
     pend = biscuit_pendlog_lookup(snap, col, is_lower, kind, ch, position);
+
+    /*
+     * Per-structure reconcile accounting.
+     *
+     * This is the measurement that distinguishes "the delta produced these
+     * identities" from "the query found them". The v39 guards proved the
+     * first: every live slot reached expansion and produced identities. They
+     * say nothing about the second, because expansion writes into the hash
+     * under whatever key biscuit_delta.c derived, and the query reads out
+     * under whatever key this call site passes. A mismatch between those two
+     * keys is a total, silent miss for every post-build row while base-
+     * resident build rows stay correct -- which is the profile this defect
+     * has had since v31.
+     *
+     * pendlog_key_init() does NOT normalize col: BISCUIT_DIR_COL_LEGACY (-1)
+     * and 0 hash to different keys and memcmp unequal. biscuit_get_pos_bitmap()
+     * and its siblings pass -1 for the single-column layout;
+     * biscuit_delta_expand_slots() passes the directory entry's own col
+     * field, and biscuit_dir_slot_for_col() maps both -1 and 0 onto directory
+     * slot 0, so an entry written under 0-based addressing in a
+     * single-column index is indistinguishable by slot but not by key.
+     *
+     * Logging `col` on both sides is what settles it. If this trace shows
+     * pend=none for structures the delta demonstrably populated, compare the
+     * col values; if they differ, that is the defect and it needs no further
+     * localization.
+     */
+    if (unlikely(biscuit_diag_scan_trace))
+        ereport(WARNING,
+                (errmsg("biscuit: diag reconcile col=%d lower=%d kind=%u ch=%d pos=%d "
+                        "-> pend=%s kills=%s cached=" UINT64_FORMAT,
+                        col, is_lower ? 1 : 0, kind, ch, position,
+                        pend ? "hit" : "none",
+                        biscuit_pendlog_has_kills(snap) ? "yes" : "no",
+                        cached ? biscuit_roaring_count(cached) : 0)));
 
     /*
      * THE MISS IS NO LONGER AUTOMATICALLY A NO-OP.
@@ -110,6 +159,14 @@ biscuit_reconcile_pending(Relation index, RoaringBitmap *cached,
      */
     merged = cached ? biscuit_roaring_copy(cached) : biscuit_roaring_create();
     biscuit_pendlog_apply(snap, pend, merged);
+
+    if (unlikely(biscuit_diag_scan_trace))
+        ereport(WARNING,
+                (errmsg("biscuit: diag reconcile col=%d kind=%u ch=%d pos=%d "
+                        "-> merged " UINT64_FORMAT " (from " UINT64_FORMAT ")",
+                        col, kind, ch, position,
+                        biscuit_roaring_count(merged),
+                        cached ? biscuit_roaring_count(cached) : 0)));
 
     return merged;
 }

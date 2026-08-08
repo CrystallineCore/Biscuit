@@ -408,8 +408,18 @@ extern void biscuit_pendlog_invalidate(Oid indexoid);
  * replaces even ignoring the write-path win: a structure touched N times
  * is now blob-rewritten once per drain rather than once per threshold
  * crossing of its own chain.
+ *
+ * out_gen, if non-NULL, receives the exact meta->gen value this drain
+ * produced, captured by pendlog_clear_draining() while still holding the
+ * drain's serializing lock -- 0 if the drain found nothing to drain (or
+ * did not run, e.g. wait = false and the lock was held elsewhere). Pass
+ * NULL when the caller has no in-memory BiscuitIndex to resync (e.g.
+ * biscuit_vacuumcleanup()); pass a real pointer and forward it to
+ * biscuit_resync_gen_after_self_drain() (biscuit_index.h) when the caller
+ * does, so it can keep its own idx->gen in step with a merge it drove
+ * itself. See that function's header comment for the full history.
  */
-extern int biscuit_pendlog_drain_all(Relation index, bool wait);
+extern int biscuit_pendlog_drain_all(Relation index, bool wait, uint64 *out_gen);
 
 /*
  * biscuit_pendlog_compact
@@ -435,8 +445,13 @@ extern int biscuit_pendlog_drain_all(Relation index, bool wait);
  * If the prefix would reach the tail, this degrades to a full drain, which
  * additionally clears BISCUIT_PENDING_FLAG_TAIL -- the handshake that stops
  * a concurrent appender writing into a chain about to be freed.
+ *
+ * out_gen, if non-NULL, receives the exact meta->gen value this compaction
+ * produced (0 if nothing was drained) -- see biscuit_pendlog_drain_all()'s
+ * out_gen for the full contract; the same rules apply here.
  */
-extern int biscuit_pendlog_compact(Relation index, bool wait, uint32 max_pages);
+extern int biscuit_pendlog_compact(Relation index, bool wait, uint32 max_pages,
+                                   uint64 *out_gen);
 
 /*
  * biscuit_pendlog_free_chain

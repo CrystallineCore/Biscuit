@@ -380,7 +380,9 @@ biscuit_pendlog_batch_end(void)
      */
     if (want_drain && index != NULL)
     {
-        biscuit_pendlog_drain_all(index, false);
+        uint64 self_gen;
+
+        biscuit_pendlog_drain_all(index, false, &self_gen);
 
         /*
          * SELF-DRAIN GEN RESYNC.
@@ -397,16 +399,26 @@ biscuit_pendlog_batch_end(void)
          * flushed only at pre-commit and so lags any row written earlier
          * in an in-flight statement. See
          * biscuit_resync_gen_after_self_drain()'s comment in
-         * biscuit_index.c for the full mechanism -- this is the same
-         * hazard at the *other* call site that can trigger a self-drain,
-         * which previously had no resync at all. That gap is exactly what
-         * produced "scan result includes slot N with no valid TID": the
-         * bitmap match for a just-written row survives (it's read via the
-         * still-durable pending log), but the reload silently drops that
-         * row's idx->tids[] entry.
+         * biscuit_index.c for the full mechanism.
+         *
+         * self_gen -- not a fresh, separately-locked read of the metapage
+         * -- is passed through here. biscuit_pendlog_drain_all() returns
+         * the exact meta->gen value produced by THIS drain, captured
+         * while still holding the drain's own serializing lock
+         * (pendlog_clear_draining()). A second, independent probe of the
+         * metapage taken after that lock is released can observe a value
+         * a *concurrent* drain by another backend (autovacuum's
+         * biscuit_bulkdelete(), most plausibly) has advanced further in
+         * the meantime; blindly trusting that later value as "my own
+         * drain's result" is what let this backend's stale in-memory
+         * bitmaps survive a concurrent delete's kill, producing "scan
+         * result includes slot N with no valid TID" non-deterministically
+         * under mixed INSERT/UPDATE/DELETE workloads. Passing the exact
+         * self_gen this call produced closes that window.
          */
         biscuit_resync_gen_after_self_drain(index,
-                                             biscuit_cache_lookup(RelationGetRelid(index)));
+                                             biscuit_cache_lookup(RelationGetRelid(index)),
+                                             self_gen);
     }
 }
 
@@ -1515,6 +1527,60 @@ pendlog_expand_touched(Relation index, BiscuitPendLogSnapshot *snap)
         biscuit_roaring_add(snap->expanded, slots[i]);
 
     pfree(slots);
+
+    /*
+     * POST-CONDITION: live must be a subset of expanded.
+     *
+     * This is the cardinality check at the layer it belongs at. Comparing
+     * bitmap population against num_records - tombstone_count (the obvious
+     * formulation) does not work: any pattern scan legitimately returns
+     * fewer rows than the index holds, so that comparison false-positives on
+     * essentially every query and would be turned off within a day.
+     *
+     * This one has no such failure mode, because it is an internal invariant
+     * rather than a statement about query results. `live` is every slot
+     * whose last log record is an ADD -- i.e. every slot the delta is
+     * responsible for contributing. `expanded` is every slot that actually
+     * reached biscuit_delta_expand_slots(). The filter loop above skips a
+     * touched slot only when it is NOT live or is ALREADY expanded, so on
+     * return every live slot must be in expanded. A slot in live \ expanded
+     * is a row the log knows about that produced no identities and will be
+     * absent from the reconciled bitmap -- silently, which is the whole
+     * problem.
+     *
+     * Note this catches the "never reached expansion" half. The other half
+     * -- a slot that reached expansion but whose STRCACHE read came back
+     * empty, so it produced no identities anyway -- is counted separately in
+     * biscuit_delta_expand_slots() (biscuit_delta.c), because only that
+     * function can see it. Between the two, a row cannot vanish from the
+     * delta without something being logged.
+     */
+    {
+        RoaringBitmap *unexpanded = biscuit_roaring_copy(snap->live);
+
+        biscuit_roaring_andnot_inplace(unexpanded, snap->expanded);
+
+        if (!biscuit_roaring_is_empty(unexpanded))
+        {
+            uint64_t  missing = biscuit_roaring_count(unexpanded);
+            uint64_t  narr    = 0;
+            uint32_t *arr     = biscuit_roaring_to_array(unexpanded, &narr);
+            uint32    first   = (arr && narr > 0) ? arr[0] : 0;
+
+            ereport(WARNING,
+                    (errmsg("biscuit: pendlog delta left " UINT64_FORMAT " live slot(s) unexpanded",
+                            missing),
+                     errdetail("First unexpanded slot is %u; %d slot(s) were expanded this pass.",
+                               first, nslots),
+                     errhint("Rows in these slots will be missing from scan results "
+                             "until this backend rebuilds its snapshot.")));
+
+            if (arr)
+                pfree(arr);
+        }
+
+        biscuit_roaring_free(unexpanded);
+    }
 }
 
 BiscuitPendLogEntry *
@@ -1616,14 +1682,29 @@ pendlog_read_draining(Relation index)
     return blk;
 }
 
-/* Clear the marker once a drain's merge has completed successfully. */
-static void
+/*
+ * Clear the marker once a drain's merge has completed successfully.
+ *
+ * Returns the post-increment meta->gen, read while this backend still
+ * holds the buffer's exclusive content lock -- i.e. still inside the same
+ * critical section that performed the bump. This is the one place a
+ * caller can learn "the exact gen value my own drain produced" without a
+ * second, separately-locked probe of the metapage. See
+ * biscuit_resync_gen_after_self_drain()'s header comment in
+ * biscuit_index.c for why that distinction matters: a later, independently
+ * locked re-read of meta->gen can observe a value a *different* backend's
+ * concurrent drain (e.g. autovacuum's) has since advanced further, and
+ * trusting that value as "my own drain's result" silently adopts changes
+ * this backend's in-memory BiscuitIndex never actually incorporated.
+ */
+static uint64
 pendlog_clear_draining(Relation index)
 {
     Buffer               mbuf;
     Page                 mpage;
     BiscuitMetaPageData *meta;
     GenericXLogState    *state;
+    uint64               newgen;
 
     mbuf = ReadBuffer(index, BISCUIT_METAPAGE_BLKNO);
     LockBuffer(mbuf, BUFFER_LOCK_EXCLUSIVE);
@@ -1642,9 +1723,12 @@ pendlog_clear_draining(Relation index)
      * pendlog_detach() for the full rationale.
      */
     meta->gen++;
+    newgen = meta->gen;
 
     GenericXLogFinish(state);
     UnlockReleaseBuffer(mbuf);
+
+    return newgen;
 }
 
 /*
@@ -2116,7 +2200,8 @@ pendlog_kill_sweep(Relation index, BiscuitPendLogSnapshot *snap)
 }
 
 static int
-pendlog_drain_internal(Relation index, bool wait, uint32 max_pages)
+pendlog_drain_internal(Relation index, bool wait, uint32 max_pages,
+                        uint64 *out_gen)
 {
     BiscuitPendLogSnapshot *snap;
     HASH_SEQ_STATUS         seq;
@@ -2124,6 +2209,18 @@ pendlog_drain_internal(Relation index, bool wait, uint32 max_pages)
     int                     drained = 0;
     BlockNumber             head;
     BlockNumber             abandoned;
+
+    /*
+     * out_gen reports the gen value produced by THIS call's own drain, so
+     * that a self-draining caller can resync its cached idx->gen to
+     * exactly that value instead of taking a second, racily-timed read of
+     * the metapage (see pendlog_clear_draining()'s comment). 0 is not a
+     * value gen can legitimately hold after any real drain (it only ever
+     * increments from an initial 0), so it doubles as "no drain ran" for
+     * every early-return path below.
+     */
+    if (out_gen)
+        *out_gen = 0;
 
     if (RelationGetNumberOfBlocks(index) == 0)
         return 0;
@@ -2368,7 +2465,12 @@ pendlog_drain_internal(Relation index, bool wait, uint32 max_pages)
      * pages, while freeing before clearing would leave the marker pointing
      * at freed pages that a later drain would try to read as live records.
      */
-    pendlog_clear_draining(index);
+    {
+        uint64 self_gen = pendlog_clear_draining(index);
+
+        if (out_gen)
+            *out_gen = self_gen;
+    }
 
     biscuit_page_free_chain(index, head);
     if (abandoned != InvalidBlockNumber && abandoned != head)
@@ -2381,9 +2483,9 @@ pendlog_drain_internal(Relation index, bool wait, uint32 max_pages)
 }
 
 int
-biscuit_pendlog_drain_all(Relation index, bool wait)
+biscuit_pendlog_drain_all(Relation index, bool wait, uint64 *out_gen)
 {
-    return pendlog_drain_internal(index, wait, 0 /* whole log */);
+    return pendlog_drain_internal(index, wait, 0 /* whole log */, out_gen);
 }
 
 /*
@@ -2417,11 +2519,12 @@ biscuit_pendlog_drain_all(Relation index, bool wait)
  * appendable throughout.
  */
 int
-biscuit_pendlog_compact(Relation index, bool wait, uint32 max_pages)
+biscuit_pendlog_compact(Relation index, bool wait, uint32 max_pages,
+                        uint64 *out_gen)
 {
     if (max_pages == 0)
         max_pages = 1;
-    return pendlog_drain_internal(index, wait, max_pages);
+    return pendlog_drain_internal(index, wait, max_pages, out_gen);
 }
 
 void

@@ -13,6 +13,14 @@
 #include "biscuit_delta.h"
 #include "utils/memutils.h"
 
+/*
+ * How many zero-identity slots in one expansion before it is worth a
+ * WARNING rather than a DEBUG1. See the report block at the end of
+ * biscuit_delta_expand_slots() for why this is a threshold and not a
+ * plain boolean.
+ */
+#define BISCUIT_DELTA_WARN_SILENT_SLOTS 8
+
 /* ==================== COMPACTION THRESHOLD GUC ==================== */
 
 /*
@@ -143,6 +151,9 @@ biscuit_delta_expand_slots(Relation index,
     MemoryContext    old;
     DeltaColumnScan  scan;
     int              c;
+    bool            *produced;
+    int              silent   = 0;
+    uint32           first_silent = 0;
 
     if (nslots <= 0 || emit == NULL)
         return;
@@ -163,6 +174,21 @@ biscuit_delta_expand_slots(Relation index,
     old = MemoryContextSwitchTo(cxt);
 
     delta_discover_columns(index, &scan);
+
+    /*
+     * Per-slot record of whether ANY column produced identities for it.
+     *
+     * A pending-log record is a bare {slot}: the text lives in STRCACHE and
+     * is read back here. When that read comes up empty for every indexed
+     * column, the loop below simply `continue`s and the row contributes
+     * nothing to the caller's bitmap -- no row, no error, no log line. That
+     * is legitimate for a genuinely NULL column value, and it is a lost row
+     * if the STRCACHE write did not land (or landed on a page this read
+     * cannot reach). The two are indistinguishable at the point of the
+     * `continue`, which is why the condition has to be counted here and
+     * reported once, rather than judged per slot.
+     */
+    produced = (bool *) palloc0(nslots * sizeof(bool));
 
     for (c = 0; c < scan.ncols; c++)
     {
@@ -207,6 +233,8 @@ biscuit_delta_expand_slots(Relation index,
             if (s == NULL && l == NULL)
                 continue;   /* NULL column value, or slot never written */
 
+            produced[i] = true;
+
             /*
              * len_ge_bound = -1: unbounded.
              *
@@ -226,6 +254,53 @@ biscuit_delta_expand_slots(Relation index,
         }
     }
 
+    for (c = 0; c < nslots; c++)
+    {
+        if (!produced[c])
+        {
+            if (silent == 0)
+                first_silent = slots[c];
+            silent++;
+        }
+    }
+
     MemoryContextSwitchTo(old);
     MemoryContextDelete(cxt);
+
+    /*
+     * Report, once per expansion, how many logged slots expanded to nothing.
+     *
+     * Promoted from DEBUG1 to WARNING. At DEBUG1 this was invisible at any
+     * default log level, which meant the v38 run that was meant to test this
+     * hypothesis could not have observed it either way -- the absence of the
+     * line in that run's logs carries no information.
+     *
+     * The original reason for DEBUG1 was that a zero-identity expansion is
+     * routine on an index over a nullable column, so a WARNING would fire
+     * constantly on correct workloads. That is still true, and it is why the
+     * check is now gated on BISCUIT_DELTA_WARN_SILENT_SLOTS rather than
+     * simply raised: a handful per expansion is noise, and a run of dozens is
+     * the failure being hunted. The threshold is a blunt instrument and the
+     * right long-term answer is to distinguish "column value was NULL" from
+     * "STRCACHE read found nothing" at the point of the read, which needs a
+     * signal biscuit_rowstore_str_read_slots() does not currently return.
+     *
+     * On an all-NOT-NULL workload the expected count is zero and any firing
+     * at all is meaningful.
+     */
+    if (silent >= BISCUIT_DELTA_WARN_SILENT_SLOTS)
+        ereport(WARNING,
+                (errmsg("biscuit: delta expansion produced no identities for %d of %d logged slot(s)",
+                        silent, nslots),
+                 errdetail("First such slot is %u (op %u). These rows will be absent "
+                           "from the reconciled bitmap.",
+                           first_silent, (unsigned) op),
+                 errhint("Expected only for NULL column values; on a NOT NULL column "
+                         "this indicates the pending log names rows whose text the "
+                         "read path cannot find.")));
+    else if (silent > 0)
+        elog(DEBUG1,
+             "biscuit: delta expansion produced no identities for %d of %d logged slot(s) "
+             "(first slot %u, op %u)",
+             silent, nslots, first_silent, (unsigned) op);
 }

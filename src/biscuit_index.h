@@ -102,7 +102,8 @@ extern BiscuitIndex     *biscuit_get_current_index(Relation index);
  * biscuit_cache_lookup() and missing), in which case this is a no-op.
  * See the definition in biscuit_index.c for the full writeup.
  */
-extern void               biscuit_resync_gen_after_self_drain(Relation index, BiscuitIndex *idx);
+extern void               biscuit_resync_gen_after_self_drain(Relation index, BiscuitIndex *idx,
+                                                               uint64 self_gen);
 
 /* ==================== CRUD HELPERS ==================== */
 

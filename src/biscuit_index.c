@@ -117,7 +117,27 @@ biscuit_flush_dirty_row_identity(void)
         Relation       rel;
 
         if (!idx)
-            continue;   /* evicted (e.g. DROP in same txn) -- nothing to save */
+        {
+            /*
+             * Evicted (e.g. DROP, or a sinval-driven relcache callback) --
+             * there is no in-memory state left to serialize, so skipping is
+             * the only option.
+             *
+             * This used to be silently destructive: the skipped write left
+             * the HEADER's num_records at whatever older value it held,
+             * while biscuit_claim_new_slot() had already advanced the
+             * metapage, and a later cold load trusted the header. It no
+             * longer is -- biscuit_persist_load() reconciles against the
+             * metapage, and biscuit_persist_save_row_identity() clamps up to
+             * it rather than overwriting with a possibly-lower value. What
+             * is still lost here is the counters/tombstones/freelist delta
+             * for this transaction, which the next flush re-derives.
+             */
+            elog(DEBUG1,
+                 "biscuit: skipping row-identity flush for index %u (cache entry evicted)",
+                 indexoid);
+            continue;
+        }
 
         rel = index_open(indexoid, RowExclusiveLock);
         biscuit_persist_save_row_identity(rel, idx);
@@ -372,7 +392,6 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
         if (meta != NULL)
         {
             uint32 new_num_records;
-            uint64 new_gen;
 
             state = GenericXLogStart(index);
             page  = GenericXLogRegisterBuffer(state, buf, 0);
@@ -402,10 +421,49 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
              * promotion.
              */
             new_num_records = Max(meta->num_records, (uint32) Max(idx->num_records, 0));
-            new_gen         = Max(meta->gen, idx->gen);
-
             meta->num_records = new_num_records;
-            meta->gen         = new_gen;
+
+            /*
+             * GEN FIX (cross-backend staleness race).
+             *
+             * gen used to be published as Max(meta->gen, idx->gen). Unlike
+             * num_records, idx->gen is NOT a cached copy of the one shared
+             * counter -- it is seeded from disk_gen at load time and then
+             * bumped once per row *this backend itself* writes (see
+             * biscuit_insert()/biscuit_bulkdelete()). It counts this
+             * backend's own mutations since it loaded, not mutations
+             * index-wide.
+             *
+             * That made the Max() lossy. Two backends A and B loading at
+             * the same disk_gen = G and then each inserting rows can each
+             * publish new_gen = Max(meta->gen, idx_X.gen); whichever of
+             * them is running behind the other's already-published value
+             * contributes nothing -- its own, genuinely new row leaves
+             * meta->gen completely unchanged. A backend whose local idx->gen
+             * later happens to reach that same plateau then passes
+             * biscuit_get_current_index()'s staleness check (disk_gen <=
+             * idx->gen) and skips the reload that would have refreshed the
+             * "hole" slots biscuit_claim_new_slot() deliberately leaves
+             * behind for rows other backends claimed concurrently (see its
+             * comment). biscuit_reconcile_pending() applies the durable
+             * pending log unconditionally on the read path, so a hole slot
+             * can still surface as a bitmap match at scan time -- and
+             * biscuit_collect_sorted_tids_single() then finds no valid TID
+             * behind it. Not on-disk damage: a missed reload, caused by a
+             * gen counter that failed to advance on a genuine commit.
+             *
+             * Fix: gen becomes a genuinely shared, atomically-advanced
+             * counter -- the same pattern biscuit_claim_new_slot() already
+             * uses for num_records, and pendlog_clear_draining() already
+             * uses for its own bump. Increment the durable counter by
+             * exactly one per call, under this buffer's exclusive lock, and
+             * do not let idx->gen influence the published value at all.
+             * Then pull this backend's local copy forward to match, exactly
+             * as biscuit_claim_new_slot() pulls idx->num_records forward
+             * after claiming a slot.
+             */
+            meta->gen++;
+            idx->gen = meta->gen;
 
             GenericXLogFinish(state);
             UnlockReleaseBuffer(buf);
@@ -434,6 +492,16 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
     meta->version = BISCUIT_VERSION;
     meta->page_format_version = BISCUIT_PAGE_FORMAT_VERSION;
     meta->num_records = (uint32) Max(idx->num_records, 0);
+
+    /*
+     * Direct assignment, not the fast path's increment-and-pull-forward:
+     * this branch only runs for a brand-new page (biscuit_build()'s
+     * one-time write, where idx->gen is still its initial 0) or a
+     * corrupt/unrecognized block 0 being forcibly reset. Both discard
+     * whatever was on disk and establish a fresh baseline rather than
+     * publishing one more increment against other backends' concurrent
+     * state, so there is no shared counter to race against here.
+     */
     meta->gen         = idx->gen;
 
     meta->num_dir_columns = 0;
@@ -507,13 +575,17 @@ biscuit_read_metadata_from_disk(Relation index,
      *
      *  2. biscuit_load_index() read back gen == 0 for every index, so a
      *     writer's own idx->gen restarted at 0 on each (re)load. Because
-     *     biscuit_write_metadata_to_disk() publishes
+     *     biscuit_write_metadata_to_disk() at the time published
      *     Max(prev_gen, idx->gen), the on-disk counter then stopped
      *     advancing altogether once it exceeded the number of mutations
      *     any single backend performed since its last load -- so even a
      *     working comparison would have had nothing to compare.
      *
-     * Both are repaired by reading the metapage correctly here.
+     * Both are repaired by reading the metapage correctly here. (Note for
+     * future readers: biscuit_write_metadata_to_disk() no longer publishes
+     * Max(prev_gen, idx->gen) at all -- see the GEN FIX comment there for
+     * a second, independent failure mode that formula had, and its
+     * replacement.)
      */
     meta = biscuit_metapage_data(page);
     if (meta == NULL)
@@ -938,6 +1010,71 @@ biscuit_read_pending_list_limit(Relation index)
  * STRCACHE under the same slot.
  */
 /*
+ * Deferred post-self-drain reload.
+ *
+ * A tiny process-local set of index OIDs whose in-memory copy is known to
+ * have been invalidated by a drain THIS backend performed. Armed by
+ * biscuit_resync_gen_after_self_drain(), consumed by
+ * biscuit_get_current_index() at the next scan entry.
+ *
+ * A fixed array rather than a list: the count is bounded by the number of
+ * distinct biscuit indexes one backend drains between two scans, which is
+ * small, and overflow is handled by falling back to "reload everything"
+ * rather than by growing. Over-reloading costs time; under-reloading
+ * returns wrong answers.
+ */
+#define BISCUIT_MAX_DRAIN_RELOADS 16
+static Oid  biscuit_drain_reload_oids[BISCUIT_MAX_DRAIN_RELOADS];
+static int  biscuit_drain_reload_count = 0;
+static bool biscuit_drain_reload_all   = false;
+
+static void
+biscuit_arm_self_drain_reload(Oid indexoid)
+{
+    int i;
+
+    if (!OidIsValid(indexoid) || biscuit_drain_reload_all)
+        return;
+
+    for (i = 0; i < biscuit_drain_reload_count; i++)
+        if (biscuit_drain_reload_oids[i] == indexoid)
+            return;
+
+    if (biscuit_drain_reload_count < BISCUIT_MAX_DRAIN_RELOADS)
+        biscuit_drain_reload_oids[biscuit_drain_reload_count++] = indexoid;
+    else
+        biscuit_drain_reload_all = true;
+}
+
+/*
+ * Consume the flag: true means this backend drained this index since the
+ * last time it was asked, so its cached copy predates the drain.
+ */
+static bool
+biscuit_consume_self_drain_reload(Oid indexoid)
+{
+    int i;
+
+    if (biscuit_drain_reload_all)
+    {
+        biscuit_drain_reload_all   = false;
+        biscuit_drain_reload_count = 0;
+        return true;
+    }
+
+    for (i = 0; i < biscuit_drain_reload_count; i++)
+    {
+        if (biscuit_drain_reload_oids[i] == indexoid)
+        {
+            biscuit_drain_reload_oids[i] =
+                biscuit_drain_reload_oids[--biscuit_drain_reload_count];
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
  * biscuit_resync_gen_after_self_drain
  *
  * SELF-DRAIN CACHE-INVALIDATION FIX -- shared by every call site that may
@@ -973,9 +1110,38 @@ biscuit_read_pending_list_limit(Relation index)
  * but to keep THIS backend's bookkeeping in step with the merge it just
  * performed, so its own next staleness check in biscuit_get_current_index()
  * sees "nothing has changed that I don't already know about" rather than
- * "something changed -- discard everything". Re-reading gen under share
- * lock is the same cheap read biscuit_get_current_index() already does on
- * every call.
+ * "something changed -- discard everything".
+ *
+ * self_gen, NOT A FRESH DISK READ.
+ *
+ * This used to re-read meta->gen here via a second, independent call to
+ * biscuit_read_metadata_from_disk() -- a plain BUFFER_LOCK_SHARE read,
+ * taken after the drain that triggered this call had already released
+ * its own serializing lock (LockPage(BISCUIT_METAPAGE_BLKNO,
+ * ExclusiveLock) in pendlog_drain_internal()). That left a genuine race:
+ * meta->gen is a single counter bumped by every backend's drain,
+ * including autovacuum's biscuit_bulkdelete(), and nothing stops a
+ * concurrent drain from running -- and bumping gen further -- in the gap
+ * between this backend's own drain releasing its lock and this function's
+ * separate probe. Trusting that later, inflated value as "the gen my own
+ * drain produced" made biscuit_get_current_index()'s staleness check
+ * (disk_gen <= idx->gen) permanently pass, even though idx's in-memory
+ * bitmaps and idx->tids[] had incorporated only this backend's own
+ * writes, not the concurrent drain's. The result: a stale bitmap match
+ * for a slot a concurrent DELETE had already durably killed and folded
+ * out of the live pending log (so read-time reconciliation had nothing
+ * left to subtract), surfacing later as "scan result includes slot N
+ * with no valid TID" -- non-deterministically, timed by autovacuum.
+ *
+ * The caller now passes the exact meta->gen value ITS OWN drain produced,
+ * captured by pendlog_clear_draining() while still holding that drain's
+ * serializing lock (see biscuit_pendlog_compact()/biscuit_pendlog_
+ * drain_all()'s out_gen parameter). That value cannot be contaminated by
+ * a concurrent drain -- the serializing lock rules that out -- so
+ * advancing idx->gen to it is safe regardless of what else lands on disk
+ * afterward. self_gen == 0 means the caller's drain call found nothing to
+ * drain (pendlog_drain_internal()'s early-return sentinel); there is
+ * nothing to resync in that case.
  *
  * Callers: the opportunistic bounded-prefix compact triggered inline from
  * biscuit_pending_mutate_row() below, and the deferred whole-log drain
@@ -986,22 +1152,71 @@ biscuit_read_pending_list_limit(Relation index)
  * compact synchronously while holding the tail page's content lock.
  */
 void
-biscuit_resync_gen_after_self_drain(Relation index, BiscuitIndex *idx)
+biscuit_resync_gen_after_self_drain(Relation index, BiscuitIndex *idx,
+                                    uint64 self_gen)
 {
-    int    unused_records, unused_columns, unused_max_len;
-    uint64 disk_gen = 0;
-
     if (idx == NULL || index == NULL)
         return;
 
-    if (biscuit_read_metadata_from_disk(index, &unused_records,
-                                        &unused_columns, &unused_max_len,
-                                        &disk_gen) &&
-        disk_gen > idx->gen)
+    if (self_gen == 0)
+        return;   /* the caller's drain found nothing to drain */
+
+    if (self_gen > idx->gen)
     {
-        idx->gen                  = disk_gen;
-        idx->gen_at_last_snapshot = disk_gen;
+        idx->gen                  = self_gen;
+        idx->gen_at_last_snapshot = self_gen;
     }
+
+    /*
+     * THE RESYNC IS NOT SUFFICIENT ON ITS OWN -- arm a deferred reload.
+     *
+     * Advancing idx->gen here suppresses biscuit_get_current_index()'s
+     * staleness check, which is correct for its stated purpose (not
+     * rebuilding a complete in-memory index mid-statement from a HEADER blob
+     * that only gets flushed at pre-commit). But suppressing that check also
+     * suppresses the ONLY mechanism this backend has for noticing that its
+     * in-memory base bitmaps just went stale -- and the drain that just ran
+     * is exactly what made them stale.
+     *
+     * A drain folds the pending records into the on-disk compacted blobs and
+     * clears the log. It operates directly against the on-disk directory
+     * with no in-memory BiscuitIndex involved (see biscuit_cache.c's
+     * module-unload comment, which states this explicitly). So immediately
+     * after a self-drain this backend holds:
+     *
+     *   - on-disk blobs that DO contain the drained slots;
+     *   - in-memory base bitmaps that do NOT, because nothing updated them;
+     *   - a pending log that no longer mentions them, because the drain
+     *     consumed it;
+     *   - an idx->gen resynced forward, so no reload will be triggered.
+     *
+     * The drained slots are then in neither half of the read path. Read-time
+     * reconciliation finds a snapshot (pend=hit), finds nothing to add for
+     * those identities, and returns the stale base unchanged -- the
+     * "merged == from while pend=hit" signature. Every property of the
+     * resulting failure follows from this: backend-local (another backend
+     * reloads and is fine), post-build rows only (build rows were already in
+     * base), omission-only and never extra (a missing add, not a bad one),
+     * silent (nothing is inconsistent enough to trip a guard), and
+     * correlated with drains.
+     *
+     * Reloading synchronously here is not safe -- the caller may be inside
+     * biscuit_insert() holding `idx`, and evicting the cache would not
+     * invalidate that local pointer. So arm a flag instead and let
+     * biscuit_get_current_index() act on it at the next scan entry, which is
+     * past the end of the mutating statement.
+     *
+     * That deferred reload is safe now in a way it was not when this resync
+     * was written. The objection recorded above -- that a reload rebuilds
+     * from a HEADER blob lagging the in-flight statement -- was really an
+     * objection about num_records, and biscuit_persist_load() now reconciles
+     * that against the metapage's authoritative slot watermark rather than
+     * trusting the header. TIDs and STRCACHE are per-row durable, and the
+     * base bitmaps come from the directory blobs the drain just wrote, so a
+     * post-drain reload reads strictly better state than the copy it
+     * replaces.
+     */
+    biscuit_arm_self_drain_reload(RelationGetRelid(index));
 }
 
 static void
@@ -1045,10 +1260,13 @@ biscuit_pending_mutate_row(Relation index, BiscuitIndex *idx, uint32 slot, uint8
     if (pendlog_bytes > biscuit_pendlog_drain_trigger_bytes() &&
         !biscuit_pendlog_batch_active())
     {
+        uint64 self_gen;
+
         biscuit_pendlog_compact(index, false,   /* opportunistic: skip if
                                                  * another backend is
                                                  * already draining */
-                                 BISCUIT_PENDLOG_COMPACT_PAGES);
+                                 BISCUIT_PENDLOG_COMPACT_PAGES,
+                                 &self_gen);
 
         /*
          * SELF-COMPACTION CACHE-INVALIDATION FIX.
@@ -1090,13 +1308,21 @@ biscuit_pending_mutate_row(Relation index, BiscuitIndex *idx, uint32 slot, uint8
          * need it) but to keep THIS backend's bookkeeping in step with the
          * merge it just performed, so its own next staleness check sees
          * "nothing has changed that I don't already know about" rather
-         * than "something changed -- discard everything". Re-reading gen
-         * under share lock is the same cheap read biscuit_get_current_index()
-         * already does on every call; doing it once here, right after the
-         * compaction whose bump we're compensating for, is strictly
-         * cheaper than the reload it prevents.
+         * than "something changed -- discard everything".
+         *
+         * self_gen is the exact meta->gen this compaction produced,
+         * captured under its own serializing lock by pendlog_clear_
+         * draining() -- not a second, independently-locked read of the
+         * metapage taken after that lock is released. A concurrent
+         * drain by another backend (autovacuum's biscuit_bulkdelete(),
+         * most plausibly) can advance meta->gen further in exactly that
+         * gap; trusting a fresh read there as "what my own compaction
+         * produced" would silently adopt a gen value idx's in-memory
+         * bitmaps never actually caught up to. See
+         * biscuit_resync_gen_after_self_drain()'s header comment for the
+         * full history of that failure mode.
          */
-        biscuit_resync_gen_after_self_drain(index, idx);
+        biscuit_resync_gen_after_self_drain(index, idx, self_gen);
     }
 
     (void) pending_list_limit;   /* retained in the signature for the
@@ -2328,14 +2554,38 @@ biscuit_load_index(Relation index)
      * is the first one this process observes).
      */
     {
-        int    unused_records, unused_columns, unused_max_len;
+        int    disk_records = 0;
+        int    unused_columns, unused_max_len;
         uint64 disk_gen = 0;
 
-        biscuit_read_metadata_from_disk(index, &unused_records,
+        biscuit_read_metadata_from_disk(index, &disk_records,
                                         &unused_columns, &unused_max_len,
                                         &disk_gen);
         idx->gen                  = disk_gen;
         idx->gen_at_last_snapshot = disk_gen;
+
+        /*
+         * The record count used to be discarded here (into a variable
+         * literally named unused_records) even though the metapage is the
+         * authoritative high-water mark for slot allocation and the HEADER
+         * blob it was silently overriding is not. That was one half of the
+         * lost-post-build-rows defect; the reconciliation itself now lives
+         * in biscuit_persist_load(), which is the only place that can widen
+         * idx->capacity before the per-slot arrays are allocated.
+         *
+         * This is left as a belt-and-braces check rather than a second fix:
+         * if it ever fires, biscuit_persist_load() failed to reconcile and
+         * every slot in [idx->num_records, disk_records) is unreachable to
+         * this backend. Warn rather than error -- the index is still usable
+         * for the rows it does know about, and erroring here would take out
+         * every read of a merely-truncated index.
+         */
+        if (disk_records > idx->num_records)
+            elog(WARNING,
+                 "biscuit: index \"%s\" loaded %d records but metapage reports %d; "
+                 "%d slot(s) will not be visible to this backend",
+                 RelationGetRelationName(index), idx->num_records, disk_records,
+                 disk_records - idx->num_records);
     }
 
     biscuit_register_callback();
@@ -2394,7 +2644,32 @@ biscuit_get_current_index(Relation index)
     uint64        disk_gen = 0;
 
     if (!idx)
+    {
+        (void) biscuit_consume_self_drain_reload(indexoid);
         return biscuit_load_index(index);
+    }
+
+    /*
+     * A drain THIS backend performed invalidates the cached copy without
+     * ever tripping the gen comparison below, because
+     * biscuit_resync_gen_after_self_drain() deliberately advanced idx->gen
+     * past the drain's own bump. Check that first: the gen test cannot see
+     * this case by construction, so ordering it after would be checking a
+     * condition that is guaranteed false.
+     *
+     * See the long comment on biscuit_resync_gen_after_self_drain() for why
+     * the drain leaves the in-memory bitmaps stale and why deferring the
+     * reload to here -- past the end of the mutating statement -- is both
+     * necessary and now safe.
+     */
+    if (biscuit_consume_self_drain_reload(indexoid))
+    {
+        elog(DEBUG1,
+             "biscuit: reloading index %u after this backend's own drain",
+             indexoid);
+        biscuit_cache_remove(indexoid);
+        return biscuit_load_index(index);
+    }
 
     if (!biscuit_read_metadata_from_disk(index, &disk_num_records,
                                           &disk_num_columns, &disk_max_len,
@@ -2493,6 +2768,34 @@ biscuit_insert(Relation index,
     /* Check for duplicate TID (UPDATE path) */
     for (int i = 0; i < idx->num_records; i++)
     {
+        /*
+         * Skip slots this backend has no TID for.
+         *
+         * [0, num_records) is not densely populated in this backend's copy:
+         * cross-backend slot claiming leaves holes (documented on
+         * biscuit_claim_new_slot()), aborted inserts leak slot numbers, and
+         * a slot deleted by biscuit_bulkdelete() is explicitly reset with
+         * ItemPointerSetInvalid(). Two distinct "no TID here" encodings
+         * reach this loop:
+         *
+         *   - ItemPointerSetInvalid(), i.e. block 0xFFFFFFFF, from
+         *     biscuit_ensure_slot_capacity()'s tail fill and from
+         *     biscuit_bulkdelete().
+         *   - all-zero (block 0, offset 0), from the palloc0'd tail in
+         *     biscuit_persist_load().
+         *
+         * ItemPointerIsValid() rejects both, because a valid heap TID has a
+         * non-zero offset number: offset 0 is never a real line pointer.
+         * Testing it matters -- an incoming ctid could otherwise compare
+         * equal to a zeroed slot and send a fresh INSERT down the UPDATE
+         * path, overwriting an unrelated (or not-yet-written) slot. That is
+         * the same hazard the tail-invalidation comment in
+         * biscuit_ensure_slot_capacity() describes, arriving here from the
+         * load path instead of from repalloc.
+         */
+        if (!ItemPointerIsValid(&idx->tids[i]))
+            continue;
+
         if (ItemPointerEquals(&idx->tids[i], ht_ctid))
         {
             found_existing = true;
@@ -2736,8 +3039,12 @@ biscuit_insert(Relation index,
      * This runs unconditionally for both the legacy single-column and
      * multi-column paths above -- it is not gated on
      * idx->num_columns == 1.
+     *
+     * The increment itself now happens inside biscuit_write_metadata_to_
+     * disk(), under the metapage's exclusive lock, and idx->gen is pulled
+     * forward to match there -- see the GEN FIX comment in that function
+     * for why a local idx->gen++ before this call is no longer correct.
      */
-    idx->gen++;
     biscuit_write_metadata_to_disk(index, idx);
 
     /*
@@ -2880,6 +3187,18 @@ biscuit_bulkdelete(IndexVacuumInfo *info,
 
         if (!has_data) continue;
 
+        /*
+         * Defensive: never hand an unset TID to the vacuum callback. The
+         * has_data test above already excludes almost every such slot (a
+         * slot with no loaded text is not a row this backend knows about),
+         * but [0, num_records) can contain holes -- other backends' claims,
+         * leaked slots from aborted inserts, and the palloc0 tail of a
+         * partially-covered load -- and a (0,0) or (0xFFFFFFFF,0) item
+         * pointer reaching the heap-side callback is not something to leave
+         * to a coincidence of two independent arrays agreeing.
+         */
+        if (!ItemPointerIsValid(&idx->tids[i])) continue;
+
 #ifdef HAVE_ROARING
         already_tombstoned = roaring_bitmap_contains(idx->tombstones, (uint32_t) i);
 #else
@@ -3017,17 +3336,50 @@ biscuit_bulkdelete(IndexVacuumInfo *info,
      * under-invalidation is not) and runs unconditionally for both the
      * legacy single-column and multi-column deletion paths above, not
      * gated on idx->num_columns == 1.
+     *
+     * The increment itself now happens inside biscuit_write_metadata_to_
+     * disk(), under the metapage's exclusive lock, and idx->gen is pulled
+     * forward to match there -- see the GEN FIX comment in that function
+     * for why a local idx->gen++ before this call is no longer correct.
      */
-    idx->gen++;
     biscuit_write_metadata_to_disk(index, idx);
 
     /*
-     * No eager full-blob resave here anymore -- see the matching comment
-     * at the end of biscuit_insert(). Every removal above (both the
-     * main delete_indices loop and the tombstone-purge loop) already
-     * went through biscuit_remove_from_all_indices(), which durably
-     * appends to each touched structure's pending list as it goes.
+     * No eager full-blob resave here -- see the matching comment at the
+     * end of biscuit_insert(). Every removal above (both the main
+     * delete_indices loop and the tombstone-purge loop) already went
+     * through biscuit_remove_from_all_indices(), which durably appends to
+     * each touched structure's pending list as it goes, and each deleted
+     * slot's TID/STRCACHE was made durable in place, per-row, by the
+     * biscuit_persist_row_identity_write_record() call above.
+     *
+     * MISSING-FLUSH FIX -- tombstones/free-list/HEADER counters.
+     *
+     * Those three are NOT per-row data (see biscuit_persist_save_row_
+     * identity()'s header comment): they are index-wide scalars deferred
+     * to a pre-commit xact callback via biscuit_mark_row_identity_dirty(),
+     * exactly as biscuit_insert() does at the end of its own function.
+     * This call was missing here, which meant idx->tombstones and
+     * idx->free_list were durably correct only in the memory of whichever
+     * backend ran this VACUUM -- never flushed to the on-disk HEADER blob.
+     *
+     * A backend that later reloads (biscuit_get_current_index() sees
+     * meta->gen advanced past its own idx->gen, e.g. because THIS VACUUM
+     * bumped it) calls biscuit_load_index(), which reads back a durably
+     * correct TID array (invalid for every slot this VACUUM tombstoned --
+     * that part was always per-row durable) alongside a STALE tombstones
+     * bitmap that does not mark those same slots. biscuit_scan.c's
+     * tombstone filter (biscuit_roaring_andnot_inplace(candidates,
+     * so->index->tombstones)) then cannot subtract a slot the bitmap
+     * doesn't know is dead, so the slot survives into the final matching
+     * set with no valid TID behind it -- exactly the "scan result includes
+     * slot N with no valid TID" ERROR biscuit_collect_sorted_tids_single()
+     * raises. Marking dirty here, unconditionally whenever this function
+     * ran (even with delete_count == 0, since the tombstone-purge branch
+     * above can still have reset idx->tombstones), closes that gap the
+     * same way biscuit_insert() already closes it for its own mutations.
      */
+    biscuit_mark_row_identity_dirty(RelationGetRelid(index));
 
     MemoryContextSwitchTo(oldcontext);
 
@@ -3088,7 +3440,13 @@ biscuit_vacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
      * walk re-serialized a hot structure's blob once per threshold
      * crossing.
      */
-    structures_drained = biscuit_pendlog_drain_all(index, true);   /* VACUUM must not skip */
+    structures_drained = biscuit_pendlog_drain_all(index, true, NULL);   /* VACUUM must not skip.
+                                                                          * No in-memory BiscuitIndex
+                                                                          * is involved here (see the
+                                                                          * comment above), so there is
+                                                                          * no idx->gen to resync and
+                                                                          * the drain's own gen value
+                                                                          * is not needed. */
 
     /*
      * total_drains is already bumped by biscuit_pendlog_drain_all() (it

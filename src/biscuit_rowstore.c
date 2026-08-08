@@ -729,11 +729,46 @@ biscuit_rowstore_tid_read_all(Relation index, BlockNumber pagedir_root,
         cur = next;
     }
 
+    /*
+     * A short directory is fatal. This is a deliberate re-revert.
+     *
+     * v37 downgraded this to a WARNING, reasoning that the metapage's slot
+     * watermark counts slots claimed by transactions that then aborted, so a
+     * small shortfall could be ordinary over-allocation rather than damage,
+     * and that refusing to open the index over a leaked slot would turn a
+     * documented-harmless condition into an outage.
+     *
+     * That reasoning was wrong on the part that matters. It traded a loud,
+     * bounded failure for a quiet one, in a file whose sibling
+     * (biscuit_collect_sorted_tids_single(), biscuit_tid.c) already carries
+     * an argued precedent against precisely that trade: an earlier revision
+     * there skipped bad slots with a WARNING, and the comment explaining its
+     * removal is explicit that an undetectable undercount which "looks like a
+     * valid answer to every caller downstream" is strictly worse than a
+     * query-aborting error, most of all for reporting workloads. The same
+     * argument applies here and was not weighed against the outage risk.
+     *
+     * The leaked-slot concern is also smaller than it looked: the slot claim
+     * and the row write happen in the same statement, and page allocation is
+     * non-transactional for the same reason the claim is, so an aborted
+     * insert normally leaves its TID page allocated and merely unwritten --
+     * covered by the directory, read back as an all-zero item pointer, and
+     * rejected downstream by ItemPointerIsValid(). Reaching this branch
+     * requires the directory not to cover the slot at all, which is a
+     * genuinely different condition.
+     *
+     * If this does fire in practice on a healthy index, the fix is to bound
+     * the reconciliation in biscuit_persist_load() against what the directory
+     * covers -- not to let the load succeed with a silently truncated view.
+     */
     if (remaining > 0)
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("biscuit: tid page-directory has fewer slots than num_records (%u short)",
-                        remaining)));
+                        remaining),
+                 errdetail("Read %u of %u slot(s) before the directory ran out.",
+                           written, num_records),
+                 errhint("If this recurs, REINDEX and report the occurrence.")));
 }
 
 void

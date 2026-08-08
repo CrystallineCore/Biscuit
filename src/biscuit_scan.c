@@ -58,6 +58,21 @@
 #include "biscuit_index.h"
 #include "biscuit_scan.h"
 
+/*
+ * biscuit.diag_scan_trace -- per-scan candidate accounting.
+ *
+ * Off by default and PGC_USERSET: it is read-only instrumentation with no
+ * effect on results, so a session can turn it on for a reproducer without
+ * touching anything another backend sees. Registered in _PG_init()
+ * (biscuit.c).
+ *
+ * The one-shot reachability probe answered its question -- the tombstone
+ * filter site is reached -- but it fires on the first scan in a backend,
+ * which is always the healthy one. This reports every scan, so a failing
+ * round can be diffed against the healthy round before it.
+ */
+bool biscuit_diag_scan_trace = false;
+
 /* ================================================================
  * SECTION 1 – beginscan
  *
@@ -444,6 +459,37 @@ biscuit_rescan(IndexScanDesc scan,
                 }
                 mask = key_result;
 
+                /*
+                 * Per-key candidate cardinality.
+                 *
+                 * This is the measurement the series has never taken. Both
+                 * ends of the scan are now instrumented and both have been
+                 * silent on failing runs: the tombstone filter reports
+                 * before == after, and the collection boundary reports
+                 * candidates in == TIDs out. Two equal counts at both ends
+                 * mean the candidate set was ALREADY short when it arrived,
+                 * so the loss is upstream of everything measured so far --
+                 * inside this loop, where each key's bitmap is built and
+                 * ANDed into the running mask.
+                 *
+                 * Reporting per key rather than per scan matters because a
+                 * single-key query (which the reproducer runs) collapses to
+                 * one line, and that line is directly comparable between the
+                 * healthy round and the failing one. If the number is short
+                 * here, biscuit_query_pattern_masked() and the reconcile
+                 * path beneath it own the defect; if it is correct here and
+                 * the final result is short, the loss is between this point
+                 * and the tombstone filter, which is a handful of lines.
+                 */
+                if (unlikely(biscuit_diag_scan_trace))
+                    ereport(WARNING,
+                            (errmsg("biscuit: diag key %d strategy %d -> " UINT64_FORMAT " candidate slot(s)",
+                                    i, (int) key->sk_strategy,
+                                    biscuit_roaring_count(mask)),
+                             errdetail("num_records %d; tombstone_count %d.",
+                                       so->index->num_records,
+                                       so->index->tombstone_count)));
+
                 if (biscuit_roaring_is_empty(mask))
                 {
                     biscuit_roaring_free(mask);
@@ -464,9 +510,112 @@ biscuit_rescan(IndexScanDesc scan,
              * default case elog(ERROR)s rather than falling through.
              */
 
-            /* Filter tombstones (for non-NOT-LIKE keys that may remain) */
-            if (so->index->tombstone_count > 0)
-                biscuit_roaring_andnot_inplace(result, so->index->tombstones);
+            /*
+             * Filter tombstones (for non-NOT-LIKE keys that may remain).
+             *
+             * INSTRUMENTED -- this is the last mutation of the candidate set
+             * before TID collection, and the only one on this path that can
+             * remove slots without any of the delta-side or collection-side
+             * guards seeing it.
+             *
+             * The guards on either side of it are now known silent while the
+             * count still diverges: the pendlog live-subset-of-expanded
+             * invariant and the zero-identity counter (biscuit_pendlog.c,
+             * biscuit_delta.c) prove the delta contributed every slot it owed,
+             * and the invalid-TID ereport plus the out-of-range counter
+             * (biscuit_tid.c) prove nothing is discarded during collection.
+             * A subtraction sitting between two clean checkpoints is where an
+             * omission-only, never-extra loss would have to live.
+             *
+             * The specific suspicion is a tombstone bitmap that marks slots
+             * which are actually live. Note the failure documented at the end
+             * of biscuit_bulkdelete(): a STALE tombstone bitmap (marking too
+             * few) produces a loud "slot N with no valid TID" error. The
+             * opposite skew -- marking too many -- has no such backstop. It
+             * subtracts live rows and returns a smaller, entirely plausible
+             * answer, which is the shape being hunted.
+             *
+             * Two numbers are worth having together. `tombstone_count` is a
+             * scalar carried in the HEADER blob; the bitmap is a separate
+             * durable structure. They are written by the same call but
+             * maintained independently -- biscuit_insert()'s UPDATE branch
+             * calls biscuit_roaring_remove() on the bitmap without
+             * decrementing the counter, for one -- so a divergence between
+             * them is itself evidence about which of the two is wrong.
+             *
+             * This is a diagnostic, not a fix. It fires per scan; drop it once
+             * the stage is identified.
+             */
+            {
+                uint64_t card_before = biscuit_roaring_count(result);
+                uint64_t card_after;
+                uint64_t tomb_card;
+
+                /*
+                 * REACHABILITY PROOF -- see biscuit_diag_first_scan below.
+                 */
+                static bool biscuit_diag_first_scan = true;
+
+                if (so->index->tombstone_count > 0)
+                    biscuit_roaring_andnot_inplace(result, so->index->tombstones);
+
+                card_after = biscuit_roaring_count(result);
+                tomb_card  = so->index->tombstones
+                                ? biscuit_roaring_count(so->index->tombstones)
+                                : 0;
+
+                /*
+                 * ONE UNCONDITIONAL FIRING PER BACKEND.
+                 *
+                 * A guard that has never once been observed to fire cannot
+                 * support a negative result: "the condition was not met" and
+                 * "the message could not reach the log" are indistinguishable
+                 * from the outside, and treating the second as the first is
+                 * how a diagnostic round gets spent proving nothing. Six runs
+                 * of silence from the conditional warning below is currently
+                 * evidence of exactly one of those two things and we cannot
+                 * say which.
+                 *
+                 * So the first scan in every backend reports the same numbers
+                 * unconditionally, at the same WARNING level, through the same
+                 * ereport() at the same call site. If this line appears and
+                 * the conditional one does not, the conditional one's silence
+                 * is a real measurement about the data. If this line does not
+                 * appear either, the site is not being reached (or the log is
+                 * not capturing it) and every scan-side negative from v40
+                 * should be discarded rather than reasoned from.
+                 *
+                 * Static, so it costs one predictable branch per scan after
+                 * the first.
+                 */
+                if (biscuit_diag_first_scan || biscuit_diag_scan_trace)
+                {
+                    biscuit_diag_first_scan = false;
+                    ereport(WARNING,
+                            (errmsg("biscuit: diag reachability -- tombstone filter site reached"),
+                             errdetail("candidates before " UINT64_FORMAT ", after " UINT64_FORMAT
+                                       "; tombstone bitmap " UINT64_FORMAT " slot(s); "
+                                       "tombstone_count %d; num_records %d.",
+                                       card_before, card_after, tomb_card,
+                                       so->index->tombstone_count,
+                                       so->index->num_records),
+                             errhint("This fires once per backend regardless of condition. "
+                                     "Its absence means the scan-side instruments are "
+                                     "unreachable, not that their conditions were unmet.")));
+                }
+
+                if (card_before != card_after || tomb_card != (uint64_t) so->index->tombstone_count)
+                    ereport(WARNING,
+                            (errmsg("biscuit: tombstone filter removed " UINT64_FORMAT
+                                    " of " UINT64_FORMAT " candidate slot(s)",
+                                    card_before - card_after, card_before),
+                             errdetail("tombstone bitmap holds " UINT64_FORMAT " slot(s); "
+                                       "tombstone_count scalar reads %d; num_records %d.",
+                                       tomb_card, so->index->tombstone_count,
+                                       so->index->num_records),
+                             errhint("A bitmap marking more slots than are actually dead "
+                                     "subtracts live rows silently.")));
+            }
 
             /*
              * Parallel-aware TID collection.
@@ -500,10 +649,34 @@ biscuit_rescan(IndexScanDesc scan,
                                 OffsetToPointer(scan->parallel_scan,
                                                 BISCUIT_PARALLEL_AM_OFFSET(scan->parallel_scan));
               
+                uint64_t card_in = biscuit_roaring_count(result);
+
                 biscuit_collect_sorted_tids_parallel(
                     so->index, result, pdesc,
                     &so->results, &so->num_results,
                     needs_sorting);
+
+                /*
+                 * Closes the last gap in the chain of custody: candidate
+                 * slots in, TIDs out, and they must match. Suppressed for a
+                 * genuine parallel scan, where each participant deliberately
+                 * returns only its own disjoint slice of the total.
+                 *
+                 * Worth stating why this is not redundant with the guards
+                 * inside biscuit_collect_sorted_tids_single(): those count
+                 * slots that reached the collection loop and were rejected.
+                 * This counts everything that entered the function against
+                 * everything that left it, so it also catches a slot that
+                 * never reached the loop at all.
+                 */
+                if (pdesc == NULL &&
+                    (biscuit_diag_scan_trace || card_in != (uint64_t) so->num_results))
+                    ereport(WARNING,
+                            (errmsg("biscuit: TID collection returned %d row(s) for "
+                                    UINT64_FORMAT " candidate slot(s)",
+                                    so->num_results, card_in),
+                             errhint("Every candidate slot should yield exactly one TID "
+                                     "on a non-parallel scan.")));
             }
 
             biscuit_roaring_free(result);

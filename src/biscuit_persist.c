@@ -897,6 +897,54 @@ biscuit_persist_save_row_identity(Relation index, BiscuitIndex *idx)
     Oid  indexoid = RelationGetRelid(index);
     PBuf header;
     int  i;
+    int  header_records = idx->num_records;
+
+    /*
+     * NON-REGRESSING RECORD COUNT.
+     *
+     * idx->num_records is only pulled forward from the metapage inside
+     * biscuit_claim_new_slot(), which runs solely in biscuit_insert()'s
+     * !found_existing branch. An UPDATE (found_existing) or a
+     * biscuit_bulkdelete() marks the index dirty and reaches this function
+     * without ever having consulted the metapage, so a backend whose cached
+     * copy predates other backends' claims -- or its own earlier aborted
+     * ones -- would serialize a *lower* num_records than the authoritative
+     * high-water mark, permanently truncating what the next cold load reads
+     * back (see the reconciliation comment in biscuit_persist_load()).
+     *
+     * Mirror biscuit_write_metadata_to_disk()'s Max(): never publish a
+     * count below the metapage's. The metapage read happens before
+     * biscuit_rowstore_alloc_lock() below so this adds no nesting to the
+     * lock order.
+     *
+     * The clamped value is written to the header ONLY -- idx->num_records
+     * itself is deliberately left alone. The in-memory arrays (tids,
+     * data_cache, data_cache_lower) are exactly idx->capacity long, and
+     * every loop over [0, idx->num_records) in biscuit_index.c indexes them
+     * directly; raising the counter past capacity here would turn those
+     * loops into out-of-bounds reads. Widening the arrays is
+     * biscuit_ensure_slot_capacity()'s job and is driven by the claimed slot
+     * number, not by this counter. Slots in the gap belong to other
+     * backends' rows and stay holes in this backend's copy until it next
+     * reloads -- the "cold reader must reload" contract documented on
+     * biscuit_claim_new_slot().
+     */
+    {
+        int    meta_records = 0;
+        int    meta_columns, meta_max_len;
+        uint64 meta_gen = 0;
+
+        if (biscuit_read_metadata_from_disk(index, &meta_records,
+                                             &meta_columns, &meta_max_len,
+                                             &meta_gen) &&
+            meta_records > header_records)
+        {
+            elog(DEBUG1,
+                 "biscuit: index %u raising header records %d -> %d (metapage)",
+                 indexoid, header_records, meta_records);
+            header_records = meta_records;
+        }
+    }
 
     /*
      * Same directory find-or-create race as the per-row path: all three
@@ -912,8 +960,13 @@ biscuit_persist_save_row_identity(Relation index, BiscuitIndex *idx)
     {
         /* ---- header (scalar bookkeeping) ---- */
         pbuf_init(&header);
-        pbuf_put_i32(&header, idx->num_records);
-        pbuf_put_i32(&header, idx->capacity);
+        /* header_records, not idx->num_records -- see the non-regressing
+         * record count comment at the top of this function. capacity is
+         * widened to match so the "capacity >= num_records" validation in
+         * biscuit_persist_load() still holds for the value we just clamped
+         * up; the next loader allocates its arrays at that width. */
+        pbuf_put_i32(&header, header_records);
+        pbuf_put_i32(&header, Max(idx->capacity, header_records));
         pbuf_put_i32(&header, idx->max_len);
         pbuf_put_i32(&header, idx->max_length_legacy);
         pbuf_put_i32(&header, idx->max_length_lower);
@@ -961,7 +1014,7 @@ biscuit_persist_save_row_identity(Relation index, BiscuitIndex *idx)
     biscuit_rowstore_alloc_unlock(index);
 
     elog(DEBUG1, "biscuit: re-saved header/tombstones/freelist for index %u (%d records, gen " UINT64_FORMAT ")",
-         indexoid, idx->num_records, idx->gen);
+         indexoid, header_records, idx->gen);
 }
 
 /* ================================================================
@@ -1296,6 +1349,80 @@ biscuit_persist_load(Relation index)
                         (errmsg("biscuit: directory header mismatch for index %u", indexoid)));
 
             /*
+             * SLOT-COUNT RECONCILIATION -- do not remove.
+             *
+             * There are two durable record counts, and the HEADER's is not
+             * the authoritative one:
+             *
+             *   - meta->num_records is advanced under the metapage's
+             *     exclusive buffer lock by biscuit_claim_new_slot()
+             *     (biscuit_index.c), WAL-logged at the moment of the claim,
+             *     and deliberately non-transactional. It is a monotonically
+             *     non-decreasing high-water mark of every slot ever handed
+             *     out by any backend.
+             *
+             *   - The HEADER's num_records is this backend's in-memory
+             *     idx->num_records, serialized once per transaction at
+             *     pre-commit by biscuit_persist_save_row_identity(). It can
+             *     legitimately lag the metapage, and it can *regress*: the
+             *     UPDATE path (found_existing) and biscuit_bulkdelete()
+             *     both mark the index dirty without ever calling
+             *     biscuit_claim_new_slot(), so a backend holding a stale
+             *     idx->num_records rewrites the header with its own lower
+             *     value. An aborted insert leaks its claimed slot for the
+             *     same reason, and biscuit_flush_dirty_row_identity() skips
+             *     the flush entirely when the cache entry was evicted
+             *     mid-transaction.
+             *
+             * Loading num_records from the header alone therefore truncates
+             * the index at whatever value the header happens to hold --
+             * typically the CREATE INDEX row count. Every slot above that
+             * point stayed at its palloc0 zero in idx->tids below (block 0,
+             * offset 0 -- note this is NOT ItemPointerSetInvalid's
+             * 0xFFFFFFFF, which is how the two are told apart in a dump),
+             * even though biscuit_persist_row_identity_write_record() had
+             * durably written the real TID for it at insert time. Reads then
+             * silently lost every post-build row, because every read path
+             * builds its universe as the range [0, idx->num_records).
+             *
+             * biscuit_write_metadata_to_disk() already takes
+             * Max(meta->num_records, idx->num_records) for exactly this
+             * reason; the header write and this load path did not. Take the
+             * metapage's value whenever it is higher, and widen capacity to
+             * match so tids / data_cache / data_cache_lower stay exactly
+             * `capacity` long -- the invariant
+             * biscuit_ensure_slot_capacity() and
+             * biscuit_persist_load_strcache() both depend on.
+             *
+             * If the TID page directory really does not cover the reconciled
+             * count, biscuit_rowstore_tid_read_all() raises "tid
+             * page-directory has fewer slots than num_records" below. A loud
+             * error there is the correct outcome and is strictly better than
+             * the zero-filled tail this reconciliation replaces.
+             */
+            {
+                int    meta_records = 0;
+                int    meta_columns, meta_max_len;
+                uint64 meta_gen = 0;
+
+                if (biscuit_read_metadata_from_disk(index, &meta_records,
+                                                     &meta_columns, &meta_max_len,
+                                                     &meta_gen) &&
+                    meta_records > idx->num_records)
+                {
+                    elog(DEBUG1,
+                         "biscuit: index %u header records %d behind metapage %d; "
+                         "reconciling to metapage",
+                         indexoid, idx->num_records, meta_records);
+
+                    idx->num_records = meta_records;
+
+                    while (idx->capacity < idx->num_records)
+                        idx->capacity *= 2;
+                }
+            }
+
+            /*
              * Case-mode gating is deliberately NOT part of the persisted
              * state (design doc) -- always recomputed fresh from the live
              * Relation's opclass, so a REINDEX under a different opclass can
@@ -1357,7 +1484,11 @@ biscuit_persist_load(Relation index)
                  * a blob chain -- see biscuit_common.h's "Field repurposing"
                  * comment. The old explicit "tlen != num_records * sizeof(...)"
                  * check is subsumed by biscuit_rowstore_tid_read_all(), which
-                 * ERRORs if the directory doesn't cover num_records slots.
+                 * WARNs and leaves the tail zeroed if the directory doesn't
+                 * cover num_records slots (it used to ERROR; see the comment
+                 * there for why a shortfall became expected once num_records
+                 * started being reconciled against the metapage's
+                 * non-transactional slot high-water mark).
                  *
                  * Note idx->tids is palloc0'd (was plain palloc): the read fills
                  * exactly [0, num_records), and the tail [num_records, capacity)

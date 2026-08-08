@@ -184,6 +184,14 @@ biscuit_object_access_hook(ObjectAccessType access, Oid classId,
     }
 }
 
+/*
+ * Defined in biscuit_scan.c. Declared here rather than in biscuit_scan.h
+ * because the headers were not part of the working set for this change --
+ * move it to biscuit_scan.h alongside the other scan-side externs when
+ * convenient; nothing else depends on it living here.
+ */
+extern bool biscuit_diag_scan_trace;
+
 void _PG_init(void);
 
 void
@@ -234,6 +242,30 @@ _PG_init(void)
                             PGC_SUSET,
                             0,
                             NULL, NULL, NULL);
+
+    /*
+     * biscuit.diag_scan_trace -- per-scan candidate accounting.
+     *
+     * PGC_USERSET, unlike delta_compaction_slots above: this changes no
+     * shared state and imposes no cost on other backends, so a session
+     * running a reproducer can enable it without privileges and without
+     * affecting anyone else. Read-only instrumentation -- it cannot alter
+     * a query result, only report on one.
+     *
+     * Verbose by design. It emits one WARNING per scan key per scan, which
+     * is what makes a failing round diffable against the healthy round
+     * before it. Leave it off outside a reproducer.
+     */
+    DefineCustomBoolVariable("biscuit.diag_scan_trace",
+                             "Emit per-scan candidate-set accounting as WARNINGs.",
+                             "Diagnostic only. Reports each scan key's candidate "
+                             "cardinality, the tombstone filter's before/after "
+                             "counts, and the candidates-in vs TIDs-out pairing.",
+                             &biscuit_diag_scan_trace,
+                             false,
+                             PGC_USERSET,
+                             0,
+                             NULL, NULL, NULL);
 
     MarkGUCPrefixReserved("biscuit");
 }
