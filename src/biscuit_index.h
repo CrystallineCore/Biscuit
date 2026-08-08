@@ -83,6 +83,27 @@ extern BiscuitIndex     *biscuit_load_index(Relation index);
  */
 extern BiscuitIndex     *biscuit_get_current_index(Relation index);
 
+/*
+ * biscuit_resync_gen_after_self_drain
+ *
+ * Call this immediately after this backend has itself driven a pendlog
+ * compaction/drain to completion (biscuit_pendlog_compact() or
+ * biscuit_pendlog_drain_all()), whether triggered synchronously from the
+ * append path or deferred out of an open batch
+ * (biscuit_pendlog_batch_end(), biscuit_pendlog.c). Both of those bump
+ * the metapage's generation counter unconditionally, which is correct
+ * for every OTHER backend's staleness check but wrong for this one: idx
+ * is already the complete, current truth (the write path's in-memory
+ * fan-out is unconditional, independent of what gets drained), so
+ * without this call this backend's own next biscuit_get_current_index()
+ * would see disk_gen > idx->gen and wrongly discard-and-reload from the
+ * durable HEADER snapshot, which lags any row written earlier in an
+ * in-flight statement. `idx` may be NULL (e.g. looked up via
+ * biscuit_cache_lookup() and missing), in which case this is a no-op.
+ * See the definition in biscuit_index.c for the full writeup.
+ */
+extern void               biscuit_resync_gen_after_self_drain(Relation index, BiscuitIndex *idx);
+
 /* ==================== CRUD HELPERS ==================== */
 
 extern void biscuit_init_crud_structures(BiscuitIndex *idx);

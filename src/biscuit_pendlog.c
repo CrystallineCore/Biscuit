@@ -10,6 +10,14 @@
 #include "biscuit_pendlog.h"
 #include "biscuit_fanout.h"
 #include "biscuit_delta.h"
+#include "biscuit_index.h"     /* biscuit_resync_gen_after_self_drain() --
+                                 * see biscuit_pendlog_batch_end()'s call
+                                 * site below for why a deferred self-drain
+                                 * needs the same fix as the opportunistic
+                                 * compact in biscuit_pending_mutate_row() */
+#include "biscuit_cache.h"     /* biscuit_cache_lookup() -- to reach this
+                                 * backend's own BiscuitIndex from a bare
+                                 * Relation at batch_end() time */
 #include "biscuit_persist.h"   /* biscuit_rowstore_alloc_lock()/_unlock() --
                                  * see pendlog_drain_internal()'s call site
                                  * for why the drain now takes this too */
@@ -371,7 +379,35 @@ biscuit_pendlog_batch_end(void)
      * inside the batch would deadlock against the tail page lock.
      */
     if (want_drain && index != NULL)
+    {
         biscuit_pendlog_drain_all(index, false);
+
+        /*
+         * SELF-DRAIN GEN RESYNC.
+         *
+         * This drain was triggered by this backend's own append
+         * (biscuit_pendlog_append() armed want_drain while a batch was
+         * open, since it cannot compact synchronously under the tail
+         * page's content lock -- see the ARM comment there). It just
+         * bumped meta->gen the same way biscuit_pendlog_compact() does,
+         * and without this call this backend's own next
+         * biscuit_get_current_index() would see disk_gen > idx->gen and
+         * wrongly reload -- discarding a complete, correct in-memory
+         * BiscuitIndex for one rebuilt from the HEADER blob, which is
+         * flushed only at pre-commit and so lags any row written earlier
+         * in an in-flight statement. See
+         * biscuit_resync_gen_after_self_drain()'s comment in
+         * biscuit_index.c for the full mechanism -- this is the same
+         * hazard at the *other* call site that can trigger a self-drain,
+         * which previously had no resync at all. That gap is exactly what
+         * produced "scan result includes slot N with no valid TID": the
+         * bitmap match for a just-written row survives (it's read via the
+         * still-durable pending log), but the reload silently drops that
+         * row's idx->tids[] entry.
+         */
+        biscuit_resync_gen_after_self_drain(index,
+                                             biscuit_cache_lookup(RelationGetRelid(index)));
+    }
 }
 
 /* ================================================================

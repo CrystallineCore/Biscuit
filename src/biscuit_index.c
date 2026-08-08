@@ -937,8 +937,75 @@ biscuit_read_pending_list_limit(Relation index)
  * matter how many columns are indexed, because each column's text lives in
  * STRCACHE under the same slot.
  */
+/*
+ * biscuit_resync_gen_after_self_drain
+ *
+ * SELF-DRAIN CACHE-INVALIDATION FIX -- shared by every call site that may
+ * have just driven a pendlog compaction/drain to completion itself.
+ *
+ * pendlog_detach_prefix() / pendlog_clear_draining() (biscuit_pendlog.c)
+ * bump meta->gen unconditionally whenever a drain runs, on the (correct,
+ * for every OTHER backend) assumption that a merge just changed durable
+ * state that any cached BiscuitIndex must notice -- see
+ * biscuit_get_current_index()'s comment. That reload is right for a
+ * backend that did NOT do the merge. It is wrong for THIS backend, which
+ * just performed the merge itself: every row it has written so far,
+ * including the one that triggered the drain, is already reflected
+ * directly in idx's in-memory bitmaps (the write path's fan-out mutates
+ * them unconditionally, independent of what gets drained).
+ * biscuit_persist_load() does NOT replay the pending log into a freshly
+ * loaded idx -- that is what biscuit_reconcile_pending() is for, on the
+ * READ path only -- so a self-triggered reload here would swap this
+ * backend's complete, correct idx for one rebuilt from the durable HEADER
+ * blob, which is flushed only at pre-commit (SECTION 0b above), not per
+ * row. Any row written since the last flush -- including everything
+ * written earlier in an in-flight, uncommitted statement -- would then be
+ * silently missing from idx->tids/idx->num_records, even though its TID
+ * was already durably written by biscuit_persist_row_identity_write_
+ * record() and its bitmap membership is still sitting in the (still-
+ * durable) pending log tail the write path never replays on load. That
+ * combination -- a slot the reconciled read-time bitmap matches, with no
+ * corresponding live entry in idx->tids -- is exactly what
+ * biscuit_collect_sorted_tids_single() detects and reports as "scan
+ * result includes slot N with no valid TID".
+ *
+ * The fix is not to skip the invalidation (other backends still need it)
+ * but to keep THIS backend's bookkeeping in step with the merge it just
+ * performed, so its own next staleness check in biscuit_get_current_index()
+ * sees "nothing has changed that I don't already know about" rather than
+ * "something changed -- discard everything". Re-reading gen under share
+ * lock is the same cheap read biscuit_get_current_index() already does on
+ * every call.
+ *
+ * Callers: the opportunistic bounded-prefix compact triggered inline from
+ * biscuit_pending_mutate_row() below, and the deferred whole-log drain
+ * biscuit_pendlog_batch_end() runs after a batched append armed
+ * want_drain (biscuit_pendlog.c) -- the latter is the path steady-state
+ * single-row INSERT/UPDATE actually takes, since biscuit_insert() keeps a
+ * batch open across the whole row and biscuit_pendlog_append() cannot
+ * compact synchronously while holding the tail page's content lock.
+ */
+void
+biscuit_resync_gen_after_self_drain(Relation index, BiscuitIndex *idx)
+{
+    int    unused_records, unused_columns, unused_max_len;
+    uint64 disk_gen = 0;
+
+    if (idx == NULL || index == NULL)
+        return;
+
+    if (biscuit_read_metadata_from_disk(index, &unused_records,
+                                        &unused_columns, &unused_max_len,
+                                        &disk_gen) &&
+        disk_gen > idx->gen)
+    {
+        idx->gen                  = disk_gen;
+        idx->gen_at_last_snapshot = disk_gen;
+    }
+}
+
 static void
-biscuit_pending_mutate_row(Relation index, uint32 slot, uint8 op,
+biscuit_pending_mutate_row(Relation index, BiscuitIndex *idx, uint32 slot, uint8 op,
                             uint32 pending_list_limit)
 {
     uint64 pendlog_bytes;
@@ -977,10 +1044,60 @@ biscuit_pending_mutate_row(Relation index, uint32 slot, uint8 op,
      */
     if (pendlog_bytes > biscuit_pendlog_drain_trigger_bytes() &&
         !biscuit_pendlog_batch_active())
+    {
         biscuit_pendlog_compact(index, false,   /* opportunistic: skip if
                                                  * another backend is
                                                  * already draining */
                                  BISCUIT_PENDLOG_COMPACT_PAGES);
+
+        /*
+         * SELF-COMPACTION CACHE-INVALIDATION FIX.
+         *
+         * biscuit_pendlog_compact() -> pendlog_detach_prefix() /
+         * pendlog_clear_draining() bump meta->gen unconditionally, on the
+         * (correct, for every OTHER backend) assumption that a merge just
+         * changed durable state that any cached BiscuitIndex must notice.
+         * biscuit_get_current_index() enforces that by discarding and
+         * reloading from disk on the next call whose idx->gen is behind
+         * meta->gen -- see its comment.
+         *
+         * That reload is right for a backend that did NOT do the merge:
+         * its cached bitmaps are stale relative to what just landed on
+         * disk. It is wrong for THIS backend, which just performed the
+         * merge itself. Every row this backend has written so far --
+         * including the one that triggered this compaction -- is already
+         * reflected directly in idx's in-memory bitmaps (biscuit_index.c's
+         * write-time in-memory fan-out mutates them unconditionally,
+         * independent of what's drained). biscuit_persist_load() does NOT
+         * replay the pending log into a freshly loaded idx (that's what
+         * biscuit_reconcile_pending() is for, on the READ path only -- the
+         * write path deliberately bypasses it, see inmem_fanout_emit()'s
+         * index=NULL calls and biscuit_pattern.h's contract note, because
+         * it assumes idx already IS the complete, current truth). A
+         * self-triggered reload here would swap this backend's complete,
+         * correct idx for a base-only copy that is missing every row
+         * written since the last full drain, INCLUDING rows this same
+         * backend already durably wrote and whose only record of
+         * membership is now the (still-pending, still-durable) log tail
+         * that the write path will never reconcile against. Every
+         * subsequent write in this session then silently omits those
+         * rows' identities from the bitmaps it builds on top of the
+         * reloaded base -- a backend-local, read-visible undercount that
+         * nothing downstream catches, because xs_recheck is false and the
+         * rows are not wrong, just silently absent.
+         *
+         * The fix is not to skip the invalidation (other backends still
+         * need it) but to keep THIS backend's bookkeeping in step with the
+         * merge it just performed, so its own next staleness check sees
+         * "nothing has changed that I don't already know about" rather
+         * than "something changed -- discard everything". Re-reading gen
+         * under share lock is the same cheap read biscuit_get_current_index()
+         * already does on every call; doing it once here, right after the
+         * compaction whose bump we're compensating for, is strictly
+         * cheaper than the reload it prevents.
+         */
+        biscuit_resync_gen_after_self_drain(index, idx);
+    }
 
     (void) pending_list_limit;   /* retained in the signature for the
                                    * statement-cached-read contract in
@@ -1034,7 +1151,7 @@ biscuit_remove_from_all_indices(Relation index, BiscuitIndex *idx,
     if (!idx)
         return;
 
-    biscuit_pending_mutate_row(index, (uint32) rec_idx,
+    biscuit_pending_mutate_row(index, idx, (uint32) rec_idx,
                                 BISCUIT_PENDING_OP_REMOVE, pending_list_limit);
 
     /* -------- Multi-column -------- */
@@ -2348,6 +2465,31 @@ biscuit_insert(Relation index,
      */
     oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
 
+    /*
+     * BATCH THE UPDATE-IN-PLACE RECORD PAIR.
+     *
+     * "A row is now one record" (see the comment below on the removed row
+     * batch) is true for a plain INSERT or a bulkdelete-driven REMOVE, but
+     * it is NOT true here: the found-existing branch below emits a REMOVE
+     * (from biscuit_remove_from_all_indices(), appended before the new
+     * text overwrites the old) and, much later in this function, an ADD
+     * for the row's new content. That is two pending-log records for one
+     * logical write, and nothing was protecting the window between them --
+     * biscuit_pending_mutate_row()'s opportunistic-compaction check
+     * (biscuit_pendlog_drain_trigger_bytes()/biscuit_pendlog_compact()) is
+     * only suppressed while a batch is open. Without the batch, a
+     * compaction landing on the REMOVE mid-row runs while idx->data_cache
+     * for this slot still holds the old text and STRCACHE hasn't been
+     * overwritten yet -- exactly the kind of straddled-mutation window
+     * biscuit_pendlog_batch_begin()/_end() exists to close (see
+     * biscuit_pendlog_append()'s deferred-drain comment). Opening the
+     * batch here, before the duplicate-TID scan, covers both the REMOVE
+     * (if found_existing) and the ADD (always) under one drain-suppression
+     * window; biscuit_pendlog_batch_end() runs any compaction that got
+     * deferred only after the row is fully durable.
+     */
+    biscuit_pendlog_batch_begin(index);
+
     /* Check for duplicate TID (UPDATE path) */
     for (int i = 0; i < idx->num_records; i++)
     {
@@ -2664,8 +2806,17 @@ biscuit_insert(Relation index,
      * reconciler does not depend on that, since it withdraws the slot from
      * base wholesale rather than by re-deriving what it used to match.
      */
-    biscuit_pending_mutate_row(index, (uint32) slot,
+    biscuit_pending_mutate_row(index, idx, (uint32) slot,
                                 BISCUIT_PENDING_OP_ADD, pending_list_limit);
+
+    /*
+     * Close the batch opened above. This is where any compaction that got
+     * deferred because the batch was open (a REMOVE or this ADD crossing
+     * biscuit.delta_compaction_slots) actually runs -- with the row fully
+     * durable and none of biscuit_persist_row_identity_write_record()'s
+     * locks held, matching biscuit_pendlog_batch_end()'s own contract.
+     */
+    biscuit_pendlog_batch_end();
 
     biscuit_mark_row_identity_dirty(RelationGetRelid(index));
 

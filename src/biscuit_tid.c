@@ -260,6 +260,33 @@ biscuit_collect_sorted_tids_single(BiscuitIndex *idx,
 
             if (rec_idx < (uint32_t) idx->num_records)
             {
+                /*
+                 * A bitmap match names a slot, not a guarantee that
+                 * idx->tids[slot] was ever populated. This should be
+                 * unreachable in steady state; if it isn't, that is an
+                 * index-consistency bug, and the correct response for a
+                 * correctness-critical access method is to fail loudly and
+                 * immediately -- not to quietly drop the row. Silently
+                 * skipping (an earlier revision of this function did, via
+                 * a WARNING) turns a detectable, query-aborting failure
+                 * into an undetectable undercount that looks like a valid
+                 * answer to every caller downstream. That is strictly
+                 * worse for any workload that trusts the result, most of
+                 * all reporting/aggregation. Raise with the offending slot
+                 * number so it's actionable, rather than the bare
+                 * heap-level "tuple offset out of range" a caller would
+                 * otherwise see with no index-side context at all.
+                 */
+                if (unlikely(!ItemPointerIsValid(&idx->tids[rec_idx])))
+                    ereport(ERROR,
+                            (errcode(ERRCODE_DATA_CORRUPTED),
+                             errmsg("biscuit: scan result includes slot %u with no valid TID",
+                                    rec_idx),
+                             errhint("This indicates an in-memory/durable state divergence "
+                                     "for this backend, not on-disk damage. Reconnecting "
+                                     "should clear it; if it recurs, REINDEX and report the "
+                                     "occurrence.")));
+
                 ItemPointerCopy(&idx->tids[rec_idx], &tids[idx_out]);
                 idx_out++;
             }
@@ -278,6 +305,18 @@ biscuit_collect_sorted_tids_single(BiscuitIndex *idx,
             {
                 if (indices[i] < (uint32_t) idx->num_records)
                 {
+                    /* See the HAVE_ROARING branch above: fail loudly on an
+                     * invalid TID rather than silently dropping the row. */
+                    if (unlikely(!ItemPointerIsValid(&idx->tids[indices[i]])))
+                        ereport(ERROR,
+                                (errcode(ERRCODE_DATA_CORRUPTED),
+                                 errmsg("biscuit: scan result includes slot %u with no valid TID",
+                                        indices[i]),
+                                 errhint("This indicates an in-memory/durable state divergence "
+                                         "for this backend, not on-disk damage. Reconnecting "
+                                         "should clear it; if it recurs, REINDEX and report the "
+                                         "occurrence.")));
+
                     ItemPointerCopy(&idx->tids[indices[i]], &tids[idx_out]);
                     idx_out++;
                 }
