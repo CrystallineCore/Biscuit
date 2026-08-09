@@ -1421,10 +1421,13 @@ biscuit_persist_load(Relation index)
     MemoryContext  oldcontext = CurrentMemoryContext;
     instr_time     diag_start;   /* DIAGNOSTIC ONLY */
     volatile int   attempt;
+    bool           self_healed = false;   /* have we already tried adopting
+                                            * an abandoned drain ourselves? */
 
     biscuit_diag_decode_count = 0;   /* DIAGNOSTIC ONLY */
     INSTR_TIME_SET_CURRENT(diag_start);
 
+retry_after_self_heal:
     for (attempt = 1; attempt <= BISCUIT_LOAD_MAX_ATTEMPTS; attempt++)
     {
         BiscuitIndex   * volatile idx = NULL;
@@ -2056,6 +2059,53 @@ biscuit_persist_load(Relation index)
      * healthy index because their write load is busy is worse than telling
      * them nothing.
      *
+     * BUT: "just retry" is only a correct diagnosis if *something* is
+     * actually going to finish the drain this backend keeps losing to.
+     * biscuit_pendlog_drain_all() is only ever invoked from two places --
+     * the deferred self-drain after an appender's own INSERT
+     * (biscuit_pendlog_append()'s want_drain path) and VACUUM
+     * (biscuit_vacuumcleanup()). Neither fires on a read-only workload.
+     *
+     * That matters because pendlog_draining is also the *abandoned-chain*
+     * marker: if a drain died mid-merge (a crash between pendlog_detach()
+     * publishing the marker and pendlog_clear_draining() clearing it -- see
+     * both functions' comments), the marker is left set, durably, until
+     * "some later drain adopts and finishes the chain"
+     * (persist_load_await_quiet_drain()'s comment). On an index that sees
+     * no further INSERTs and no autovacuum (e.g. queried right after crash
+     * recovery, before any write touches it again), no later drain is ever
+     * going to show up on its own. Every attempt above sees the same
+     * stable, non-Invalid draining marker, correctly refuses to trust its
+     * read, and this backend spins here forever -- indistinguishable, from
+     * the outside, from real corruption, and "REINDEX fixes it" only
+     * because REINDEX rebuilds the directory from scratch rather than
+     * because anything about the stuck state required that.
+     *
+     * So before concluding "just contention, retry the statement", make
+     * this backend BE the later drain: adopt and finish whatever chain
+     * pendlog_draining names, exactly as VACUUM would
+     * (wait = true, so we actually wait out the DRAIN LOCK rather than
+     * opportunistically declining like the append path does). This is safe
+     * whether the marker turns out to be abandoned (we finish the orphaned
+     * merge and clear it) or merely a genuinely busy concurrent drain (we
+     * block on the same heavyweight page lock pendlog_drain_internal()
+     * already uses to serialize drainers, then return once it's done).
+     * Only attempt this once -- if the index is still not readable after
+     * we ourselves have just finished a drain, further retries here would
+     * silently mask a real problem instead of surfacing it.
+     */
+    if (!self_healed)
+    {
+        self_healed = true;
+        elog(DEBUG1,
+             "biscuit: index %u still not stably readable after %d attempts; "
+             "adopting and finishing any outstanding pending-log drain before giving up",
+             indexoid, BISCUIT_LOAD_MAX_ATTEMPTS);
+        biscuit_pendlog_drain_all(index, true, NULL);
+        goto retry_after_self_heal;
+    }
+
+    /*
      * Raise the retryable error here instead, where the cause is known,
      * rather than letting a NULL return be reinterpreted as corruption three
      * frames up. ERRCODE_T_R_SERIALIZATION_FAILURE is what a client's retry
@@ -2065,7 +2115,8 @@ biscuit_persist_load(Relation index)
             (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
              errmsg("biscuit: could not obtain a stable read of index \"%s\"",
                     RelationGetRelationName(index)),
-             errdetail("All %d load attempts overlapped a concurrent pending-log drain.",
+             errdetail("All %d load attempts overlapped a concurrent pending-log drain, "
+                       "even after this backend finished an outstanding drain itself.",
                        BISCUIT_LOAD_MAX_ATTEMPTS),
              errhint("Retry the statement. This indicates drain contention, not "
                      "corruption -- the index does not need REINDEX. Persistent "

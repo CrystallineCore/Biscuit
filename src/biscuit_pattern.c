@@ -1545,6 +1545,220 @@ typedef struct WMFrame {
 
 #define WM_MAX_STACK 512
 
+/* ================================================================
+ * SCALAR FALLBACK for the windowed sweep's stack overflow.
+ * ================================================================
+ *
+ * biscuit_recursive_windowed_match*() explores, position by position, every
+ * way the pattern's literal parts could line up in a candidate row, via a
+ * bounded (WM_MAX_STACK) explicit stack. On an adversarial or highly
+ * repetitive string -- e.g. repeat('ab', 500) against '%a%b%c%' -- a single
+ * part ("a") can match at hundreds of positions in hundreds of rows
+ * simultaneously, and the stack fills before every combination has been
+ * tried.
+ *
+ * The code used to treat a full stack as "this candidate matches": any row
+ * that reached here was OR'd straight into `result`, without ever checking
+ * whether the *remaining* parts (the ones that would have been explored had
+ * there been stack room) actually occur in the row's text. For
+ * repeat('ab',500) against '%a%b%c%', a row that matched "a" then "b" got
+ * treated as matching '%a%b%c%' even though the row has no 'c' at all. That
+ * is a genuine false positive, not a lossy approximation the executor
+ * cleans up afterward: BISCUIT's amgetbitmap() always reports
+ * recheck = false (see biscuit_scan.c), so PostgreSQL never re-evaluates
+ * the qual against the heap tuple, and the wrong row reaches the client. A
+ * NOT LIKE query over the same pattern shows the exact mirror image: the
+ * same row is wrongly excluded from the complement.
+ *
+ * The fix: when the stack can't hold another frame, don't guess. Fall back
+ * to a direct, scalar verification of the remaining parts against this
+ * frame's actual candidate rows, and only add a row to `result` if it
+ * genuinely matches. Greedy leftmost matching is correct (not merely a
+ * heuristic) for this: for literal parts separated by unanchored '%',
+ * matching each part as early as possible after the previous one never
+ * forecloses a later part's match, so if any valid assignment of positions
+ * exists, the greedy one is among them. The only spot that needs special
+ * handling is the final part when the pattern does not end in '%', which
+ * must land exactly at the end of the string rather than merely somewhere
+ * in it -- handled the same way biscuit_match_part_at_end() is used
+ * elsewhere in this file.
+ */
+
+/*
+ * Find the leftmost occurrence of `part` in `hay` at or after character
+ * position from_char_pos. Returns the character position immediately past
+ * the match (so the caller can resume searching for the next part from
+ * there), or -1 if `part` does not occur anywhere from that position on.
+ */
+static int
+wm_find_part_from_char(const char *hay, int hay_byte_len, int hay_char_len,
+                        const char *part, int part_byte_len, int part_char_len,
+                        int from_char_pos)
+{
+    int cp;
+    int byte_off;
+
+    if (part_char_len == 0)
+        return from_char_pos;
+
+    if (from_char_pos < 0 || from_char_pos > hay_char_len - part_char_len)
+        return -1;
+
+    byte_off = biscuit_utf8_char_to_byte_offset(hay, hay_byte_len, from_char_pos);
+    if (byte_off < 0)
+        return -1;
+
+    for (cp = from_char_pos; cp <= hay_char_len - part_char_len; cp++)
+    {
+        if (biscuit_part_match_substr(hay, hay_byte_len, byte_off, part, part_byte_len))
+            return cp + part_char_len;
+        if (byte_off >= hay_byte_len)
+            break;
+        byte_off += biscuit_utf8_char_length((unsigned char) hay[byte_off]);
+    }
+    return -1;
+}
+
+/*
+ * Verify parts[start_part_idx .. part_count-1] all occur, in order, in
+ * `hay`, with the first one starting no earlier than character position
+ * start_char_pos. Mirrors exactly what the windowed sweep would have
+ * proven bitmap-side had it had stack room to keep exploring.
+ */
+static bool
+wm_scalar_verify_remaining(const char *hay, int hay_byte_len,
+                            const char **parts, int *part_byte_lens,
+                            int part_count, int start_part_idx,
+                            int start_char_pos, bool ends_percent)
+{
+    int hay_char_len = biscuit_utf8_char_count(hay, hay_byte_len);
+    int cur_pos       = start_char_pos;
+    int pidx;
+
+    for (pidx = start_part_idx; pidx < part_count; pidx++)
+    {
+        int  part_cl = biscuit_part_char_count(parts[pidx], part_byte_lens[pidx]);
+        bool is_last  = (pidx == part_count - 1);
+
+        if (is_last && !ends_percent)
+        {
+            int anchor_pos = hay_char_len - part_cl;
+            int byte_off;
+
+            if (anchor_pos < cur_pos)
+                return false;
+            byte_off = biscuit_utf8_char_to_byte_offset(hay, hay_byte_len, anchor_pos);
+            if (byte_off < 0)
+                return false;
+            if (!biscuit_part_match_substr(hay, hay_byte_len, byte_off,
+                                            parts[pidx], part_byte_lens[pidx]))
+                return false;
+            cur_pos = hay_char_len;
+        }
+        else
+        {
+            int next_pos = wm_find_part_from_char(hay, hay_byte_len, hay_char_len,
+                                                   parts[pidx], part_byte_lens[pidx],
+                                                   part_cl, cur_pos);
+            if (next_pos < 0)
+                return false;
+            cur_pos = next_pos;
+        }
+    }
+    return true;
+}
+
+/*
+ * Fetch-and-verify: for every row in `nc`, look up its text via `fetch` and
+ * add it to `result` only if wm_scalar_verify_remaining() confirms the
+ * remaining parts actually occur. `fetch` returning NULL (no cached text,
+ * e.g. a NULL column value slipping through as a candidate) is treated as
+ * "does not match", matching how the bitmap-side helpers already behave
+ * for slots with no data.
+ */
+typedef const char *(*WMHayFetch) (void *fetch_ctx, uint32_t slot);
+
+static void
+wm_verify_and_add(RoaringBitmap *result, RoaringBitmap *nc,
+                   WMHayFetch fetch, void *fetch_ctx,
+                   const char **parts, int *part_byte_lens, int part_count,
+                   int start_part_idx, int start_char_pos, bool ends_percent)
+{
+#ifdef HAVE_ROARING
+    roaring_uint32_iterator_t *iter = roaring_iterator_create(nc);
+    while (iter->has_value)
+    {
+        uint32_t    rec = iter->current_value;
+        const char *hay = fetch(fetch_ctx, rec);
+        if (hay && wm_scalar_verify_remaining(hay, strlen(hay), parts, part_byte_lens,
+                                               part_count, start_part_idx,
+                                               start_char_pos, ends_percent))
+            biscuit_roaring_add(result, rec);
+        roaring_uint32_iterator_advance(iter);
+    }
+    roaring_uint32_iterator_free(iter);
+#else
+    {
+        uint64_t  cnt;
+        uint32_t *indices = biscuit_roaring_to_array(nc, &cnt);
+        if (indices)
+        {
+            int j;
+            for (j = 0; j < (int) cnt; j++)
+            {
+                uint32_t    rec = indices[j];
+                const char *hay = fetch(fetch_ctx, rec);
+                if (hay && wm_scalar_verify_remaining(hay, strlen(hay), parts, part_byte_lens,
+                                                       part_count, start_part_idx,
+                                                       start_char_pos, ends_percent))
+                    biscuit_roaring_add(result, rec);
+            }
+            pfree(indices);
+        }
+    }
+#endif
+}
+
+/* Hay-fetch callbacks: one per data source the four windowed-match
+ * variants below draw row text from. */
+static const char *
+wm_hay_fetch_legacy(void *ctx, uint32_t slot)
+{
+    BiscuitIndex *idx = (BiscuitIndex *) ctx;
+    return (slot < (uint32_t) idx->num_records) ? idx->data_cache[slot] : NULL;
+}
+
+static const char *
+wm_hay_fetch_legacy_lower(void *ctx, uint32_t slot)
+{
+    BiscuitIndex *idx = (BiscuitIndex *) ctx;
+    return (slot < (uint32_t) idx->num_records) ? idx->data_cache_lower[slot] : NULL;
+}
+
+typedef struct WMColFetchCtx
+{
+    BiscuitIndex *idx;
+    int           col_idx;
+} WMColFetchCtx;
+
+static const char *
+wm_hay_fetch_col(void *ctx, uint32_t slot)
+{
+    WMColFetchCtx *c = (WMColFetchCtx *) ctx;
+    if (slot >= (uint32_t) c->idx->num_records)
+        return NULL;
+    return c->idx->column_data_cache[c->col_idx][slot];
+}
+
+static const char *
+wm_hay_fetch_col_lower(void *ctx, uint32_t slot)
+{
+    WMColFetchCtx *c = (WMColFetchCtx *) ctx;
+    if (slot >= (uint32_t) c->idx->num_records || !c->idx->column_data_cache_lower)
+        return NULL;
+    return c->idx->column_data_cache_lower[c->col_idx][slot];
+}
+
 static void
 biscuit_recursive_windowed_match(
     Relation index, RoaringBitmap *result, BiscuitIndex *idx,
@@ -1676,7 +1890,13 @@ biscuit_recursive_windowed_match(
             }
             if (stack_top >= WM_MAX_STACK)
             {
-                biscuit_roaring_or_inplace(result, nc);
+                /* See "SCALAR FALLBACK" above biscuit_recursive_windowed_match():
+                 * the stack has no room to keep exploring this candidate
+                 * set bitmap-side, so verify it directly against each
+                 * row's text instead of assuming a match. */
+                wm_verify_and_add(result, nc, wm_hay_fetch_legacy, idx,
+                                   parts, part_lens, part_count,
+                                   pidx + 1, pos + part_cl, ends_percent);
                 biscuit_roaring_free(nc);
                 continue;
             }
@@ -1818,7 +2038,10 @@ biscuit_recursive_windowed_match_ilike(
             if (biscuit_roaring_is_empty(nc)) { biscuit_roaring_free(nc); continue; }
             if (stack_top >= WM_MAX_STACK)
             {
-                biscuit_roaring_or_inplace(result, nc);
+                /* See "SCALAR FALLBACK" above biscuit_recursive_windowed_match(). */
+                wm_verify_and_add(result, nc, wm_hay_fetch_legacy_lower, idx,
+                                   parts, part_lens, part_count,
+                                   pidx + 1, pos + part_cl, ends_percent);
                 biscuit_roaring_free(nc);
                 continue;
             }
@@ -2047,7 +2270,7 @@ biscuit_match_col_part_at_end_ilike(Relation index, ColumnIndex *col, int col_id
 
 static void
 biscuit_recursive_windowed_match_col(
-    Relation index, RoaringBitmap *result, ColumnIndex *col, int col_idx,
+    Relation index, RoaringBitmap *result, BiscuitIndex *idx, ColumnIndex *col, int col_idx,
     const char **parts, int *part_byte_lens, int part_count,
     bool ends_percent, int part_idx, int min_char_pos,
     RoaringBitmap *current_candidates, int max_char_len)
@@ -2170,7 +2393,13 @@ biscuit_recursive_windowed_match_col(
             if (biscuit_roaring_is_empty(nc)) { biscuit_roaring_free(nc); continue; }
             if (stack_top >= WM_MAX_STACK)
             {
-                biscuit_roaring_or_inplace(result, nc);
+                /* See "SCALAR FALLBACK" above biscuit_recursive_windowed_match(). */
+                WMColFetchCtx fctx;
+                fctx.idx = idx;
+                fctx.col_idx = col_idx;
+                wm_verify_and_add(result, nc, wm_hay_fetch_col, &fctx,
+                                   parts, part_byte_lens, part_count,
+                                   pidx + 1, pos + part_cl, ends_percent);
                 biscuit_roaring_free(nc);
                 continue;
             }
@@ -2189,7 +2418,7 @@ biscuit_recursive_windowed_match_col(
 
 static void
 biscuit_recursive_windowed_match_col_ilike(
-    Relation index, RoaringBitmap *result, ColumnIndex *col, int col_idx,
+    Relation index, RoaringBitmap *result, BiscuitIndex *idx, ColumnIndex *col, int col_idx,
     const char **parts, int *part_byte_lens, int part_count,
     bool ends_percent, int part_idx, int min_char_pos,
     RoaringBitmap *current_candidates, int max_char_len)
@@ -2312,7 +2541,13 @@ biscuit_recursive_windowed_match_col_ilike(
             if (biscuit_roaring_is_empty(nc)) { biscuit_roaring_free(nc); continue; }
             if (stack_top >= WM_MAX_STACK)
             {
-                biscuit_roaring_or_inplace(result, nc);
+                /* See "SCALAR FALLBACK" above biscuit_recursive_windowed_match(). */
+                WMColFetchCtx fctx;
+                fctx.idx = idx;
+                fctx.col_idx = col_idx;
+                wm_verify_and_add(result, nc, wm_hay_fetch_col_lower, &fctx,
+                                   parts, part_byte_lens, part_count,
+                                   pidx + 1, pos + part_cl, ends_percent);
                 biscuit_roaring_free(nc);
                 continue;
             }
@@ -3064,7 +3299,7 @@ biscuit_query_column_pattern_masked(Relation index, BiscuitIndex *idx, int col_i
             if (cands && !biscuit_roaring_is_empty(cands)) {
                 if (!parsed->starts_percent) { RoaringBitmap *first = biscuit_match_col_part_at_pos(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0); if (first) { biscuit_roaring_and_inplace(first, cands); biscuit_roaring_free(cands); cands = first; } }
                 if (!biscuit_roaring_is_empty(cands))
-                    biscuit_recursive_windowed_match_col(index, result, col, col_idx, (const char **) parsed->parts, parsed->part_byte_lens, parsed->part_count, parsed->ends_percent, 0, 0, cands, col->max_length);
+                    biscuit_recursive_windowed_match_col(index, result, idx, col, col_idx, (const char **) parsed->parts, parsed->part_byte_lens, parsed->part_count, parsed->ends_percent, 0, 0, cands, col->max_length);
                 biscuit_roaring_free(cands);
             } else if (cands) biscuit_roaring_free(cands);
         }
@@ -3306,7 +3541,7 @@ biscuit_query_column_pattern_ilike_masked(Relation index, BiscuitIndex *idx, int
             if (cands && !biscuit_roaring_is_empty(cands)) {
                 if (!parsed->starts_percent) { RoaringBitmap *first = biscuit_match_col_part_at_pos_ilike(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0); if (first) { biscuit_roaring_and_inplace(first, cands); biscuit_roaring_free(cands); cands = first; } }
                 if (!biscuit_roaring_is_empty(cands))
-                    biscuit_recursive_windowed_match_col_ilike(index, result, col, col_idx, (const char **) parsed->parts, parsed->part_byte_lens, parsed->part_count, parsed->ends_percent, 0, 0, cands, col->max_length_lower);
+                    biscuit_recursive_windowed_match_col_ilike(index, result, idx, col, col_idx, (const char **) parsed->parts, parsed->part_byte_lens, parsed->part_count, parsed->ends_percent, 0, 0, cands, col->max_length_lower);
                 biscuit_roaring_free(cands);
             } else if (cands) biscuit_roaring_free(cands);
         }
