@@ -544,11 +544,6 @@ biscuit_build_candidates_singlecolumn(IndexScanDesc scan,
         uint64_t card_after;
         uint64_t tomb_card;
 
-        /*
-         * REACHABILITY PROOF -- see biscuit_diag_first_scan below.
-         */
-        static bool biscuit_diag_first_scan = true;
-
         if (so->index->tombstone_count > 0)
             biscuit_roaring_andnot_inplace(result, so->index->tombstones);
 
@@ -556,46 +551,6 @@ biscuit_build_candidates_singlecolumn(IndexScanDesc scan,
         tomb_card  = so->index->tombstones
                         ? biscuit_roaring_count(so->index->tombstones)
                         : 0;
-
-        /*
-         * ONE UNCONDITIONAL FIRING PER BACKEND.
-         *
-         * A guard that has never once been observed to fire cannot
-         * support a negative result: "the condition was not met" and
-         * "the message could not reach the log" are indistinguishable
-         * from the outside, and treating the second as the first is
-         * how a diagnostic round gets spent proving nothing. Six runs
-         * of silence from the conditional warning below is currently
-         * evidence of exactly one of those two things and we cannot
-         * say which.
-         *
-         * So the first scan in every backend reports the same numbers
-         * unconditionally, at the same WARNING level, through the same
-         * ereport() at the same call site. If this line appears and
-         * the conditional one does not, the conditional one's silence
-         * is a real measurement about the data. If this line does not
-         * appear either, the site is not being reached (or the log is
-         * not capturing it) and every scan-side negative from v40
-         * should be discarded rather than reasoned from.
-         *
-         * Static, so it costs one predictable branch per scan after
-         * the first.
-         */
-        if (biscuit_diag_first_scan || biscuit_diag_scan_trace)
-        {
-            biscuit_diag_first_scan = false;
-            ereport(WARNING,
-                    (errmsg("biscuit: diag reachability -- tombstone filter site reached"),
-                     errdetail("candidates before " UINT64_FORMAT ", after " UINT64_FORMAT
-                               "; tombstone bitmap " UINT64_FORMAT " slot(s); "
-                               "tombstone_count %d; num_records %d.",
-                               card_before, card_after, tomb_card,
-                               so->index->tombstone_count,
-                               so->index->num_records),
-                     errhint("This fires once per backend regardless of condition. "
-                             "Its absence means the scan-side instruments are "
-                             "unreachable, not that their conditions were unmet.")));
-        }
 
         if (card_before != card_after || tomb_card != (uint64_t) so->index->tombstone_count)
             ereport(WARNING,

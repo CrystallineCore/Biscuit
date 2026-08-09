@@ -211,7 +211,7 @@ typedef struct {
 #define CHAR_RANGE                      256
 #define TOMBSTONE_CLEANUP_THRESHOLD     1000
 #define RADIX_SORT_THRESHOLD            5000
-#define BISCUIT_LIBRARY_VERSION         "3.0.0 - Costly Cookies - v56"
+#define BISCUIT_LIBRARY_VERSION         "3.0.0 - Costly Cookies - v57"
 
 /* ==================== MEMORY MANAGEMENT MACROS ==================== */
 
