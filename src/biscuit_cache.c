@@ -65,6 +65,19 @@ biscuit_cache_insert(Oid indexoid, BiscuitIndex *idx)
     {
         if (entry->indexoid == indexoid)
         {
+            /*
+             * Defensive: every current call site (biscuit_build(),
+             * biscuit_persist_load() via biscuit_load_index(), and
+             * biscuit_insert()/biscuit_bulkdelete() re-inserting their own
+             * already-cached idx unchanged) either targets an oid with no
+             * existing entry, or passes back the SAME idx pointer already
+             * stored here. If a future caller ever replaces this entry's
+             * idx with a genuinely different object without going through
+             * biscuit_cache_remove() first, don't silently orphan the old
+             * one's context the way the pre-context-ownership code did.
+             */
+            if (entry->index && entry->index != idx && entry->index->reserved[0] != 0)
+                MemoryContextDelete((MemoryContext) (uintptr_t) entry->index->reserved[0]);
             entry->index = idx;
             return;
         }
@@ -87,9 +100,37 @@ biscuit_cache_insert(Oid indexoid, BiscuitIndex *idx)
 /* ==================== REMOVE ==================== */
 
 /*
- * Unlink a cache entry.  Memory is owned by CacheMemoryContext and
- * will be reclaimed by PostgreSQL — do not pfree here.
+ * Unlink a cache entry AND free the BiscuitIndex it points at.
+ *
+ * Every BiscuitIndex now lives in its own child context of
+ * CacheMemoryContext (idx->reserved[0] holds the MemoryContext handle --
+ * see biscuit_persist_load()'s and biscuit_build()'s comments in
+ * biscuit_persist.c/biscuit_index.c for why). This used to only unlink the
+ * list node and leave the BiscuitIndex itself sitting in
+ * CacheMemoryContext with nothing pointing at it -- CacheMemoryContext is
+ * never reset by PostgreSQL, so that was a permanent per-eviction leak,
+ * and biscuit_get_current_index() evicts+reloads on essentially every
+ * statement under concurrent writers (BISCUIT-3.0.0-GA-Report.md §10.4,
+ * the 737 MB per-backend growth / cluster OOM finding). Deleting the
+ * context here frees the whole BiscuitIndex -- TIDs, every bitmap, every
+ * cached string -- in one call.
+ *
+ * The BiscuitIndexCacheEntry list node itself is a separate, tiny
+ * allocation directly in CacheMemoryContext (see biscuit_cache_insert()),
+ * not inside idx's context, so it's pfree'd here too rather than left
+ * behind.
  */
+static void
+biscuit_cache_entry_release(BiscuitIndexCacheEntry *entry)
+{
+    if (entry->index && entry->index->reserved[0] != 0)
+    {
+        MemoryContext idx_cxt = (MemoryContext) (uintptr_t) entry->index->reserved[0];
+        MemoryContextDelete(idx_cxt);
+    }
+    pfree(entry);
+}
+
 void
 biscuit_cache_remove(Oid indexoid)
 {
@@ -110,7 +151,12 @@ biscuit_cache_remove(Oid indexoid)
      */
     if (!OidIsValid(indexoid))
     {
-        biscuit_cache_head = NULL;
+        while (biscuit_cache_head != NULL)
+        {
+            entry = biscuit_cache_head;
+            biscuit_cache_head = entry->next;
+            biscuit_cache_entry_release(entry);
+        }
         elog(DEBUG1, "Biscuit: Dropped all cache entries (global invalidation)");
         return;
     }
@@ -121,6 +167,7 @@ biscuit_cache_remove(Oid indexoid)
         if (entry->indexoid == indexoid)
         {
             *entry_ptr = entry->next;
+            biscuit_cache_entry_release(entry);
             elog(DEBUG1, "Biscuit: Removed cache entry for index %u", indexoid);
             return;
         }

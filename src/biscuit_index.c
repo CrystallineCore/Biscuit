@@ -1953,6 +1953,7 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
     TupleTableSlot   *slot;
     TableScanDesc     scan;
     MemoryContext     oldcontext;
+    MemoryContext     build_cxt;
     int               ch, natts, col, rec_idx;
     EState           *estate;
     ExprContext      *econtext;
@@ -1993,14 +1994,24 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
     econtext = GetPerTupleExprContext(estate);
 
     /*
-     * All BiscuitIndex data must live in CacheMemoryContext, not in
-     * rd_indexcxt.  PostgreSQL calls MemoryContextDelete(rd_indexcxt) inside
-     * RelationClearRelation on any relcache invalidation (ANALYZE, DDL, cache
-     * sweeps), which would free all our data while the cache entry still holds
-     * the pointer.  CacheMemoryContext is never reset by PostgreSQL and is the
-     * correct long-lived home for session-scoped index structures.
+     * All BiscuitIndex data must live in its own child of
+     * CacheMemoryContext, not in rd_indexcxt.  PostgreSQL calls
+     * MemoryContextDelete(rd_indexcxt) inside RelationClearRelation on any
+     * relcache invalidation (ANALYZE, DDL, cache sweeps), which would free
+     * all our data while the cache entry still holds the pointer.
+     * CacheMemoryContext itself is never reset by PostgreSQL, but a bare
+     * switch straight into it (the old behavior) meant nothing could ever
+     * be freed again except at backend exit -- every reload leaked the
+     * entire previous copy of the index (BISCUIT-3.0.0-GA-Report.md
+     * §10.4). A dedicated child context gives this one load a single
+     * handle biscuit_cache_remove() can MemoryContextDelete() as a unit;
+     * see biscuit_persist_load()'s matching comment in biscuit_persist.c
+     * and idx->reserved[0]'s ownership contract below.
      */
-    oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
+    build_cxt  = AllocSetContextCreate(CacheMemoryContext,
+                                       "biscuit index (built)",
+                                       ALLOCSET_DEFAULT_SIZES);
+    oldcontext = MemoryContextSwitchTo(build_cxt);
 
     PG_TRY();
     {
@@ -2489,15 +2500,21 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
 
         biscuit_register_callback();
         /*
-         * NOTE: idx lives permanently in CacheMemoryContext and is owned
-         * exclusively by biscuit_cache (keyed by relid).  Do NOT also
-         * assign it to index->rd_amcache: PostgreSQL pfree()s rd_amcache
-         * on relcache invalidation, which under load (VACUUM/ANALYZE/many
+         * NOTE: idx lives permanently in its own context (build_cxt, a
+         * child of CacheMemoryContext) and is owned exclusively by
+         * biscuit_cache (keyed by relid).  Do NOT also assign it to
+         * index->rd_amcache: PostgreSQL pfree()s rd_amcache on relcache
+         * invalidation, which under load (VACUUM/ANALYZE/many
          * transactions) happens far more often than our own cache gets
          * evicted, and pfree()ing this shared object out from under the
          * global cache produces a dangling pointer / use-after-free the
          * next time biscuit_cache_lookup() hands it back out.
+         *
+         * Stamp build_cxt into idx->reserved[0] before biscuit_cache_insert()
+         * so eviction can MemoryContextDelete() it as a unit -- see
+         * biscuit_cache_remove().
          */
+        idx->reserved[0] = (uint64) (uintptr_t) build_cxt;
         biscuit_cache_insert(RelationGetRelid(index), idx);
 
         MemoryContextSwitchTo(oldcontext);
@@ -2512,6 +2529,7 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
     PG_CATCH();
     {
         MemoryContextSwitchTo(oldcontext);
+        MemoryContextDelete(build_cxt);   /* build failed; nothing to hand off */
         PG_RE_THROW();
     }
     PG_END_TRY();
@@ -2769,8 +2787,16 @@ biscuit_insert(Relation index,
      * complete BiscuitIndex — heap scan, data caches, and every bitmap —
      * before returning it, so the length-bitmap arrays below are always
      * allocated and non-NULL by the time we get here.
+     *
+     * Grow idx's arrays into idx's OWN context (reserved[0] -- see
+     * biscuit_persist_load()'s comment in biscuit_persist.c), not
+     * CacheMemoryContext directly. idx already lives in a dedicated child
+     * context precisely so it can be freed as one unit on eviction; a
+     * repalloc/palloc landing straight in CacheMemoryContext instead would
+     * escape that unit and go back to leaking permanently, just at a
+     * slower per-row rate instead of a per-reload one.
      */
-    oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
+    oldcontext = MemoryContextSwitchTo((MemoryContext) (uintptr_t) idx->reserved[0]);
 
     /*
      * BATCH THE UPDATE-IN-PLACE RECORD PAIR.
@@ -3203,7 +3229,9 @@ biscuit_bulkdelete(IndexVacuumInfo *info,
 
     pending_list_limit = biscuit_read_pending_list_limit(index);
 
-    oldcontext = MemoryContextSwitchTo(CacheMemoryContext);
+    /* See biscuit_insert()'s identical switch above for why this must be
+     * idx's own context and not CacheMemoryContext directly. */
+    oldcontext = MemoryContextSwitchTo((MemoryContext) (uintptr_t) idx->reserved[0]);
 
     records_to_delete = biscuit_roaring_create();
 

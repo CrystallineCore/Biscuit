@@ -1424,6 +1424,49 @@ biscuit_persist_load(Relation index)
     bool           self_healed = false;   /* have we already tried adopting
                                             * an abandoned drain ourselves? */
 
+    /*
+     * OWNED CONTEXT FOR THIS LOAD -- see biscuit_cache.c's
+     * BiscuitIndexCacheEntry comment for the leak this closes.
+     *
+     * Every field a successful load allocates (TIDs, every bitmap, every
+     * STRCACHE column, all of it) used to go straight into
+     * CacheMemoryContext, which PostgreSQL never resets for the life of
+     * the backend. biscuit_get_current_index() evicts and reloads on
+     * essentially every statement under concurrent writers (gen check),
+     * and biscuit_cache_remove() only ever unlinked the old cache entry --
+     * it never freed what it pointed at, because there was no
+     * self-contained unit to free. That is the mechanism behind the
+     * per-backend memory growth to hundreds of MB under concurrent load
+     * (BISCUIT-3.0.0-GA-Report.md §10.4): each reload leaked the entire
+     * previous copy of the index.
+     *
+     * Fix: give this load its own child context under CacheMemoryContext,
+     * and hand the winning idx ownership of it via idx->reserved[0] (see
+     * biscuit_common.h -- explicitly reserved for future in-memory
+     * bookkeeping, never read or written by the disk format). Eviction
+     * can then MemoryContextDelete() the whole thing in one call instead
+     * of merely unlinking it. biscuit_insert()/biscuit_bulkdelete() must
+     * grow this SAME idx's arrays into idx's own context from here on,
+     * not CacheMemoryContext directly -- see the switch in each of those
+     * functions.
+     *
+     * This context is also, deliberately, the ONLY context every attempt
+     * of the retry loop below allocates into (the per-attempt
+     * MemoryContextSwitchTo() a few lines down targets this, not
+     * CacheMemoryContext). A discarded attempt (drain race, corrupt read)
+     * is not individually freed -- doing that safely would mean auditing
+     * every retry/continue/PG_CATCH exit in this ~600-line loop, which is
+     * a larger and riskier change than this fix warrants. Instead,
+     * discarded attempts' garbage simply accumulates in this one context
+     * across at most BISCUIT_LOAD_MAX_ATTEMPTS tries, and is freed
+     * together with the eventual winner on its next eviction. Bounded and
+     * self-correcting, unlike the unbounded per-statement leak this
+     * replaces.
+     */
+    MemoryContext  load_cxt = AllocSetContextCreate(CacheMemoryContext,
+                                                     "biscuit index (loaded)",
+                                                     ALLOCSET_DEFAULT_SIZES);
+
     biscuit_diag_decode_count = 0;   /* DIAGNOSTIC ONLY */
     INSTR_TIME_SET_CURRENT(diag_start);
 
@@ -1525,10 +1568,11 @@ retry_after_self_heal:
                  "returning NULL (nothing saved yet if pre-build, otherwise investigate)",
                  indexoid, attempt, BISCUIT_LOAD_MAX_ATTEMPTS, drains_before);
 
+            MemoryContextDelete(load_cxt);   /* nothing was ever built into it */
             return NULL;   /* nothing saved yet -- genuinely absent */
         }
 
-        MemoryContextSwitchTo(CacheMemoryContext);
+        MemoryContextSwitchTo(load_cxt);
 
         PG_TRY();
         {
@@ -2040,12 +2084,23 @@ retry_after_self_heal:
             elog(WARNING, "biscuit: discarding unreadable directory-backed state for index %u (%s)",
                  indexoid, edata->message);
             FreeErrorData(edata);
+            /* Abandoning this load entirely -- take whatever accumulated
+             * across this and any earlier discarded attempts with it. */
+            MemoryContextSwitchTo(oldcontext);
+            MemoryContextDelete(load_cxt);
             return NULL;
         }
 
         elog(DEBUG1, "biscuit: loaded directory-backed state for index %u (%d records, gen " UINT64_FORMAT ")",
              indexoid, idx->num_records, idx->gen);
 
+        /*
+         * Hand idx ownership of load_cxt (see this function's top-of-body
+         * comment). From here on, MemoryContextDelete(load_cxt) is what
+         * frees this entire index -- biscuit_cache_remove() reads it back
+         * out of reserved[0] to do exactly that on eviction.
+         */
+        idx->reserved[0] = (uint64) (uintptr_t) load_cxt;
         return idx;
     }
 
@@ -2111,6 +2166,8 @@ retry_after_self_heal:
      * frames up. ERRCODE_T_R_SERIALIZATION_FAILURE is what a client's retry
      * logic already understands, and it is what this genuinely is.
      */
+    MemoryContextSwitchTo(oldcontext);
+    MemoryContextDelete(load_cxt);   /* every discarded attempt goes with it */
     ereport(ERROR,
             (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
              errmsg("biscuit: could not obtain a stable read of index \"%s\"",
