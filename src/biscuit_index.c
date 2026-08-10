@@ -1949,7 +1949,7 @@ IndexBuildResult *
 biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
 {
     IndexBuildResult *result;
-    BiscuitIndex     *idx;
+    BiscuitIndex     * volatile idx = NULL;
     TupleTableSlot   *slot;
     TableScanDesc     scan;
     MemoryContext     oldcontext;
@@ -2529,6 +2529,20 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
     PG_CATCH();
     {
         MemoryContextSwitchTo(oldcontext);
+        /*
+         * Same leak class as biscuit_cache_entry_release()/
+         * biscuit_persist_load()'s discarded-attempt paths: a build that
+         * fails partway (or in biscuit_persist_save()/
+         * biscuit_cache_insert() at the very end) can have already fanned
+         * out real, CRoaring-allocated bitmaps into build_cxt for every
+         * row scanned so far. MemoryContextDelete() below only reaches
+         * the palloc'd scaffolding around them -- see
+         * biscuit_index_free_bitmaps()'s comment in biscuit_cache.c for
+         * the full explanation. idx is NULL-initialized above and
+         * palloc0()'d before use, so this is safe to call unconditionally
+         * regardless of how far the build got before throwing.
+         */
+        biscuit_index_free_bitmaps(idx);
         MemoryContextDelete(build_cxt);   /* build failed; nothing to hand off */
         PG_RE_THROW();
     }

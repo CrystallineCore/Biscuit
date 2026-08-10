@@ -75,6 +75,12 @@
 #include "biscuit_common.h"
 #include "biscuit_bitmap.h"
 #include "biscuit_blob.h"
+#include "biscuit_cache.h"     /* biscuit_index_free_bitmaps() -- discarded
+                                 * load attempts below can hold real,
+                                 * CRoaring-allocated bitmaps that a bare
+                                 * MemoryContextDelete(load_cxt) would
+                                 * orphan; see the call sites below and
+                                 * biscuit_cache.c's definition */
 #include "biscuit_dir.h"
 #include "biscuit_pendlog.h"
 #include "biscuit_rowstore.h"   /* in-place TIDS/STRCACHE/HEADER I/O --
@@ -1127,8 +1133,13 @@ biscuit_persist_load_column_walk_cb(const BiscuitDirEntry *entry, void *vstate)
 }
 
 /* Copy a LoadBucket's accumulated (pos,bitmap) pairs into a freshly
- * palloc'd CharIndex, in CacheMemoryContext (matching the old code's
- * allocation context for every in-memory structure it built). */
+ * palloc'd CharIndex, in the caller's current context -- which, at every
+ * call site in this file, is load_cxt (see biscuit_persist_load()'s
+ * OWNED CONTEXT comment). Do NOT hard-code CacheMemoryContext here: that
+ * was the pre-load_cxt allocation target, and everything built during a
+ * load must now live in load_cxt so it is freed as a unit with the rest
+ * of the index on eviction instead of being orphaned in a context
+ * PostgreSQL never resets. */
 static int
 biscuit_posentry_cmp(const void *a, const void *b)
 {
@@ -1218,9 +1229,26 @@ biscuit_persist_load_strcache(Relation index, int32 col, bool is_lower,
      * palloc0'd NULL in place, exactly as the old length-prefixed
      * NULL encoding did -- so, unlike the old single-blob read, there is
      * no truncation condition to detect and no error to raise.
+     *
+     * MEMORY CONTEXT -- this used to hard-code CacheMemoryContext, which
+     * PostgreSQL never resets. That bypassed the whole load_cxt/
+     * idx->reserved[0] ownership mechanism biscuit_persist_load() uses
+     * (see its OWNED CONTEXT comment and biscuit_cache.c's eviction path):
+     * every other part of a loaded index -- TIDs, bitmaps, CharIndex
+     * structures -- lives in load_cxt and is freed as a unit when the
+     * index is evicted, but every row's raw and lowercased text was
+     * orphaned in CacheMemoryContext on every single load, permanently.
+     * Under a workload where biscuit_get_current_index() reloads on
+     * essentially every statement (concurrent writers -- see that
+     * function's comment), that leaked the full indexed text of the
+     * table once per statement: unbounded, monotonic per-backend growth
+     * with no eviction ever able to reclaim it (BISCUIT-3.0.0-GA-Report.md
+     * §10.4/OOM). CurrentMemoryContext is load_cxt at every call site in
+     * this file (set by the MemoryContextSwitchTo(load_cxt) above), so
+     * this now shares idx's own lifetime like everything else it owns.
      */
     biscuit_rowstore_str_read_all(index, entry.blob_head, (uint32) num_records,
-                                   CacheMemoryContext, arr);
+                                   CurrentMemoryContext, arr);
 
     return arr;
 }
@@ -1228,7 +1256,13 @@ biscuit_persist_load_strcache(Relation index, int32 col, bool is_lower,
 static void
 biscuit_persist_load_column(Relation index, int32 col,
                              int max_length, int max_length_lower,
-                             /* out params, all filled in CacheMemoryContext */
+                             /* out params, all filled in the caller's current
+                              * context -- load_cxt at every real call site,
+                              * NOT CacheMemoryContext directly. See
+                              * biscuit_persist_load_strcache()'s MEMORY
+                              * CONTEXT comment for why that distinction now
+                              * matters: bare CacheMemoryContext is never
+                              * freed on eviction. */
                              CharIndex *pos_idx, CharIndex *neg_idx, RoaringBitmap **char_cache,
                              CharIndex *pos_idx_lower, CharIndex *neg_idx_lower, RoaringBitmap **char_cache_lower,
                              RoaringBitmap ***length_bitmaps, RoaringBitmap ***length_ge_bitmaps,
@@ -2062,6 +2096,27 @@ retry_after_self_heal:
              */
             if (caught_error)
                 FreeErrorData(edata);
+
+            /*
+             * This attempt is being thrown away regardless of whether it
+             * threw: if it ran clean (caught_error == false), idx is a
+             * fully decoded BiscuitIndex with real, CRoaring-allocated
+             * bitmaps in load_cxt that nothing will ever reach again once
+             * this iteration's `idx` variable goes out of scope; if it
+             * threw partway through, idx (zero-initialized via palloc0())
+             * may still hold however many bitmaps were decoded before the
+             * throw. Either way, free them now -- load_cxt itself is
+             * NOT deleted here (the next attempt reuses it, and the
+             * eventual winner's own reserved[0] hand-off frees it as a
+             * unit -- see this function's OWNED CONTEXT comment), but
+             * that reuse/eventual deletion was never going to reach these
+             * bitmaps regardless, so leaving this out would leak one
+             * attempt's full bitmap set per retry -- and this exact
+             * "concurrent drain" condition is what drives retries under
+             * the concurrent-writer workload this leak was found in.
+             */
+            biscuit_index_free_bitmaps(idx);
+
             elog(DEBUG1,
                  "biscuit: cold load for index %u overlapped a concurrent drain (total_drains "
                  UINT64_FORMAT " -> " UINT64_FORMAT ", draining %u -> %u), retrying (attempt %d/%d)",
@@ -2084,8 +2139,17 @@ retry_after_self_heal:
             elog(WARNING, "biscuit: discarding unreadable directory-backed state for index %u (%s)",
                  indexoid, edata->message);
             FreeErrorData(edata);
-            /* Abandoning this load entirely -- take whatever accumulated
-             * across this and any earlier discarded attempts with it. */
+            /*
+             * Abandoning this load entirely. Earlier discarded attempts
+             * already had their bitmaps freed at their own discard point
+             * above; this attempt's idx (possibly partially built --
+             * palloc0()'d, so safe either way) has not been, since it's
+             * only just now being given up on. Free it before
+             * MemoryContextDelete(load_cxt): that call only reaches the
+             * palloc'd scaffolding, never idx's CRoaring-allocated
+             * bitmaps -- see biscuit_index_free_bitmaps()'s comment.
+             */
+            biscuit_index_free_bitmaps(idx);
             MemoryContextSwitchTo(oldcontext);
             MemoryContextDelete(load_cxt);
             return NULL;

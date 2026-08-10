@@ -11,6 +11,9 @@
 
 #include "biscuit_common.h"
 #include "biscuit_cache.h"
+#include "biscuit_bitmap.h"    /* biscuit_roaring_free() -- see
+                                 * biscuit_index_free_bitmaps() below for why
+                                 * this file, specifically, needs it */
 #include "biscuit_pendlog.h"   /* biscuit_pendlog_invalidate() -- the snapshot
                                  * cache must be dropped alongside the index
                                  * cache on relcache invalidation */
@@ -25,6 +28,13 @@ typedef struct BiscuitIndexCacheEntry {
 
 static BiscuitIndexCacheEntry *biscuit_cache_head       = NULL;
 static bool                    biscuit_callback_registered = false;
+
+/*
+ * Forward declaration: defined further down (see its own comment), but
+ * biscuit_cache_insert()'s defensive replace-in-place branch below needs
+ * it too -- see that branch's comment. Not static -- also called from
+ * biscuit_persist.c's discarded-load-attempt paths; see biscuit_cache.h.
+ */
 
 /* ==================== LOOKUP ==================== */
 
@@ -77,7 +87,21 @@ biscuit_cache_insert(Oid indexoid, BiscuitIndex *idx)
              * one's context the way the pre-context-ownership code did.
              */
             if (entry->index && entry->index != idx && entry->index->reserved[0] != 0)
+            {
+                /*
+                 * Same requirement as biscuit_cache_entry_release(): the
+                 * superseded index's bitmaps are CRoaring-allocated, not
+                 * palloc'd, so MemoryContextDelete() alone would orphan
+                 * them. Free them first -- see
+                 * biscuit_index_free_bitmaps()'s comment for the full
+                 * explanation. This branch is not currently reached by any
+                 * call site (see the comment above), but leaving it to
+                 * silently leak if it ever is would be the same mistake
+                 * this whole fix exists to close.
+                 */
+                biscuit_index_free_bitmaps(entry->index);
                 MemoryContextDelete((MemoryContext) (uintptr_t) entry->index->reserved[0]);
+            }
             entry->index = idx;
             return;
         }
@@ -100,6 +124,162 @@ biscuit_cache_insert(Oid indexoid, BiscuitIndex *idx)
 /* ==================== REMOVE ==================== */
 
 /*
+ * Free every per-position bitmap in one CharIndex[CHAR_RANGE] array (a
+ * POS or a NEG side). Shared by the legacy single-column fields and every
+ * per-column ColumnIndex, case-sensitive and case-insensitive alike.
+ */
+static void
+biscuit_charindex_array_free_bitmaps(CharIndex *idx_arr)
+{
+    int ch;
+
+    for (ch = 0; ch < CHAR_RANGE; ch++)
+    {
+        CharIndex *ci = &idx_arr[ch];
+        int        i;
+
+        for (i = 0; i < ci->count; i++)
+            SAFE_BITMAP_FREE(ci->entries[i].bitmap);
+    }
+}
+
+/* Free every bitmap in one char_cache[CHAR_RANGE] array (a CACHE side). */
+static void
+biscuit_char_cache_free_bitmaps(RoaringBitmap **char_cache)
+{
+    int ch;
+
+    for (ch = 0; ch < CHAR_RANGE; ch++)
+        SAFE_BITMAP_FREE(char_cache[ch]);
+}
+
+/* Free a length_bitmaps[]/length_ge_bitmaps[] pair, each sized max_length
+ * (or max_length_lower) entries -- see biscuit_persist_load_column()'s
+ * palloc0() calls, which is what the load path sizes them to, and
+ * biscuit_index.c's build-time growth, which keeps them at the same
+ * width. NULL arrays (max_length == 0, or a column that was never fully
+ * built) are handled the same way SAFE_BITMAP_FREE handles a NULL bitmap:
+ * a no-op loop bound. */
+static void
+biscuit_length_arrays_free_bitmaps(RoaringBitmap **length_bitmaps,
+                                    RoaringBitmap **length_ge_bitmaps,
+                                    int max_length)
+{
+    int i;
+
+    if (length_bitmaps != NULL)
+        for (i = 0; i < max_length; i++)
+            SAFE_BITMAP_FREE(length_bitmaps[i]);
+
+    if (length_ge_bitmaps != NULL)
+        for (i = 0; i < max_length; i++)
+            SAFE_BITMAP_FREE(length_ge_bitmaps[i]);
+}
+
+/*
+ * Free every RoaringBitmap a single ColumnIndex owns (both case variants).
+ * Used for every entry of idx->column_indices[] on a multi-column index.
+ */
+static void
+biscuit_column_index_free_bitmaps(ColumnIndex *col)
+{
+    biscuit_charindex_array_free_bitmaps(col->pos_idx);
+    biscuit_charindex_array_free_bitmaps(col->neg_idx);
+    biscuit_char_cache_free_bitmaps(col->char_cache);
+
+    biscuit_charindex_array_free_bitmaps(col->pos_idx_lower);
+    biscuit_charindex_array_free_bitmaps(col->neg_idx_lower);
+    biscuit_char_cache_free_bitmaps(col->char_cache_lower);
+
+    biscuit_length_arrays_free_bitmaps(col->length_bitmaps, col->length_ge_bitmaps,
+                                        col->max_length);
+    biscuit_length_arrays_free_bitmaps(col->length_bitmaps_lower, col->length_ge_bitmaps_lower,
+                                        col->max_length_lower);
+}
+
+/*
+ * biscuit_index_free_bitmaps
+ *
+ * Explicitly free every RoaringBitmap a BiscuitIndex owns, walking the
+ * same fields biscuit_persist_load()/biscuit_build() populate.
+ *
+ * WHY THIS HAS TO EXIST SEPARATELY FROM MemoryContextDelete(idx_cxt):
+ *
+ * Under HAVE_ROARING, biscuit_roaring_create()/_create_sized()/
+ * _deserialize() delegate straight to CRoaring (roaring_bitmap_create()
+ * etc), which manages its own memory via plain malloc/free -- it has no
+ * idea PostgreSQL memory contexts exist. Every RoaringBitmap* stored
+ * anywhere in a BiscuitIndex (per-character POS/NEG/CACHE bitmaps, the
+ * LEN/LEN_GE ladder, per column, both case variants, plus tombstones) is
+ * therefore NOT reclaimed by MemoryContextDelete(): that call frees only
+ * the palloc'd scaffolding around them (the CharIndex.entries arrays, the
+ * length_bitmaps[] pointer arrays, idx itself) and leaves every bitmap
+ * object it pointed at dangling in CRoaring's own heap, unreachable and
+ * therefore unfreeable for the rest of the backend's life.
+ *
+ * biscuit_pendlog.c's pendlog_snapshot_free() already documents and
+ * handles this exact hazard for its own RoaringBitmap-holding structure
+ * (see its comment: "a RoaringBitmap is allocated by CRoaring's own
+ * allocator, not by palloc, so deleting the context reclaims the hash
+ * entries while leaking every bitmap they point at"). This function is
+ * the equivalent fix for BiscuitIndex, which never got it: every eviction
+ * -- and biscuit_get_current_index() evicts and reloads on essentially
+ * every statement under concurrent writers -- was leaking the complete
+ * bitmap set of the previous copy, permanently, on top of whatever the
+ * v58/strcache-ownership fixes already closed. That is the dominant
+ * contributor to the unbounded, no-plateau, no-reclaim per-backend RSS
+ * growth in BISCUIT-3.0.0-GA-Report.md's §10 series (v58 through v62):
+ * bitmaps -- thousands of small per-(character, position) structures per
+ * column -- are the bulk of a LIKE/ILIKE index's in-memory footprint, far
+ * more of it than the row text or the on-disk size alone would suggest,
+ * which is exactly why the leak rate measured so far in excess of the
+ * index's on-disk size. SAFE_BITMAP_FREE() (biscuit_common.h) already
+ * existed for this purpose and was unused anywhere in the tree before
+ * this function.
+ *
+ * Must be called BEFORE MemoryContextDelete() on idx's own context --
+ * once that call runs, every pointer this function would walk is gone.
+ * idx may be NULL (mirrors biscuit_cleanup_index()'s contract).
+ *
+ * Exported (declared in biscuit_cache.h): biscuit_persist.c's
+ * biscuit_persist_load() needs this too, for its discarded-load-attempt
+ * paths -- a torn/distrusted or genuinely-corrupt attempt can still have
+ * fully decoded real bitmaps into load_cxt before being thrown away, and
+ * those need the identical explicit-free treatment before load_cxt
+ * itself is deleted or reused by the next attempt. See that function's
+ * call sites for the details.
+ */
+void
+biscuit_index_free_bitmaps(BiscuitIndex *idx)
+{
+    int i;
+
+    if (idx == NULL)
+        return;
+
+    /* Legacy single-column fields. */
+    biscuit_charindex_array_free_bitmaps(idx->pos_idx_legacy);
+    biscuit_charindex_array_free_bitmaps(idx->neg_idx_legacy);
+    biscuit_char_cache_free_bitmaps(idx->char_cache_legacy);
+
+    biscuit_charindex_array_free_bitmaps(idx->pos_idx_lower);
+    biscuit_charindex_array_free_bitmaps(idx->neg_idx_lower);
+    biscuit_char_cache_free_bitmaps(idx->char_cache_lower);
+
+    biscuit_length_arrays_free_bitmaps(idx->length_bitmaps_legacy, idx->length_ge_bitmaps_legacy,
+                                        idx->max_length_legacy);
+    biscuit_length_arrays_free_bitmaps(idx->length_bitmaps_lower, idx->length_ge_bitmaps_lower,
+                                        idx->max_length_lower);
+
+    /* Multi-column fields, when this index has more than one column. */
+    if (idx->column_indices != NULL)
+        for (i = 0; i < idx->num_columns; i++)
+            biscuit_column_index_free_bitmaps(&idx->column_indices[i]);
+
+    SAFE_BITMAP_FREE(idx->tombstones);
+}
+
+/*
  * Unlink a cache entry AND free the BiscuitIndex it points at.
  *
  * Every BiscuitIndex now lives in its own child context of
@@ -112,8 +292,15 @@ biscuit_cache_insert(Oid indexoid, BiscuitIndex *idx)
  * and biscuit_get_current_index() evicts+reloads on essentially every
  * statement under concurrent writers (BISCUIT-3.0.0-GA-Report.md §10.4,
  * the 737 MB per-backend growth / cluster OOM finding). Deleting the
- * context here frees the whole BiscuitIndex -- TIDs, every bitmap, every
- * cached string -- in one call.
+ * context here frees the whole BiscuitIndex -- TIDs, every cached string,
+ * every bitmap's palloc'd scaffolding -- in one call.
+ *
+ * That deletion does NOT reach the bitmaps' own CRoaring-allocated
+ * memory (see biscuit_index_free_bitmaps()'s comment for why), so this
+ * walks and explicitly frees every one of them first. Getting the order
+ * backwards -- deleting the context, then trying to walk idx's fields --
+ * would be a use-after-free, since idx itself lives inside the context
+ * being deleted.
  *
  * The BiscuitIndexCacheEntry list node itself is a separate, tiny
  * allocation directly in CacheMemoryContext (see biscuit_cache_insert()),
@@ -126,6 +313,8 @@ biscuit_cache_entry_release(BiscuitIndexCacheEntry *entry)
     if (entry->index && entry->index->reserved[0] != 0)
     {
         MemoryContext idx_cxt = (MemoryContext) (uintptr_t) entry->index->reserved[0];
+
+        biscuit_index_free_bitmaps(entry->index);
         MemoryContextDelete(idx_cxt);
     }
     pfree(entry);
