@@ -169,6 +169,17 @@ biscuit_beginscan(Relation index, int nkeys, int norderbys)
     so->needs_sorted_access = true;
     so->limit_remaining    = -1;
 
+    /*
+     * See BiscuitScanOpaque.scratch_cxt's field comment. Parented under
+     * CurrentMemoryContext purely as a starting point -- what matters is
+     * that WE explicitly MemoryContextReset()/Delete() it ourselves
+     * (biscuit_rescan()/biscuit_endscan() below), rather than depending
+     * on when or whether the parent happens to reset.
+     */
+    so->scratch_cxt = AllocSetContextCreate(CurrentMemoryContext,
+                                             "biscuit scan reconcile scratch",
+                                             ALLOCSET_SMALL_SIZES);
+
     scan->opaque = so;
     return scan;
 }
@@ -594,6 +605,26 @@ biscuit_rescan(IndexScanDesc scan,
     so->num_results = 0;
     so->current     = 0;
 
+    /*
+     * See BiscuitScanOpaque.scratch_cxt's field comment: reset (not
+     * deleted -- the context itself is reused for the rest of this
+     * scan's life) on every rescan, so a scan object that survives many
+     * rescans (the inner side of a parameterized nested loop, or a
+     * prepared statement's scan reused across many executions) cannot
+     * accumulate reconciliation scratch bitmaps beyond the current
+     * rescan's worth.
+     */
+    MemoryContextReset(so->scratch_cxt);
+
+    /*
+     * Point biscuit_reconcile_pending() (biscuit_pattern.c) at this
+     * scan's own scratch context for the rest of this call -- see
+     * biscuit_reconcile_scratch_cxt's declaration in biscuit_pattern.h.
+     * Must be set before either candidate-building helper below runs,
+     * since that's the only place reconciliation is reached from.
+     */
+    biscuit_reconcile_scratch_cxt = so->scratch_cxt;
+
     (void) orderbys;
     (void) norderbys;
 
@@ -925,6 +956,14 @@ biscuit_endscan(IndexScanDesc scan)
     {
         if (so->results)
             pfree(so->results);
+        /*
+         * See BiscuitScanOpaque.scratch_cxt's field comment. Delete
+         * before pfree(so) -- so itself lives in the executor's own
+         * context and is unaffected by this, but the scratch context is
+         * ours and must be torn down explicitly; nothing else ever will.
+         */
+        if (so->scratch_cxt)
+            MemoryContextDelete(so->scratch_cxt);
         pfree(so);
     }
     

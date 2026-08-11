@@ -20,6 +20,12 @@
  */
 extern bool biscuit_diag_scan_trace;
 
+/*
+ * biscuit_reconcile_scratch_cxt -- storage for the extern declared in
+ * biscuit_pattern.h; see that declaration for the full contract.
+ */
+MemoryContext biscuit_reconcile_scratch_cxt = NULL;
+
 /* ================================================================
  * SECTION 0 – Read-time shared-log reconciliation
  * ================================================================
@@ -34,16 +40,104 @@ extern bool biscuit_diag_scan_trace;
  * need no reconciliation logic of their own -- they only had to start
  * passing the scan's Relation down to the fetch helpers.
  *
- * Ownership contract callers can rely on: the returned pointer is either
- * (a) the same live, borrowed pointer the caller would have gotten
- * before this phase (structure has no undrained pending records --
- * cheap common case, one directory lookup, zero copies), or (b) a fresh,
- * context-scoped RoaringBitmap the caller does not need to explicitly
- * free (matches this file's existing convention for biscuit_get_length_ge()
- * et al., which have always returned a fresh copy reclaimed by ordinary
- * memory-context cleanup rather than an explicit pfree at every call
- * site). Either way, callers never need to know which case occurred.
+ * OWNERSHIP CONTRACT: the returned pointer is either (a) the same live,
+ * borrowed `cached` pointer unchanged (no undrained pending records --
+ * the common, zero-copy case), or (b) a fresh RoaringBitmap whose
+ * cleanup has already been registered against CurrentMemoryContext (see
+ * biscuit_reconcile_register_cleanup() just below) -- it will be freed
+ * automatically the moment that context is reset or deleted. Either way,
+ * THE CALLER MUST NOT CALL biscuit_roaring_free() ON THIS RETURN VALUE.
+ * Every caller in this file either uses the result immediately (AND/OR
+ * it into an accumulator the caller *does* own) or makes its own
+ * biscuit_roaring_copy() before doing anything else with it -- callers
+ * were already written this way (the right instinct, even before there
+ * was a mechanism backing it), so this contract asks nothing new of
+ * them.
+ *
+ * WHY A MEMORY-CONTEXT CALLBACK RATHER THAN, SAY, THE SNAPSHOT ITSELF:
+ * an earlier version of this fix registered the fresh copy with the
+ * pendlog snapshot it was reconciled against, freeing it alongside
+ * kill/live/seen/expanded when that snapshot was next rebuilt or
+ * evicted. That is bounded in principle but not in practice: a
+ * snapshot's common-case read path is to incrementally *extend* in
+ * place (biscuit_pendlog_snapshot(), biscuit_pendlog.c) rather than
+ * rebuild, and a workload whose query mix rarely forces a full rebuild
+ * (no drain, no relid contention for one of the 8 cache slots) could
+ * leave that snapshot -- and every fresh copy ever attached to it --
+ * alive for the rest of the session. That is a real, observed leak
+ * (BISCUIT-3.0.0-GA-Report.md's v63->v65 series: the slope dropped but
+ * never plateaued), just a shallower one than the original.
+ *
+ * A context reset callback fixes this by tying the fresh copy's
+ * lifetime to something that resets on a bounded, predictable cadence
+ * regardless of snapshot behavior -- CurrentMemoryContext here is
+ * whatever short-lived context the executor has set up for the AM
+ * callback currently running (scan-lifetime at the outside, often
+ * per-tuple), which is reset/deleted on its own schedule independent of
+ * pendlog snapshot churn.
+ *
+ * biscuit_get_length_ge() and its three siblings are the one place that
+ * breaks the "caller never frees" half of this pattern on purpose:
+ * their own long-standing contract with THEIR callers is "always return
+ * an owned, freely mutable/freeable copy". They honor that by always
+ * making one more biscuit_roaring_copy() before returning -- a plain,
+ * unregistered copy nobody but their own immediate caller ever sees --
+ * regardless of which case (a)/(b) they got back from this function.
+ * See their own comments.
+ *
+ * (This function used to say a fresh copy was "context-scoped, reclaimed
+ * by ordinary memory-context cleanup" -- true of the *scaffolding*
+ * pointing at it, never of the RoaringBitmap itself: under HAVE_ROARING a
+ * RoaringBitmap is CRoaring-allocated, not palloc'd, so no ordinary
+ * MemoryContextDelete/Reset ever reclaims it on its own -- it takes an
+ * explicit callback, which is exactly what
+ * biscuit_reconcile_register_cleanup() sets up.)
  */
+
+/*
+ * biscuit_reconcile_register_cleanup
+ *
+ * Free `bm` (via biscuit_roaring_free()) the moment CurrentMemoryContext
+ * is reset or deleted, using PostgreSQL's standard
+ * MemoryContextRegisterResetCallback() mechanism. The MemoryContextCallback
+ * node itself is palloc'd IN that same context, so it shares its fate
+ * exactly -- no separate cleanup of the node itself is needed.
+ */
+static void
+biscuit_reconcile_scratch_free_cb(void *arg)
+{
+    biscuit_roaring_free((RoaringBitmap *) arg);
+}
+
+static void
+biscuit_reconcile_register_cleanup(RoaringBitmap *bm)
+{
+    MemoryContext           target;
+    MemoryContextCallback  *cb;
+
+    if (bm == NULL)
+        return;
+
+    /*
+     * Prefer the current scan's own scratch context (explicit,
+     * scan-owned lifetime -- reset every rescan, deleted at endscan; see
+     * biscuit_reconcile_scratch_cxt's declaration in biscuit_pattern.h)
+     * over the ambient CurrentMemoryContext, whose lifetime this file
+     * has no way to verify and which an earlier version of this fix
+     * learned not to trust (BISCUIT-3.0.0-GA-Report.md's v65->v66 §10
+     * finding: flat under read-only load, still climbing under
+     * write-concurrent load -- consistent with CurrentMemoryContext
+     * living far longer than one statement on at least one access
+     * pattern this codebase exercises).
+     */
+    target = biscuit_reconcile_scratch_cxt ? biscuit_reconcile_scratch_cxt : CurrentMemoryContext;
+
+    cb = (MemoryContextCallback *) MemoryContextAlloc(target, sizeof(MemoryContextCallback));
+    cb->func = biscuit_reconcile_scratch_free_cb;
+    cb->arg  = bm;
+    MemoryContextRegisterResetCallback(target, cb);
+}
+
 static RoaringBitmap *
 biscuit_reconcile_pending(Relation index, RoaringBitmap *cached,
                            int32 col, bool is_lower, uint8 kind,
@@ -159,6 +253,7 @@ biscuit_reconcile_pending(Relation index, RoaringBitmap *cached,
      */
     merged = cached ? biscuit_roaring_copy(cached) : biscuit_roaring_create();
     biscuit_pendlog_apply(snap, pend, merged);
+    biscuit_reconcile_register_cleanup(merged);
 
     if (unlikely(biscuit_diag_scan_trace))
         ereport(WARNING,
@@ -590,21 +685,23 @@ biscuit_get_length_ge(Relation index, BiscuitIndex *idx, int min_len)
         cached = idx->length_ge_bitmaps_legacy[min_len];
 
     /*
-     * biscuit_reconcile_pending() returns either `cached` unchanged (a
-     * live, borrowed pointer -- must NOT be freed here) or a fresh,
-     * context-scoped bitmap. The pre-existing contract for this function
-     * is "always hand the caller an owned copy it may mutate/free" --
-     * preserve that by copying only in the unchanged-cached case; the
-     * pending-merge case already returned a fresh object that's safe to
-     * hand back directly.
+     * biscuit_reconcile_pending() now always registers a fresh copy for
+     * automatic cleanup when CurrentMemoryContext resets/deletes (see
+     * biscuit_reconcile_register_cleanup()) -- that copy must NOT also be
+     * freed by us or by our caller. This function's own contract with
+     * ITS caller has always been "always hand back an owned copy you may
+     * mutate/free" (see biscuit_query_pattern_masked() etc., which do
+     * exactly that on every call site). Honor that by always making one
+     * more independent copy here, regardless of which case we got back --
+     * unlike case (a) alone, this no longer special-cases "reconciled ==
+     * cached" to skip the copy, because in case (b) `reconciled` is no
+     * longer ours to hand off uncopied.
      */
     {
         RoaringBitmap *reconciled = biscuit_reconcile_pending(index, cached, -1, false,
                                                                 BISCUIT_DIR_KIND_LEN_GE,
                                                                 -1, position);
-        if (reconciled == cached)
-            return cached ? biscuit_roaring_copy(cached) : biscuit_roaring_create();
-        return reconciled;
+        return reconciled ? biscuit_roaring_copy(reconciled) : biscuit_roaring_create();
     }
 }
 
@@ -620,13 +717,14 @@ biscuit_get_length_ge_lower(Relation index, BiscuitIndex *idx, int min_len)
              idx->length_ge_bitmaps_lower[min_len])
         cached = idx->length_ge_bitmaps_lower[min_len];
 
+    /* See biscuit_get_length_ge()'s comment: always return an
+     * independent copy now that a fresh `reconciled` may be
+     * snapshot-owned rather than ours to hand off. */
     {
         RoaringBitmap *reconciled = biscuit_reconcile_pending(index, cached, -1, true,
                                                                 BISCUIT_DIR_KIND_LEN_GE,
                                                                 -1, position);
-        if (reconciled == cached)
-            return cached ? biscuit_roaring_copy(cached) : biscuit_roaring_create();
-        return reconciled;
+        return reconciled ? biscuit_roaring_copy(reconciled) : biscuit_roaring_create();
     }
 }
 
@@ -642,13 +740,12 @@ biscuit_get_col_length_ge(Relation index, ColumnIndex *col, int col_idx, int min
              col->length_ge_bitmaps[min_len])
         cached = col->length_ge_bitmaps[min_len];
 
+    /* See biscuit_get_length_ge()'s comment. */
     {
         RoaringBitmap *reconciled = biscuit_reconcile_pending(index, cached, col_idx, false,
                                                                 BISCUIT_DIR_KIND_LEN_GE,
                                                                 -1, position);
-        if (reconciled == cached)
-            return cached ? biscuit_roaring_copy(cached) : biscuit_roaring_create();
-        return reconciled;
+        return reconciled ? biscuit_roaring_copy(reconciled) : biscuit_roaring_create();
     }
 }
 
@@ -664,13 +761,12 @@ biscuit_get_col_length_ge_lower(Relation index, ColumnIndex *col, int col_idx, i
              col->length_ge_bitmaps_lower[min_len])
         cached = col->length_ge_bitmaps_lower[min_len];
 
+    /* See biscuit_get_length_ge()'s comment. */
     {
         RoaringBitmap *reconciled = biscuit_reconcile_pending(index, cached, col_idx, true,
                                                                 BISCUIT_DIR_KIND_LEN_GE,
                                                                 -1, position);
-        if (reconciled == cached)
-            return cached ? biscuit_roaring_copy(cached) : biscuit_roaring_create();
-        return reconciled;
+        return reconciled ? biscuit_roaring_copy(reconciled) : biscuit_roaring_create();
     }
 }
 
@@ -752,9 +848,32 @@ biscuit_get_negation_base_set_legacy(Relation index, BiscuitIndex *idx,
             if (idx->data_cache[j])
                 biscuit_roaring_add(all, j);
 
-        return biscuit_reconcile_pending(index, all, BISCUIT_DIR_COL_LEGACY,
-                                          is_lower, BISCUIT_DIR_KIND_LEN_GE,
-                                          -1, 0);
+        {
+            RoaringBitmap *reconciled = biscuit_reconcile_pending(index, all, BISCUIT_DIR_COL_LEGACY,
+                                                                    is_lower, BISCUIT_DIR_KIND_LEN_GE,
+                                                                    -1, 0);
+
+            if (reconciled == all)
+                return all;   /* nothing pending: `all` is already ours, uniquely */
+
+            /*
+             * A fresh copy was made from `all` and is now registered for
+             * automatic cleanup when CurrentMemoryContext resets/deletes
+             * (biscuit_reconcile_register_cleanup(), inside
+             * biscuit_reconcile_pending()) -- `all` itself was fully
+             * absorbed into that copy and is now dead weight; free it
+             * rather than leaving it an orphan (it is a real,
+             * CRoaring-allocated bitmap like any other, not
+             * context-scoped scratch, whatever an earlier version of
+             * this comment claimed). And since our own caller's contract
+             * is "you own what this returns, free it whenever", hand
+             * back an independent copy of our own rather than the
+             * registered-for-callback `reconciled` -- returning that
+             * directly would double-free it once its own context resets.
+             */
+            biscuit_roaring_free(all);
+            return biscuit_roaring_copy(reconciled);
+        }
     }
 }
 
@@ -836,15 +955,28 @@ biscuit_get_negation_base_set(Relation index, ColumnIndex *col, int col_idx,
         reconciled = biscuit_reconcile_pending(index, all, col_idx, is_lower,
                                                 BISCUIT_DIR_KIND_LEN_GE, -1, 0);
 
+        if (reconciled == all)
+            return all;   /* nothing pending: `all` is already ours, uniquely */
+
         /*
-         * biscuit_reconcile_pending() returns `all` itself when there is
-         * nothing to reconcile, and a fresh bitmap otherwise. Callers of
-         * this function own the result, so hand back whichever it is and
-         * let the caller free it; the intermediate is not leaked either
-         * way, since a fresh result means `all` is context-scoped scratch
-         * reclaimed with the rest.
+         * A fresh copy was made from `all` and is now registered for
+         * automatic cleanup when CurrentMemoryContext resets/deletes
+         * (biscuit_reconcile_register_cleanup(), inside
+         * biscuit_reconcile_pending()) -- `all` itself was fully
+         * absorbed into that copy and is now dead weight, not
+         * "context-scoped scratch reclaimed with the rest" as an earlier
+         * version of this comment claimed (it is a real,
+         * CRoaring-allocated bitmap like any other -- see
+         * biscuit_index_free_bitmaps()'s comment in biscuit_cache.c for
+         * why nothing but an explicit free ever reaches one of these).
+         * Free it, and hand our own caller an independent copy rather
+         * than the registered-for-callback `reconciled`: this function's
+         * documented contract is "returns an owned bitmap the caller
+         * must free", and returning that directly would double-free it
+         * once its own context resets.
          */
-        return reconciled;
+        biscuit_roaring_free(all);
+        return biscuit_roaring_copy(reconciled);
     }
 }
 

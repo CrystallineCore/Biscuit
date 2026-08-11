@@ -164,4 +164,31 @@ extern QueryPlan *biscuit_build_query_plan(BiscuitIndex *idx,
                                            ScanKey keys, int nkeys);
 extern void       biscuit_free_query_plan(QueryPlan *plan);
 
+/*
+ * biscuit_reconcile_scratch_cxt
+ *
+ * The current scan's scratch MemoryContext (BiscuitScanOpaque.scratch_cxt,
+ * biscuit_common.h), for biscuit_reconcile_pending() (biscuit_pattern.c)
+ * to anchor a freshly-copied reconciled bitmap's cleanup to, instead of
+ * an assumption about how long the ambient CurrentMemoryContext happens
+ * to live.
+ *
+ * Set near the top of every biscuit_rescan() call (biscuit_scan.c) to
+ * that scan's own so->scratch_cxt before either candidate-building
+ * helper runs -- which is the only place any call chain reaching
+ * biscuit_reconcile_pending() originates from (the write path never
+ * triggers reconciliation at all; see biscuit_reconcile_pending()'s own
+ * comment). Never NULLed back out afterward: nothing ever reads this
+ * outside a biscuit_rescan() call's own dynamic extent, and the next
+ * biscuit_rescan() call (for this scan or another) overwrites it before
+ * any reconciliation happens under the new value, so there is no stale-
+ * read window to guard against, and no PG_TRY/PG_FINALLY save/restore
+ * dance is needed for what is, in practice, never-reentrant use.
+ *
+ * NULL is a valid value (no scan currently reconciling, or an
+ * unexpected call path) -- biscuit_reconcile_register_cleanup() falls
+ * back to CurrentMemoryContext in that case.
+ */
+extern MemoryContext biscuit_reconcile_scratch_cxt;
+
 #endif /* BISCUIT_PATTERN_H */

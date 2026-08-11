@@ -211,7 +211,7 @@ typedef struct {
 #define CHAR_RANGE                      256
 #define TOMBSTONE_CLEANUP_THRESHOLD     1000
 #define RADIX_SORT_THRESHOLD            5000
-#define BISCUIT_LIBRARY_VERSION         "3.0.0 - Costly Cookies - v63"
+#define BISCUIT_LIBRARY_VERSION         "3.0.0 - Costly Cookies - v67"
 
 /* ==================== MEMORY MANAGEMENT MACROS ==================== */
 
@@ -1470,6 +1470,27 @@ typedef struct {
     bool is_aggregate_only;
     bool needs_sorted_access;
     int limit_remaining;
+
+    /*
+     * SCRATCH CONTEXT for pending-list reconciliation's fresh bitmap
+     * copies (biscuit_reconcile_pending()/
+     * biscuit_reconcile_register_cleanup(), biscuit_pattern.c).
+     *
+     * Created once in biscuit_beginscan(), MemoryContextReset() at the
+     * start of every biscuit_rescan() (bounding growth across repeated
+     * rescans of the SAME scan object -- e.g. a prepared statement's
+     * index scan reused across many pgbench transactions, which is
+     * exactly the access pattern that outlived an earlier version of
+     * this fix that relied on the ambient CurrentMemoryContext instead
+     * of an explicitly owned one), and MemoryContextDelete()'d in
+     * biscuit_endscan(). Explicit, scan-owned teardown, independent of
+     * whatever the executor's own ambient context happens to be or how
+     * long it happens to live -- see biscuit_scan.c's
+     * biscuit_reconcile_scratch_cxt for how this gets threaded down to
+     * biscuit_pattern.c without changing every call signature in
+     * between.
+     */
+    MemoryContext scratch_cxt;
 } BiscuitScanOpaque;
 
 /* Parsed LIKE pattern */
