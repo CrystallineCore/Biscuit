@@ -743,6 +743,33 @@ biscuit_index_memory_size(PG_FUNCTION_ARGS)
             }
         }
 
+        /*
+         * column_data_cache_lower -- the ILIKE lowercase string cache's
+         * multi-column counterpart to data_cache_lower above. This was
+         * missing from the multi-column branch entirely (the single-column
+         * branch above has always accounted for BOTH data_cache and
+         * data_cache_lower): a multi-column index with any ILIKE-opclass
+         * column undercounts its own reported memory footprint by exactly
+         * that column's lowercase string bytes, silently, for every such
+         * index. Purely a diagnostic/observability gap -- nothing here
+         * feeds sizing or allocation decisions -- but biscuit_index_stats()
+         * and this function exist precisely so an operator doesn't have to
+         * guess at that number.
+         */
+        if (idx->column_data_cache_lower)
+        {
+            for (col = 0; col < idx->num_columns; col++)
+            {
+                if (idx->column_data_cache_lower[col])
+                {
+                    metadata_bytes += idx->capacity * sizeof(char *);
+                    for (i = 0; i < idx->num_records && i < idx->capacity; i++)
+                        if (idx->column_data_cache_lower[col][i])
+                            string_bytes += strlen(idx->column_data_cache_lower[col][i]) + 1;
+                }
+            }
+        }
+
         if (idx->column_indices)
         {
             metadata_bytes += idx->num_columns * sizeof(ColumnIndex);
