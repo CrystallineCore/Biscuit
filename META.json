@@ -32,7 +32,7 @@
     "iam",
     "index-access-method"
   ],
-  "release_status": "testing",
+  "release_status": "stable",
   "resources": {
     "homepage": "https://github.com/crystallinecore/biscuit",
     "repository": {

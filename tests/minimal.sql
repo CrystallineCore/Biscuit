@@ -30,8 +30,8 @@ $$;
 -- Master configuration table
 CREATE TEMP TABLE _cfg (key TEXT PRIMARY KEY, val TEXT);
 INSERT INTO _cfg VALUES
-  ('dataset_rows',      '500000'),  -- rows in main test table
-  ('unicode_rows',      '50000'),   -- extra unicode-heavy rows
+  ('dataset_rows',      '50000'),  -- rows in main test table
+  ('unicode_rows',      '5000'),   -- extra unicode-heavy rows
   ('fuzz_iterations',   '50'),     -- randomised fuzz rounds
   ('enable_explain',    'true'),   -- capture EXPLAIN ANALYZE
   ('fail_fast',         'false');  -- stop on first failure

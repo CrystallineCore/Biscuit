@@ -21,30 +21,46 @@ such as `pg_trgm`.
 
 ---
 
+## Stability Notice
+
+This extension is currently under active development and has not yet received the level of testing and operational experience expected of production-ready software.
+
+Users are encouraged to evaluate the extension thoroughly in development and staging environments before considering deployment in production systems. In particular, testing should include representative datasets, workloads, upgrade procedures, backup and recovery workflows, and performance validation.
+
+Although the extension is intended to operate safely and reliably, defects or unexpected behavior may still be present. As with any new database component, appropriate backups and validation procedures should be maintained before use.
+
+At this stage, the extension is best suited for evaluation, experimentation, and non-critical workloads. Production deployment should be undertaken only after careful testing and assessment of its suitability for the intended environment.
+
+---
+
 ## Suitability
 
 Biscuit is designed for **read-mostly, analytical workloads**: load data, build
-the index, then query. Within that pattern it performs well, and as of 3.0.0 it
-is crash-safe and replicates correctly.
+the index, then query. Within that pattern it performs well. Index state is
+WAL-logged, so it takes part in PostgreSQL's ordinary crash recovery,
+point-in-time recovery and physical replication rather than relying on a
+separate persistence mechanism.
 
 Before deploying, please review [Operational
 Considerations](#operational-considerations). In summary:
 
 * Writes against a live index generate substantially more WAL than the
-  underlying heap writes alone. Bulk loading before index creation is strongly
-  recommended.
+  underlying heap writes alone, and WAL per row grows as the index grows. Bulk
+  loading before index creation is strongly recommended.
 * Each backend maintains its own in-memory copy of the index for the life of
   the connection, so memory use scales with the number of concurrent
   connections.
 * A committed write by any backend invalidates cached copies, which are
   reloaded on next use.
+* The first-time loading of an index per session can suffer from a high cold
+  latency, but subsequent queries under warm state should work faster.
 
 Biscuit is not currently recommended for OLTP tables, tables under continuous
 write load, or deployments with large connection pools.
 
 ---
 
-## What's new in 3.0.0 — "Costly Cookies"
+## What's new in 3.0.0
 
 This is the first release intended for production use, within the workload
 profile described above. It is a **breaking on-disk format change**: indexes
@@ -53,26 +69,28 @@ built under 2.x must be `REINDEX`ed. See
 
 * **WAL-logged, crash-safe on-disk storage.** All index state now lives in the
   index relation's own pages and is WAL-logged, replacing the external-file
-  snapshot mechanism used in 2.5.0. Verified against crash recovery and
-  physical streaming replication, including index scans served from a hot
-  standby.
+  snapshot mechanism used in 2.5.0. Exercised against crash recovery,
+  point-in-time recovery to a target timestamp, and physical streaming
+  replication, including index scans served from a hot standby. In the recovery
+  tests the index was created after the base backup, so its state was
+  reconstructed from archived WAL alone.
 * **Cross-backend cache coherency.** Cached index copies are validated against
-  the metapage generation and reloaded when stale. This corrects a pre-release
-  defect in which a backend could continue to serve results that did not
-  reflect other backends' committed inserts.
+  the metapage generation and reloaded when stale, so every backend sees
+  other backends' committed inserts.
 * **Candidate-mask threading across scan keys.** Conjunctive queries evaluate
   the most selective key first and restrict subsequent keys to the surviving
   rows, rather than evaluating each key independently. This is a substantial
   improvement for queries combining an anchored predicate with an unanchored
   one.
 * **Rewritten cost model.** Costs are derived from pattern shape, column
-  statistics and relation size, allowing the planner to choose sensibly among
-  Biscuit, `pg_trgm` and a sequential scan.
+  statistics and relation size, so the planner can weigh Biscuit against
+  `pg_trgm` and a sequential scan.
 * **Length-predicate support.** Patterns consisting only of `_` wildcards are
   recognised as length predicates and answered directly from the length
   bitmaps.
 * **`biscuit_like_ops` / `biscuit_ilike_ops` operator classes**, to avoid
   building the case-mode structures a column will never use.
+.
 
 ---
 
@@ -187,14 +205,20 @@ query mix.
 wildcards, length predicates, `ILIKE`-heavy workloads, and queries where exact
 results without a heap recheck are valuable — `COUNT(*)` in particular.
 
+For anchored patterns, `ILIKE` is evaluated over its own structure set rather
+than by rewriting the query, and in testing performed comparably to the
+equivalent `LIKE`. Case-insensitive anchored search therefore needs no
+`lower()` expression index.
+
 **Other options are often preferable for** selective prefix lookups, where a
 B-tree is smaller and quicker to build; unanchored substring search, for which
 `pg_trgm` is purpose-built; and regular-expression or similarity matching,
 which Biscuit does not support.
 
 Running Biscuit alongside a `pg_trgm` GIN index and letting the planner select
-between them is a practical arrangement, and the 3.0.0 cost model is calibrated
-with it in mind.
+between them is a practical arrangement, and the cost model is written with it
+in mind. For unanchored patterns in particular, confirm the plan you expect
+with `EXPLAIN` against your own data and query mix.
 
 ---
 
@@ -299,14 +323,19 @@ themselves follow from the design and should be planned for.
 
 A single indexed string touches many per-character structures, so an `INSERT`
 or `UPDATE` against a live Biscuit index generates considerably more WAL than
-the corresponding heap write — in testing, by roughly two orders of magnitude.
-`DELETE` is much cheaper, as it records a tombstone rather than rewriting
-structures.
+the corresponding heap write. Substantial WAL is characteristic of maintaining
+any secondary text-search structure, and in testing Biscuit's WAL volume per
+row was comparable to a `pg_trgm` GIN index on the same data. WAL per row also
+grows as the index grows, so a measurement taken on a small index will
+understate a large one. `DELETE` is much cheaper, as it records a tombstone
+rather than rewriting structures.
 
 Sustained inserts against a live index can therefore consume WAL space quickly.
 Size `pg_wal` accordingly and monitor free space. Where replication slots are in
 use, consider setting `max_slot_wal_keep_size` so a lagging or disconnected
-standby cannot retain WAL indefinitely.
+standby cannot retain WAL indefinitely. WAL volume also affects how long crash
+recovery takes to replay, which is worth allowing for when planning restart
+windows.
 
 ### Build the index after loading
 
@@ -351,6 +380,7 @@ Where practical, consider limiting or bucketing indexed length.
 | Capability | Supported | Notes |
 |---|---|---|
 | WAL logging and crash recovery | Yes | |
+| Point-in-time recovery | Yes | Index state reconstructed from archived WAL |
 | Physical streaming replication | Yes | Standby serves index scans |
 | Hot standby reads | Yes | |
 | MVCC / cross-backend visibility | Yes | |
@@ -370,22 +400,8 @@ Where practical, consider limiting or bucketing indexed length.
 | Similarity / fuzzy search | No | |
 | Locale-aware collation | No | Comparisons are byte-based |
 
-Parallel-scan callbacks are registered only on PostgreSQL 18 and later; on
-earlier supported versions scans are always serial. For large scans the planner
-may still prefer a parallel sequential scan, which the cost model is designed to
-allow.
-
-### `ORDER BY` with `LIMIT`
-
-Biscuit does not produce sorted output, so PostgreSQL sorts above the scan:
-
-```
-Limit → Sort → Biscuit Index Scan
-```
-
-For selective patterns the intermediate result is small and the sort cost is
-minor. For broad patterns, review the plan — a sequential scan may be the
-better choice, and the cost model is designed to select it where appropriate.
+Biscuit index scans run serially. Parallel Bitmap Heap Scan and parallel
+sequential scan still work as usual.
 
 ---
 
@@ -397,9 +413,15 @@ Enabling CRoaring is recommended for better bitmap performance.
 
 ### Index options
 
-Biscuit does not currently expose tunable index options. The pending-list drain
-threshold is fixed in the metapage, and cost-model constants are set at compile
-time. Exposing these as runtime settings is planned.
+Biscuit does not currently expose per-index (`WITH (...)`) options.
+
+Two database-wide settings are available:
+
+* `biscuit.delta_compaction_slots` (default `20000`) — how many pending
+  writes can build up before Biscuit compacts them. Raise it for large write
+  bursts; lower it to keep each compaction quick.
+* `biscuit.diag_scan_trace` (default `off`) — detailed scan logging for
+  troubleshooting. Leave it off otherwise.
 
 ---
 
@@ -428,6 +450,13 @@ Changes to the scan or cache paths should be accompanied by a **two-session**
 test: one session queries the index, a second session commits a change, and the
 first session must then observe it. Single-session tests do not exercise cache
 invalidation.
+
+Two further checks are worth running when touching these paths. Compare the
+index and sequential-scan results for the same predicate *within a single
+snapshot* while another session writes concurrently, so that any divergence is
+attributable to the index rather than to timing. And inspect the server log as
+well as client output — a backend can emit diagnostics that never reach the
+client session driving the test.
 
 ---
 
