@@ -22,6 +22,13 @@
                               * per-structure pending chains on the write path */
 #include "access/xact.h"    /* RegisterXactCallback, XACT_EVENT_* */
 
+/*
+ * Defined in biscuit_scan.c, registered as biscuit.diag_scan_trace in
+ * _PG_init(). Same forward declaration biscuit_pattern.c/biscuit_delta.c
+ * already use for the same reason -- see those files' comments.
+ */
+extern bool biscuit_diag_scan_trace;
+
 /* --- cost model (biscuit_costestimate, SECTION 6a) --- */
 #include "optimizer/cost.h"    /* cpu_tuple_cost, cpu_operator_cost */
 #include "optimizer/optimizer.h"
@@ -2644,12 +2651,41 @@ biscuit_load_index(Relation index)
          * for the rows it does know about, and erroring here would take out
          * every read of a merely-truncated index.
          */
+        /*
+         * WARNING -> DEBUG1 (BISCUIT-3.0.0-GA-Report.md Section 10.1 /
+         * Risk 4). This condition is the *expected* shape of a
+         * concurrent-write workload, not an anomaly: it fires whenever
+         * another backend committed rows this backend's cache has not
+         * yet caught up to, which is routine under sustained concurrent
+         * INSERT/UPDATE activity and was measured firing on essentially
+         * every statement in that regime (up to ~250/session). The
+         * report's own in-snapshot check found 0/120 mismatches against a
+         * sequential scan while this was actively firing -- the slots it
+         * reports are legitimately invisible to this backend's snapshot,
+         * not lost. A client-visible WARNING at that frequency reads as
+         * data corruption to an operator and is a GA-blocking usability
+         * defect independent of (and worse than) the underlying
+         * cache-staleness it is reporting.
+         *
+         * Left at WARNING when biscuit.diag_scan_trace is explicitly
+         * enabled, matching every other diagnostic in this codebase gated
+         * on that GUC (biscuit_scan.c, biscuit_pattern.c, biscuit_delta.c).
+         * The aggregate condition remains fully discoverable without a
+         * WARNING: it is deterministic from idx->num_records vs. the
+         * on-disk metapage, both of which biscuit_index_stats() can
+         * surface on request rather than pushing it onto every client's
+         * error stream.
+         */
         if (have_disk_meta && disk_records > idx->num_records)
-            elog(WARNING,
+        {
+            int elevel = unlikely(biscuit_diag_scan_trace) ? WARNING : DEBUG1;
+
+            elog(elevel,
                  "biscuit: index \"%s\" loaded %d records but metapage reports %d; "
                  "%d slot(s) will not be visible to this backend",
                  RelationGetRelationName(index), idx->num_records, disk_records,
                  disk_records - idx->num_records);
+        }
     }
 
     biscuit_register_callback();

@@ -66,6 +66,14 @@
 #include "biscuit_bitmap.h"
 #include "biscuit_tid.h"
 
+/*
+ * Defined in biscuit_scan.c, registered as biscuit.diag_scan_trace in
+ * _PG_init(). Same forward declaration biscuit_pattern.c/biscuit_delta.c/
+ * biscuit_index.c already use for the same reason -- see those files'
+ * comments.
+ */
+extern bool biscuit_diag_scan_trace;
+
 /* Number of slots to prefetch ahead in the TID-copy hot loop. */
 #define PREFETCH_DISTANCE 16
 
@@ -452,14 +460,30 @@ biscuit_collect_sorted_tids_single(BiscuitIndex *idx,
      * be observable, because it is currently indistinguishable from a
      * correct answer.
      *
-     * WARNING rather than DEBUG because the whole point is that this
-     * reaches whoever is looking at the wrong row count. The message
-     * carries the first offending slot and the count, which is what
-     * separates "a handful of slots above the watermark" (staleness) from
-     * "a contiguous block" (a boundary/rebuild defect).
+     * WARNING -> DEBUG1 by default (BISCUIT-3.0.0-GA-Report.md Section
+     * 10.1 / Risk 4): "expected under concurrency" (see above) and
+     * "reaches whoever is looking at the wrong row count" are in tension
+     * once this fires on essentially every statement of a concurrent
+     * write workload, which is exactly what was measured (up to ~250
+     * warnings/session, 1-127 slots each). At that frequency a
+     * client-visible WARNING stops being a signal an operator can act on
+     * and starts reading as ongoing data corruption -- worse than not
+     * reporting it at all, since it undermines confidence in an
+     * otherwise-correct index (verified 120/120 in-snapshot against a
+     * sequential scan while this was firing).
+     *
+     * The distinction this comment draws against skipped_not_durable
+     * above still holds and is exactly why this stays reachable rather
+     * than being silenced outright: it's still the one case where the
+     * answer can be short. What changes is the default channel it goes
+     * out on. biscuit.diag_scan_trace -- the GUC every other per-scan
+     * diagnostic in this codebase is gated on -- gets it at WARNING;
+     * everyone else gets DEBUG1, which any operator correlating a drain
+     * or reload against row-count anomalies can still raise log_min_
+     * messages to see.
      */
     if (dropped_out_of_range > 0)
-        ereport(WARNING,
+        ereport(unlikely(biscuit_diag_scan_trace) ? WARNING : DEBUG1,
                 (errmsg("biscuit: scan dropped %u matched slot(s) at or above num_records=%d",
                         dropped_out_of_range, idx->num_records),
                  errdetail("First dropped slot was %u; %d row(s) returned.",

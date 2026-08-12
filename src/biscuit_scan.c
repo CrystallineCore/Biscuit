@@ -550,6 +550,30 @@ biscuit_build_candidates_singlecolumn(IndexScanDesc scan,
      * This is a diagnostic, not a fix. It fires per scan; drop it once
      * the stage is identified.
      */
+    /*
+     * WARNING -> conditional (BISCUIT-3.0.0-GA-Report.md Section 10.1 /
+     * Risk 4). This block shipped as leftover diagnostic scaffolding: the
+     * comment above it already says "This is a diagnostic, not a fix ...
+     * drop it once the stage is identified" -- but the WARNING fired on
+     * `card_before != card_after` alone, which is true on every ordinary
+     * scan of a table that has ANY dead tombstoned rows. That is routine,
+     * not anomalous: DELETE is expected to shrink the candidate set, and
+     * doing so on every statement of a delete-heavy or concurrent workload
+     * is exactly the "essentially every statement" firing rate the report
+     * measured (up to ~250 warnings/session).
+     *
+     * Split the two conditions this block was conflating:
+     *   - card_before != card_after: expected whenever there are live
+     *     tombstones, carries no anomaly signal by itself. Downgraded to
+     *     the same biscuit.diag_scan_trace gate every other per-key/
+     *     per-scan trace line in this file already uses.
+     *   - tomb_card != tombstone_count: the bitmap's own cardinality
+     *     disagreeing with the scalar counter that is supposed to track
+     *     it IS a genuine internal-consistency defect (the scenario the
+     *     errhint below describes -- a bitmap marking more slots dead
+     *     than the scalar believes). That one stays a WARNING
+     *     unconditionally; it should be rare and is worth surfacing.
+     */
     {
         uint64_t card_before = biscuit_roaring_count(result);
         uint64_t card_after;
@@ -563,15 +587,18 @@ biscuit_build_candidates_singlecolumn(IndexScanDesc scan,
                         ? biscuit_roaring_count(so->index->tombstones)
                         : 0;
 
-        if (card_before != card_after || tomb_card != (uint64_t) so->index->tombstone_count)
+        if (unlikely(biscuit_diag_scan_trace) && card_before != card_after)
             ereport(WARNING,
                     (errmsg("biscuit: tombstone filter removed " UINT64_FORMAT
                             " of " UINT64_FORMAT " candidate slot(s)",
-                            card_before - card_after, card_before),
-                     errdetail("tombstone bitmap holds " UINT64_FORMAT " slot(s); "
-                               "tombstone_count scalar reads %d; num_records %d.",
-                               tomb_card, so->index->tombstone_count,
-                               so->index->num_records),
+                            card_before - card_after, card_before)));
+
+        if (tomb_card != (uint64_t) so->index->tombstone_count)
+            ereport(WARNING,
+                    (errmsg("biscuit: tombstone bitmap/scalar mismatch: bitmap holds "
+                            UINT64_FORMAT " slot(s), tombstone_count scalar reads %d",
+                            tomb_card, so->index->tombstone_count),
+                     errdetail("num_records %d.", so->index->num_records),
                      errhint("A bitmap marking more slots than are actually dead "
                              "subtracts live rows silently.")));
     }
@@ -868,14 +895,44 @@ biscuit_rescan(IndexScanDesc scan,
              * everything that left it, so it also catches a slot that
              * never reached the loop at all.
              */
-            if (pdesc == NULL &&
-                (biscuit_diag_scan_trace || card_in != (uint64_t) so->num_results))
-                ereport(WARNING,
-                        (errmsg("biscuit: TID collection returned %d row(s) for "
-                                UINT64_FORMAT " candidate slot(s)",
-                                so->num_results, card_in),
-                         errhint("Every candidate slot should yield exactly one TID "
-                                 "on a non-parallel scan.")));
+            /*
+             * WARNING -> DEBUG1 for the plain mismatch case
+             * (BISCUIT-3.0.0-GA-Report.md Section 10.1 / Risk 4).
+             *
+             * A candidate/TID mismatch is the same benign cache-lag
+             * condition biscuit_load_index() reports (see that function's
+             * comment): candidate slots this backend's cache knows about
+             * but whose TID has since been reclaimed, or that belong to a
+             * transaction not visible in this backend's snapshot. Under
+             * sustained concurrent write activity this is routine and was
+             * observed firing on essentially every statement, at WARNING,
+             * which reads as corruption to an operator despite results
+             * remaining correct (verified in-snapshot, 120/120 against a
+             * sequential scan).
+             *
+             * biscuit.diag_scan_trace still gets a WARNING unconditionally
+             * (an operator who turned that GUC on asked for exactly this
+             * kind of per-scan detail); everyone else gets DEBUG1, which
+             * preserves the diagnostic for anyone who raises log verbosity
+             * without spamming default-configuration clients.
+             */
+            if (pdesc == NULL)
+            {
+                if (unlikely(biscuit_diag_scan_trace))
+                    ereport(WARNING,
+                            (errmsg("biscuit: TID collection returned %d row(s) for "
+                                    UINT64_FORMAT " candidate slot(s)",
+                                    so->num_results, card_in),
+                             errhint("Every candidate slot should yield exactly one TID "
+                                     "on a non-parallel scan.")));
+                else if (card_in != (uint64_t) so->num_results)
+                    ereport(DEBUG1,
+                            (errmsg("biscuit: TID collection returned %d row(s) for "
+                                    UINT64_FORMAT " candidate slot(s)",
+                                    so->num_results, card_in),
+                             errhint("Every candidate slot should yield exactly one TID "
+                                     "on a non-parallel scan.")));
+            }
         }
 
         biscuit_roaring_free(result);
