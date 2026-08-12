@@ -146,7 +146,7 @@ SHUFFLED=($(shuf -e "${INDEX_TYPES[@]}"))
 #### 6. Comprehensive Metrics
 
 **Captured for Every Query**:
-```csv
+```text
 index_type,iteration,cache_state,query_id,execution_time,planning_time,
 total_time,shared_hit,shared_read,shared_written,actual_rows,
 cache_hit_ratio,node_type

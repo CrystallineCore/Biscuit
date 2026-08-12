@@ -54,7 +54,7 @@ FROM generate_series(11, 10000) i;
 
 First, let's see how PostgreSQL handles pattern matching **without** Biscuit:
 
-```sql
+```text
 -- Enable timing
 \timing on
 
@@ -301,6 +301,7 @@ SELECT biscuit_index_stats('idx_products_name'::regclass);
 - Index very long text (>256 chars truncated)
 - Use for full-text search (use tsvector)
 - Create redundant indexes
+- Insert into an already-indexed table during a bulk load — build the index afterwards
 
 ---
 
@@ -334,7 +335,18 @@ WHERE email LIKE '%@company.com'
 
 **Q: Can I use Biscuit for case-insensitive matching?**
 
-A: Yes, Biscuit versions >= 2.1.0 support ILIKE queries.
+A: Yes. The default `biscuit_ops` operator class builds case-insensitive
+structures alongside the case-sensitive ones, so `ILIKE` is served by the same
+index. For anchored patterns it performs comparably to `LIKE`. If a column is
+only ever queried one way, `biscuit_like_ops` or `biscuit_ilike_ops` avoids
+building the unused structure set.
+
+**Q: Does the index survive a restart or a crash?**
+
+A: Yes. Index state is WAL-logged and stored in the index relation's own pages,
+so it is recovered by PostgreSQL's ordinary crash recovery and replicates to
+standbys. Each backend still loads its own copy into session-local memory on
+first use, so the first query in a new connection pays a load cost.
 
 ---
 

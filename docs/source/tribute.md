@@ -58,36 +58,34 @@ CREATE INDEX ON logs USING GIN(message gin_trgm_ops);
 **pg_trgm can index many regex patterns.** Biscuit cannot support regex at all—our position-based indexing breaks down with complex regex operators like `*`, `+`, `{n,m}`, lookaheads, etc.
 
 #### 4. **Persistent Storage**
-```sql
+```text
 -- pg_trgm index is written to disk
 -- No rebuild needed after cache eviction or restart
 \di+ articles_content_idx
 ```
 
-**Critical advantage:** pg_trgm indices are **persistent**. They survive:
-- PostgreSQL restarts
-- Cache evictions
-- Relation cache invalidations
+pg_trgm indices are persistent and survive restarts, cache evictions and
+relation cache invalidations.
 
-**Biscuit's Achilles' Heel:**
+**Biscuit is now persistent too.** Earlier releases kept index state in memory
+and rebuilt it from the heap on every cache invalidation. That is no longer the
+case: index state lives in the index relation's own WAL-logged pages, so it
+survives restarts, takes part in crash recovery and point-in-time recovery, and
+reaches physical standbys through ordinary replication.
+
+What remains is a *session-local cache*, not a rebuild from the heap:
+
 ```
-⚠️  WARNING: Biscuit indices are IN-MEMORY ONLY
-    
-    - Stored in PostgreSQL's shared cache buffers
-    - Rebuilt from heap on EVERY cache invalidation
-    - Rebuild triggers:
-      * First query after server restart
-      * Cache pressure evictions
-      * Schema changes (ALTER TABLE)
-      * Extension updates
-      * Manual cache clearing
-    
-    For large tables (10M+ rows), rebuild can take:
-    - 10-30 seconds for 10M rows
-    - 1-5 minutes for 100M rows
-    depending on the hardware and other configurations.
+Each backend loads a copy of the index into session-local memory on first use,
+and reloads it when another backend's committed write advances the metapage
+generation.
 
-    This can be unacceptable for latency-sensitive applications.
+  - Memory scales with the number of concurrent connections.
+  - Read latency rises for a period after each write while copies reload.
+  - The first query in a new backend pays a load cost before returning.
+
+This is a cost to plan for with large connection pools, but the index itself
+is durable and is not reconstructed from the heap.
 ```
 
 ### When to Use pg_trgm Instead of Biscuit
@@ -99,6 +97,7 @@ CREATE INDEX ON logs USING GIN(message gin_trgm_ops);
 | **Full-text search** | ✅ Always | Biscuit: no stemming, no ranking |
 | **Regex patterns** | ✅ Always | Biscuit: no regex support |
 | **Very long strings** | ✅ Preferred | Biscuit: memory scales with length |
+| **Large connection pools** | ✅ Preferred | Biscuit: one cached copy per backend |
 
 ---
 
@@ -146,21 +145,21 @@ CREATE INDEX ON users(email);           -- text
 
 **Biscuit only works on text-like data.** 
 
-#### 5. **Lock-Free Concurrent Access**
+#### 5. **Concurrent Access**
 ```sql
 -- B-tree: MVCC-friendly, high concurrency
 -- 1000s of concurrent readers + writers, no problem
 ```
 
-**Biscuit's concurrency limitations:**
-```c
-// INSERT requires exclusive lock on entire index
-LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-// All queries blocked during insert!
+Biscuit participates in MVCC correctly: concurrent readers and writers operate
+without lost updates, aborted transactions leave nothing visible through the
+index, and a reader sees a consistent view of a structure whether or not
+another backend's changes have been merged yet. Writes append small delta
+records rather than rewriting whole structures.
 
-// This is acceptable for read-heavy workloads
-// Unacceptable for high-write scenarios
-```
+The practical limits on write-heavy use are different ones: the WAL each write
+generates, and the cache reload a committed write triggers in other backends.
+B-tree remains preferable under sustained high write throughput.
 
 ### When to Use B-tree Instead of Biscuit
 
@@ -213,19 +212,18 @@ SELECT * FROM users WHERE bio LIKE '%worked at Google%software engineer%';
 ### Biscuit's Weaknesses
 
 - **Memory hog**: Larger than B-tree  
-- **Cache-dependent**: Rebuilds on invalidation (2-300s for large tables)  
+- **Cache reload after writes**: cached copies reload rather than refresh incrementally  
+- **Per-connection memory**: each backend holds its own copy  
 - **No fuzzy matching**: Can't handle typos  
 - **No regex**: Limited to LIKE wildcards  
 - **Poor for equality**: 100x slower than B-tree  
-- **Write-unfriendly**: Exclusive locks on insert  
-- **No persistence**: In-memory only, lost on restart  
+- **Write-heavy workloads**: substantial WAL per indexed write  
 
 ### When NOT to Use Biscuit
 
 🚫 **Production systems with:**
-- Strict latency SLAs (<10ms)
-- Frequent server restarts
-- Limited memory (<4GB per index)
+- Strict latency SLAs (<10ms) where connections are short-lived
+- Limited memory (<4GB per index), or large connection pools
 - High write throughput (>1k inserts/sec)
 - Primarily equality/range queries
 
@@ -234,7 +232,6 @@ SELECT * FROM users WHERE bio LIKE '%worked at Google%software engineer%';
 - Regular expressions
 - Full-text search with ranking
 - Sub-millisecond equality lookups
-- 24/7 uptime with zero rebuild latency
 
 ---
 
@@ -265,7 +262,7 @@ Biscuit stands on the shoulders of giants:
 | `WHERE col % 'similar'` | **pg_trgm (GIN)** | Biscuit: no fuzzy |
 | Multi-column patterns | **Biscuit** | Unique strength |
 | Case-insensitive | **Biscuit** | Avoids lower() |
-| Production 24/7 | **pg_trgm** | Persistent, no rebuilds |
+| Production 24/7 | **Either** | Both are persistent and crash-safe |
 | Limited memory | **B-tree** or **pg_trgm** | Biscuit too large |
 
 ---

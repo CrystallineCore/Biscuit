@@ -151,7 +151,7 @@ DROP INDEX idx_products_name, idx_products_sku;
 Rebuilds a Biscuit index.
 
 **Syntax**:
-```sql
+```text
 REINDEX [ ( option [, ...] ) ] { INDEX | TABLE | SCHEMA | DATABASE | SYSTEM } name;
 ```
 
@@ -240,7 +240,7 @@ SELECT * FROM products WHERE name NOT LIKE '%test%';
 
 ### ILIKE Operator
 
-Case-insensitive pattern matching is supported from versions >= 2.1.0
+Case-insensitive pattern matching is supported by the default `biscuit_ops` operator class, and by `biscuit_ilike_ops` for ILIKE-only columns
 
 **Workaround**:
 ```sql
@@ -256,7 +256,7 @@ SELECT * FROM products WHERE name ILIKE '%wireless%';
 
 ### NOT ILIKE Operator
 
-Case-insensitive pattern matching is supported from versions >= 2.1.0
+Case-insensitive pattern matching is supported by the default `biscuit_ops` operator class, and by `biscuit_ilike_ops` for ILIKE-only columns
 
 **Workaround**:
 ```sql
@@ -579,7 +579,7 @@ biscuit_index_stats(index_oid regclass) RETURNS text
 **Returns**: Multi-line text report with statistics
 
 **Example**:
-```sql
+```text
 -- Get statistics for an index
 SELECT biscuit_index_stats('idx_products_name'::regclass);
 
@@ -885,7 +885,7 @@ SET max_parallel_workers_per_gather = 4;
 
 Parameters you can set per connection:
 
-```sql
+```text
 -- Increase work memory for this session
 SET work_mem = '512MB';
 
@@ -986,7 +986,9 @@ CREATE INDEX idx ON table1 USING biscuit (column::TEXT);
 
 ### ERROR: could not open relation with OID
 
-**Cause**: Index cache corruption after crash
+**Cause**: A stale reference to a dropped or rebuilt index. Index state itself
+is WAL-logged and recovered by ordinary crash recovery, so this is not expected
+as a consequence of an unclean shutdown.
 
 **Solution**:
 ```sql

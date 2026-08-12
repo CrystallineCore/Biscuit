@@ -340,8 +340,9 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#disk-persistence">Disk Persistence</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="#metadata-only">Metadata Only</a></li>
-<li class="toctree-l3"><a class="reference internal" href="#rebuild-strategy">Rebuild Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#on-disk-structures">On-disk structures</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#load-strategy">Load strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#write-path">Write path</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#limitations-tradeoffs">Limitations &amp; Tradeoffs</a><ul>
@@ -789,6 +790,7 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#advanced-tuning">Advanced Tuning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#runtime-settings">Runtime Settings</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#custom-cost-parameters">Custom Cost Parameters</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#parallel-query-configuration">Parallel Query Configuration</a></li>
 </ul>
@@ -816,7 +818,7 @@
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#sorted-data-access">2. <strong>Sorted Data Access</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#space-efficiency">3. <strong>Space Efficiency</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#universal-compatibility">4. <strong>Universal Compatibility</strong></a></li>
-<li class="toctree-l4"><a class="reference internal" href="tribute.html#lock-free-concurrent-access">5. <strong>Lock-Free Concurrent Access</strong></a></li>
+<li class="toctree-l4"><a class="reference internal" href="tribute.html#concurrent-access">5. <strong>Concurrent Access</strong></a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="tribute.html#when-to-use-b-tree-instead-of-biscuit">When to Use B-tree Instead of Biscuit</a></li>
@@ -1601,11 +1603,11 @@ ILIKE Query:
 </div>
 </li>
 <li><p><strong>Execute</strong>:</p>
-<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Execute col1 LIKE (case-sensitive indices)</span>
-<span class="n">candidates</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">query_column_pattern</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">col1_idx</span><span class="p">,</span><span class="w"> </span><span class="err">&#39;</span><span class="n">abc</span><span class="o">%</span><span class="err">&#39;</span><span class="p">);</span>
+<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// Execute col1 LIKE (case-sensitive structures)</span>
+<span class="n">candidates</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">query_column_pattern</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">col1_idx</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;abc%&quot;</span><span class="p">);</span>
 
-<span class="c1">// Execute col2 ILIKE (case-insensitive indices)</span>
-<span class="n">col2_result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">query_column_pattern_ilike</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">col2_idx</span><span class="p">,</span><span class="w"> </span><span class="err">&#39;</span><span class="o">%</span><span class="n">xyz</span><span class="err">&#39;</span><span class="p">);</span>
+<span class="c1">// Execute col2 ILIKE (case-insensitive structures)</span>
+<span class="n">col2_result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">query_column_pattern_ilike</span><span class="p">(</span><span class="n">idx</span><span class="p">,</span><span class="w"> </span><span class="n">col2_idx</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;%xyz&quot;</span><span class="p">);</span>
 
 <span class="c1">// Intersect</span>
 <span class="n">bitmap_and</span><span class="p">(</span><span class="n">candidates</span><span class="p">,</span><span class="w"> </span><span class="n">col2_result</span><span class="p">);</span>
@@ -1835,34 +1837,46 @@ ILIKE Query:
 <hr class="docutils" />
 <section id="disk-persistence">
 <h2>Disk Persistence<a class="headerlink" href="#disk-persistence" title="Link to this heading"></a></h2>
-<section id="metadata-only">
-<h3>Metadata Only<a class="headerlink" href="#metadata-only" title="Link to this heading"></a></h3>
-<p>Biscuit stores only a metadata marker on disk:</p>
-<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">BiscuitMetaPageData</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="n">uint32</span><span class="w"> </span><span class="n">magic</span><span class="p">;</span><span class="w">        </span><span class="c1">// 0x42495343 (&quot;BISC&quot;)</span>
-<span class="w">    </span><span class="n">uint32</span><span class="w"> </span><span class="n">version</span><span class="p">;</span><span class="w">      </span><span class="c1">// 1</span>
-<span class="w">    </span><span class="n">BlockNumber</span><span class="w"> </span><span class="n">root</span><span class="p">;</span><span class="w">    </span><span class="c1">// 0</span>
-<span class="w">    </span><span class="n">uint32</span><span class="w"> </span><span class="n">num_records</span><span class="p">;</span>
-<span class="p">}</span><span class="w"> </span><span class="n">BiscuitMetaPageData</span><span class="p">;</span>
-</pre></div>
-</div>
-</section>
-<section id="rebuild-strategy">
-<h3>Rebuild Strategy<a class="headerlink" href="#rebuild-strategy" title="Link to this heading"></a></h3>
-<p>Bitmaps are <strong>not serialized</strong>. On index load:</p>
-<ol class="arabic simple">
-<li><p>Read metadata marker</p></li>
-<li><p>Scan heap table</p></li>
-<li><p>Rebuild <strong>all bitmaps</strong> (case-sensitive + case-insensitive) in memory</p></li>
-<li><p>Generate <strong>lowercase data cache</strong></p></li>
-<li><p>Cache in <code class="docutils literal notranslate"><span class="pre">CacheMemoryContext</span></code></p></li>
-</ol>
-<p><strong>Rationale</strong>:</p>
+<p>Index state is stored in the index relation’s own pages and is WAL-logged.
+Earlier releases kept a metadata marker on disk and rebuilt every bitmap from
+the heap on load; that design has been replaced.</p>
+<section id="on-disk-structures">
+<h3>On-disk structures<a class="headerlink" href="#on-disk-structures" title="Link to this heading"></a></h3>
+<p>Every persistent structure — per-character and length bitmaps, the TID array,
+tombstones, the free-slot list and per-record string caches — lives in one of
+two page-chain types:</p>
 <ul class="simple">
-<li><p>Bitmap serialization is complex and large</p></li>
-<li><p>Memory representation is optimal for queries</p></li>
-<li><p>Dual indices (LIKE + ILIKE) would double disk size</p></li>
+<li><p>a <strong>compacted-blob chunk chain</strong>, holding a structure’s serialized bytes
+across as many pages as needed, and</p></li>
+<li><p>an <strong>append-only pending-delta chain</strong>, following GIN’s pending-list design.</p></li>
 </ul>
+<p>A per-column <strong>directory</strong> maps each structure’s identity —
+<code class="docutils literal notranslate"><span class="pre">(col,</span> <span class="pre">is_lower,</span> <span class="pre">kind,</span> <span class="pre">char,</span> <span class="pre">position)</span></code> — to its blob-chain and pending-chain
+heads. A separate <strong>row store</strong> holds TID slots and cached strings.</p>
+<p>The metapage carries the directory roots, a deferred-recycle freelist root,
+pending-list tuning and observability fields, and a monotonic generation
+counter used for cache staleness detection.</p>
+</section>
+<section id="load-strategy">
+<h3>Load strategy<a class="headerlink" href="#load-strategy" title="Link to this heading"></a></h3>
+<p>On first use in a backend, the index is read from its on-disk directory into
+session-local memory. It is <strong>not</strong> rebuilt from the heap. There is no
+background preload worker, no warm-up window and no degraded-scan period after
+a restart.</p>
+<p>Because every mutation goes through ordinary WAL-logged buffer writes, index
+state survives a crash, can be recovered to a point in time, and replicates to
+physical standbys without any Biscuit-specific step.</p>
+</section>
+<section id="write-path">
+<h3>Write path<a class="headerlink" href="#write-path" title="Link to this heading"></a></h3>
+<p>Steady-state <code class="docutils literal notranslate"><span class="pre">INSERT</span></code>, <code class="docutils literal notranslate"><span class="pre">UPDATE</span></code> and <code class="docutils literal notranslate"><span class="pre">DELETE</span></code> append a small delta record to the
+relevant structure’s pending chain rather than rewriting it. Once a pending
+chain exceeds the drain threshold it is re-serialized into a fresh compacted
+blob and its previous chains are retired to a deferred-recycle freelist.
+<code class="docutils literal notranslate"><span class="pre">VACUUM</span></code> additionally performs an unconditional full drain pass.</p>
+<p>Query evaluation merges not-yet-drained pending records into the bitmap it
+reads, so a backend sees a consistent view of a structure regardless of whether
+another backend’s mutations have been drained.</p>
 </section>
 </section>
 <hr class="docutils" />
@@ -1876,7 +1890,8 @@ ILIKE Query:
 <li><p>Prefix/suffix queries (<code class="docutils literal notranslate"><span class="pre">'abc%'</span></code>, <code class="docutils literal notranslate"><span class="pre">'%xyz'</span></code>)</p></li>
 <li><p>Complex multi-wildcard patterns</p></li>
 <li><p>Multi-column pattern searches</p></li>
-<li><p>Case-sensitive and case-insensitive (separate indices)</p></li>
+<li><p>Case-sensitive and case-insensitive (separate structure sets)</p></li>
+<li><p>WAL-logged, crash-safe storage; point-in-time recovery and physical replication</p></li>
 <li><p>Aggregates (<code class="docutils literal notranslate"><span class="pre">COUNT(*)</span></code>, <code class="docutils literal notranslate"><span class="pre">EXISTS</span></code>)</p></li>
 <li><p>International text (German, Turkish, Chinese, etc.)</p></li>
 </ul>
@@ -1888,7 +1903,8 @@ ILIKE Query:
 <li><p><strong>Full-text search</strong>: Use GIN with tsvector</p></li>
 <li><p><strong>Regex</strong>: Not supported</p></li>
 <li><p><strong>Very long strings</strong>: Memory usage scales with character length</p></li>
-<li><p><strong>Online serialization</strong>: Requires rebuild on load</p></li>
+<li><p><strong>Cache reload</strong>: a committed write invalidates cached copies, which reload in full rather than refreshing incrementally</p></li>
+<li><p><strong>Per-connection memory</strong>: each backend holds its own copy of the index</p></li>
 <li><p><strong>Locale changes</strong>: Lowercase cache is locale-dependent</p></li>
 </ul>
 </section>

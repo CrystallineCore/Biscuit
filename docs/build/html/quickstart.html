@@ -340,8 +340,9 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#disk-persistence">Disk Persistence</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#metadata-only">Metadata Only</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#rebuild-strategy">Rebuild Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#on-disk-structures">On-disk structures</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#load-strategy">Load strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#write-path">Write path</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#limitations-tradeoffs">Limitations &amp; Tradeoffs</a><ul>
@@ -789,6 +790,7 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#advanced-tuning">Advanced Tuning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#runtime-settings">Runtime Settings</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#custom-cost-parameters">Custom Cost Parameters</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#parallel-query-configuration">Parallel Query Configuration</a></li>
 </ul>
@@ -816,7 +818,7 @@
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#sorted-data-access">2. <strong>Sorted Data Access</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#space-efficiency">3. <strong>Space Efficiency</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#universal-compatibility">4. <strong>Universal Compatibility</strong></a></li>
-<li class="toctree-l4"><a class="reference internal" href="tribute.html#lock-free-concurrent-access">5. <strong>Lock-Free Concurrent Access</strong></a></li>
+<li class="toctree-l4"><a class="reference internal" href="tribute.html#concurrent-access">5. <strong>Concurrent Access</strong></a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="tribute.html#when-to-use-b-tree-instead-of-biscuit">When to Use B-tree Instead of Biscuit</a></li>
@@ -989,14 +991,14 @@
 <section id="step-2-measure-baseline-performance">
 <h2>Step 2: Measure Baseline Performance<a class="headerlink" href="#step-2-measure-baseline-performance" title="Link to this heading"></a></h2>
 <p>First, let’s see how PostgreSQL handles pattern matching <strong>without</strong> Biscuit:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Enable timing</span>
-<span class="err">\</span><span class="n">timing</span><span class="w"> </span><span class="k">on</span>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>-- Enable timing
+\timing on
 
-<span class="c1">-- Test various LIKE patterns</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%Mouse%&#39;</span><span class="p">;</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Wireless%&#39;</span><span class="p">;</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">sku</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%USB%&#39;</span><span class="p">;</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">description</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%gaming%&#39;</span><span class="p">;</span>
+-- Test various LIKE patterns
+SELECT COUNT(*) FROM products WHERE name LIKE &#39;%Mouse%&#39;;
+SELECT COUNT(*) FROM products WHERE name LIKE &#39;Wireless%&#39;;
+SELECT COUNT(*) FROM products WHERE sku LIKE &#39;%USB%&#39;;
+SELECT COUNT(*) FROM products WHERE description LIKE &#39;%gaming%&#39;;
 </pre></div>
 </div>
 <p>Check the query plan:</p>
@@ -1224,6 +1226,7 @@ Active Optimizations:
 <li><p>Index very long text (&gt;256 chars truncated)</p></li>
 <li><p>Use for full-text search (use tsvector)</p></li>
 <li><p>Create redundant indexes</p></li>
+<li><p>Insert into an already-indexed table during a bulk load — build the index afterwards</p></li>
 </ul>
 </section>
 </section>
@@ -1256,7 +1259,16 @@ Active Optimizations:
 <section id="common-questions">
 <h2>Common Questions<a class="headerlink" href="#common-questions" title="Link to this heading"></a></h2>
 <p><strong>Q: Can I use Biscuit for case-insensitive matching?</strong></p>
-<p>A: Yes, Biscuit versions &gt;= 2.1.0 support ILIKE queries.</p>
+<p>A: Yes. The default <code class="docutils literal notranslate"><span class="pre">biscuit_ops</span></code> operator class builds case-insensitive
+structures alongside the case-sensitive ones, so <code class="docutils literal notranslate"><span class="pre">ILIKE</span></code> is served by the same
+index. For anchored patterns it performs comparably to <code class="docutils literal notranslate"><span class="pre">LIKE</span></code>. If a column is
+only ever queried one way, <code class="docutils literal notranslate"><span class="pre">biscuit_like_ops</span></code> or <code class="docutils literal notranslate"><span class="pre">biscuit_ilike_ops</span></code> avoids
+building the unused structure set.</p>
+<p><strong>Q: Does the index survive a restart or a crash?</strong></p>
+<p>A: Yes. Index state is WAL-logged and stored in the index relation’s own pages,
+so it is recovered by PostgreSQL’s ordinary crash recovery and replicates to
+standbys. Each backend still loads its own copy into session-local memory on
+first use, so the first query in a new connection pays a load cost.</p>
 <hr class="docutils" />
 <p>Need help? Check the <a class="reference internal" href="faq.html"><span class="std std-doc">FAQ</span></a> or open an issue on <a class="reference external" href="https://github.com/crystallinecore/biscuit">GitHub</a>.</p>
 </section>

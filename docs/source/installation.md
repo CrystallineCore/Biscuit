@@ -32,7 +32,7 @@ psql --version
 **Ubuntu/Debian:**
 ```bash
 sudo apt-get update
-sudo apt-get install -y postgresql-server-dev-14 build-essential git
+sudo apt-get install -y postgresql-server-dev-16 build-essential git
 ```
 
 **RHEL/CentOS/Fedora:**
@@ -127,7 +127,7 @@ Expected output:
 ```
    name   | default_version | installed_version | comment
 ----------+-----------------+-------------------+---------
- biscuit  | 1.0             | 1.0               | Bitmap-based...
+ biscuit  | <version>       | <version>         | Bitmap-based...
 ```
 
 ---
@@ -136,7 +136,10 @@ Expected output:
 
 ### Set Appropriate Memory Limits
 
-Biscuit stores indexes in memory. Adjust PostgreSQL memory settings:
+Index state is stored durably on disk, but each backend also loads a copy into
+session-local memory on first use. Total memory therefore scales with the
+number of concurrent connections using the index. Adjust PostgreSQL memory
+settings and size connection pools accordingly:
 
 ```sql
 -- In postgresql.conf
@@ -149,7 +152,7 @@ maintenance_work_mem = 1GB     # For index building
 
 Monitor Biscuit performance:
 
-```sql
+```text
 -- Enable timing
 \timing on
 
@@ -182,14 +185,19 @@ EXPLAIN ANALYZE
 SELECT * FROM test_biscuit WHERE name LIKE '%product_42%';
 ```
 
-Expected output should show:
+Expected output should show a Biscuit index path rather than a sequential
+scan, for example:
+
 ```
-Index Scan using idx_test_name on test_biscuit
-  (cost=0.00..8.27 rows=1 width=...)
-  Index Cond: (name ~~ '%product_42%'::text)
-Planning Time: 0.123 ms
-Execution Time: 0.567 ms
+Bitmap Heap Scan on test_biscuit
+  Recheck Cond: (name ~~ '%product_42%'::text)
+  ->  Bitmap Index Scan on idx_test_name
+        Index Cond: (name ~~ '%product_42%'::text)
 ```
+
+On a table this small the planner may still prefer a sequential scan, which is
+a reasonable choice. To confirm the index is usable, repeat the query with
+`SET enable_seqscan = off;` — for testing only, not as a production setting.
 
 ---
 
@@ -274,11 +282,11 @@ For Windows installation:
 Run Biscuit in Docker:
 
 ```dockerfile
-FROM postgres:14
+FROM postgres:16
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
-    postgresql-server-dev-14 \
+    postgresql-server-dev-16 \
     build-essential \
     git
 

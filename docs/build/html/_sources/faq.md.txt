@@ -74,7 +74,7 @@ See the [Installation Guide](installation.md) for detailed instructions.
 Quick steps:
 ```bash
 # Ubuntu/Debian
-sudo apt-get install postgresql-server-dev-14 build-essential
+sudo apt-get install postgresql-server-dev-16 build-essential
 git clone https://github.com/crystallinecore/biscuit.git
 cd biscuit
 make
@@ -251,7 +251,7 @@ SELECT * FROM products WHERE name LIKE '%laptop%';
    ```
 
 3. **Wrong column indexed**
-   ```sql
+   ```text
    -- Check which columns are indexed
    \d products
    ```
@@ -543,13 +543,19 @@ Whether parallel queries are used depends on PostgreSQL's query planner and your
 
 ### Crashes or unexpected restarts
 
+Index state is WAL-logged, so after an abrupt shutdown PostgreSQL replays WAL
+on startup and the index is recovered along with the heap. Committed changes
+are present, uncommitted ones are not, and **no manual rebuild is expected**.
+
+If an index does appear inconsistent after a restart, that is worth reporting.
+
 **Possible causes**:
 
 1. **Memory corruption**: Ensure CRoaring is properly installed
 2. **PostgreSQL crash**: Check PostgreSQL logs
 3. **Extension bug**: Report at GitHub Issues
 
-**Recovery**:
+**If a rebuild is needed anyway**:
 ```sql
 -- Drop and rebuild index
 DROP INDEX idx_name;
@@ -638,17 +644,19 @@ USING biscuit (customer_name);
 
 ### Can I use Biscuit in read replicas?
 
-**Yes**, but indexes must be built separately:
+**Yes.** Create the index on the primary; it reaches physical standbys through
+the ordinary WAL stream, with no Biscuit-specific step required.
 
 ```sql
 -- On primary
 CREATE INDEX idx_name ON table USING biscuit (col);
 
--- On replica (after replication catches up)
--- Index is automatically created from WAL
--- Or rebuild if needed:
-REINDEX INDEX idx_name;
+-- On a physical standby, once replay catches up, the index is present
+-- and available to index scans. No REINDEX is required.
 ```
+
+Hot standbys serve index scans from the replicated index. Point-in-time
+recovery restores index state to the recovery target in the same way.
 
 ---
 
@@ -803,7 +811,8 @@ Future development may include:
 - Extended monitoring capabilities
 
 **Long-term possibilities**:
-- Persistent bitmap storage options
+- Incremental cache refresh in place of full reload on invalidation
+- Reduced write amplification
 - Approximate matching capabilities
 - Additional pattern matching features
 - Enhanced cloud optimizations

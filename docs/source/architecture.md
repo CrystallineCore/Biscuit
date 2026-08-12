@@ -671,11 +671,11 @@ Execution plan:
 
 3. **Execute**: 
    ```c
-   // Execute col1 LIKE (case-sensitive indices)
-   candidates = query_column_pattern(idx, col1_idx, 'abc%');
+   // Execute col1 LIKE (case-sensitive structures)
+   candidates = query_column_pattern(idx, col1_idx, "abc%");
    
-   // Execute col2 ILIKE (case-insensitive indices)
-   col2_result = query_column_pattern_ilike(idx, col2_idx, '%xyz');
+   // Execute col2 ILIKE (case-insensitive structures)
+   col2_result = query_column_pattern_ilike(idx, col2_idx, "%xyz");
    
    // Intersect
    bitmap_and(candidates, col2_result);
@@ -907,33 +907,50 @@ void biscuit_register_callback() {
 
 ## Disk Persistence
 
-### Metadata Only
+Index state is stored in the index relation's own pages and is WAL-logged.
+Earlier releases kept a metadata marker on disk and rebuilt every bitmap from
+the heap on load; that design has been replaced.
 
-Biscuit stores only a metadata marker on disk:
+### On-disk structures
 
-```c
-typedef struct BiscuitMetaPageData {
-    uint32 magic;        // 0x42495343 ("BISC")
-    uint32 version;      // 1
-    BlockNumber root;    // 0
-    uint32 num_records;
-} BiscuitMetaPageData;
-```
+Every persistent structure — per-character and length bitmaps, the TID array,
+tombstones, the free-slot list and per-record string caches — lives in one of
+two page-chain types:
 
-### Rebuild Strategy
+* a **compacted-blob chunk chain**, holding a structure's serialized bytes
+  across as many pages as needed, and
+* an **append-only pending-delta chain**, following GIN's pending-list design.
 
-Bitmaps are **not serialized**. On index load:
+A per-column **directory** maps each structure's identity —
+`(col, is_lower, kind, char, position)` — to its blob-chain and pending-chain
+heads. A separate **row store** holds TID slots and cached strings.
 
-1. Read metadata marker
-2. Scan heap table
-3. Rebuild **all bitmaps** (case-sensitive + case-insensitive) in memory
-4. Generate **lowercase data cache**
-5. Cache in `CacheMemoryContext`
+The metapage carries the directory roots, a deferred-recycle freelist root,
+pending-list tuning and observability fields, and a monotonic generation
+counter used for cache staleness detection.
 
-**Rationale**: 
-- Bitmap serialization is complex and large
-- Memory representation is optimal for queries
-- Dual indices (LIKE + ILIKE) would double disk size
+### Load strategy
+
+On first use in a backend, the index is read from its on-disk directory into
+session-local memory. It is **not** rebuilt from the heap. There is no
+background preload worker, no warm-up window and no degraded-scan period after
+a restart.
+
+Because every mutation goes through ordinary WAL-logged buffer writes, index
+state survives a crash, can be recovered to a point in time, and replicates to
+physical standbys without any Biscuit-specific step.
+
+### Write path
+
+Steady-state `INSERT`, `UPDATE` and `DELETE` append a small delta record to the
+relevant structure's pending chain rather than rewriting it. Once a pending
+chain exceeds the drain threshold it is re-serialized into a fresh compacted
+blob and its previous chains are retired to a deferred-recycle freelist.
+`VACUUM` additionally performs an unconditional full drain pass.
+
+Query evaluation merges not-yet-drained pending records into the bitmap it
+reads, so a backend sees a consistent view of a structure regardless of whether
+another backend's mutations have been drained.
 
 ---
 
@@ -946,7 +963,8 @@ Bitmaps are **not serialized**. On index load:
 - Prefix/suffix queries (`'abc%'`, `'%xyz'`)  
 - Complex multi-wildcard patterns  
 - Multi-column pattern searches  
-- Case-sensitive and case-insensitive (separate indices)  
+- Case-sensitive and case-insensitive (separate structure sets)  
+- WAL-logged, crash-safe storage; point-in-time recovery and physical replication  
 - Aggregates (`COUNT(*)`, `EXISTS`)  
 - International text (German, Turkish, Chinese, etc.)  
 
@@ -956,7 +974,8 @@ Bitmaps are **not serialized**. On index load:
 - **Full-text search**: Use GIN with tsvector  
 - **Regex**: Not supported  
 - **Very long strings**: Memory usage scales with character length  
-- **Online serialization**: Requires rebuild on load  
+- **Cache reload**: a committed write invalidates cached copies, which reload in full rather than refreshing incrementally  
+- **Per-connection memory**: each backend holds its own copy of the index  
 - **Locale changes**: Lowercase cache is locale-dependent  
 
 ---

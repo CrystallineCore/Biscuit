@@ -340,8 +340,9 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#disk-persistence">Disk Persistence</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#metadata-only">Metadata Only</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#rebuild-strategy">Rebuild Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#on-disk-structures">On-disk structures</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#load-strategy">Load strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#write-path">Write path</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#limitations-tradeoffs">Limitations &amp; Tradeoffs</a><ul>
@@ -789,6 +790,7 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#advanced-tuning">Advanced Tuning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#runtime-settings">Runtime Settings</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#custom-cost-parameters">Custom Cost Parameters</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#parallel-query-configuration">Parallel Query Configuration</a></li>
 </ul>
@@ -816,7 +818,7 @@
 <li class="toctree-l4"><a class="reference internal" href="#sorted-data-access">2. <strong>Sorted Data Access</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#space-efficiency">3. <strong>Space Efficiency</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="#universal-compatibility">4. <strong>Universal Compatibility</strong></a></li>
-<li class="toctree-l4"><a class="reference internal" href="#lock-free-concurrent-access">5. <strong>Lock-Free Concurrent Access</strong></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#concurrent-access">5. <strong>Concurrent Access</strong></a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="#when-to-use-b-tree-instead-of-biscuit">When to Use B-tree Instead of Biscuit</a></li>
@@ -1000,35 +1002,29 @@
 </section>
 <section id="persistent-storage">
 <h4>4. <strong>Persistent Storage</strong><a class="headerlink" href="#persistent-storage" title="Link to this heading"></a></h4>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- pg_trgm index is written to disk</span>
-<span class="c1">-- No rebuild needed after cache eviction or restart</span>
-<span class="err">\</span><span class="n">di</span><span class="o">+</span><span class="w"> </span><span class="n">articles_content_idx</span>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>-- pg_trgm index is written to disk
+-- No rebuild needed after cache eviction or restart
+\di+ articles_content_idx
 </pre></div>
 </div>
-<p><strong>Critical advantage:</strong> pg_trgm indices are <strong>persistent</strong>. They survive:</p>
-<ul class="simple">
-<li><p>PostgreSQL restarts</p></li>
-<li><p>Cache evictions</p></li>
-<li><p>Relation cache invalidations</p></li>
-</ul>
-<p><strong>Biscuit’s Achilles’ Heel:</strong></p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>⚠️  WARNING: Biscuit indices are IN-MEMORY ONLY
-    
-    - Stored in PostgreSQL&#39;s shared cache buffers
-    - Rebuilt from heap on EVERY cache invalidation
-    - Rebuild triggers:
-      * First query after server restart
-      * Cache pressure evictions
-      * Schema changes (ALTER TABLE)
-      * Extension updates
-      * Manual cache clearing
-    
-    For large tables (10M+ rows), rebuild can take:
-    - 10-30 seconds for 10M rows
-    - 1-5 minutes for 100M rows
-    depending on the hardware and other configurations.
+<p>pg_trgm indices are persistent and survive restarts, cache evictions and
+relation cache invalidations.</p>
+<p><strong>Biscuit is now persistent too.</strong> Earlier releases kept index state in memory
+and rebuilt it from the heap on every cache invalidation. That is no longer the
+case: index state lives in the index relation’s own WAL-logged pages, so it
+survives restarts, takes part in crash recovery and point-in-time recovery, and
+reaches physical standbys through ordinary replication.</p>
+<p>What remains is a <em>session-local cache</em>, not a rebuild from the heap:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">Each</span> <span class="n">backend</span> <span class="n">loads</span> <span class="n">a</span> <span class="n">copy</span> <span class="n">of</span> <span class="n">the</span> <span class="n">index</span> <span class="n">into</span> <span class="n">session</span><span class="o">-</span><span class="n">local</span> <span class="n">memory</span> <span class="n">on</span> <span class="n">first</span> <span class="n">use</span><span class="p">,</span>
+<span class="ow">and</span> <span class="n">reloads</span> <span class="n">it</span> <span class="n">when</span> <span class="n">another</span> <span class="n">backend</span><span class="s1">&#39;s committed write advances the metapage</span>
+<span class="n">generation</span><span class="o">.</span>
 
-    This can be unacceptable for latency-sensitive applications.
+  <span class="o">-</span> <span class="n">Memory</span> <span class="n">scales</span> <span class="k">with</span> <span class="n">the</span> <span class="n">number</span> <span class="n">of</span> <span class="n">concurrent</span> <span class="n">connections</span><span class="o">.</span>
+  <span class="o">-</span> <span class="n">Read</span> <span class="n">latency</span> <span class="n">rises</span> <span class="k">for</span> <span class="n">a</span> <span class="n">period</span> <span class="n">after</span> <span class="n">each</span> <span class="n">write</span> <span class="k">while</span> <span class="n">copies</span> <span class="n">reload</span><span class="o">.</span>
+  <span class="o">-</span> <span class="n">The</span> <span class="n">first</span> <span class="n">query</span> <span class="ow">in</span> <span class="n">a</span> <span class="n">new</span> <span class="n">backend</span> <span class="n">pays</span> <span class="n">a</span> <span class="n">load</span> <span class="n">cost</span> <span class="n">before</span> <span class="n">returning</span><span class="o">.</span>
+
+<span class="n">This</span> <span class="ow">is</span> <span class="n">a</span> <span class="n">cost</span> <span class="n">to</span> <span class="n">plan</span> <span class="k">for</span> <span class="k">with</span> <span class="n">large</span> <span class="n">connection</span> <span class="n">pools</span><span class="p">,</span> <span class="n">but</span> <span class="n">the</span> <span class="n">index</span> <span class="n">itself</span>
+<span class="ow">is</span> <span class="n">durable</span> <span class="ow">and</span> <span class="ow">is</span> <span class="ow">not</span> <span class="n">reconstructed</span> <span class="kn">from</span><span class="w"> </span><span class="nn">the</span> <span class="n">heap</span><span class="o">.</span>
 </pre></div>
 </div>
 </section>
@@ -1062,6 +1058,10 @@
 <tr class="row-even"><td><p><strong>Very long strings</strong></p></td>
 <td><p>✅ Preferred</p></td>
 <td><p>Biscuit: memory scales with length</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Large connection pools</strong></p></td>
+<td><p>✅ Preferred</p></td>
+<td><p>Biscuit: one cached copy per backend</p></td>
 </tr>
 </tbody>
 </table>
@@ -1113,21 +1113,20 @@
 </div>
 <p><strong>Biscuit only works on text-like data.</strong></p>
 </section>
-<section id="lock-free-concurrent-access">
-<h4>5. <strong>Lock-Free Concurrent Access</strong><a class="headerlink" href="#lock-free-concurrent-access" title="Link to this heading"></a></h4>
+<section id="concurrent-access">
+<h4>5. <strong>Concurrent Access</strong><a class="headerlink" href="#concurrent-access" title="Link to this heading"></a></h4>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- B-tree: MVCC-friendly, high concurrency</span>
 <span class="c1">-- 1000s of concurrent readers + writers, no problem</span>
 </pre></div>
 </div>
-<p><strong>Biscuit’s concurrency limitations:</strong></p>
-<div class="highlight-c notranslate"><div class="highlight"><pre><span></span><span class="c1">// INSERT requires exclusive lock on entire index</span>
-<span class="n">LockBuffer</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="n">BUFFER_LOCK_EXCLUSIVE</span><span class="p">);</span>
-<span class="c1">// All queries blocked during insert!</span>
-
-<span class="c1">// This is acceptable for read-heavy workloads</span>
-<span class="c1">// Unacceptable for high-write scenarios</span>
-</pre></div>
-</div>
+<p>Biscuit participates in MVCC correctly: concurrent readers and writers operate
+without lost updates, aborted transactions leave nothing visible through the
+index, and a reader sees a consistent view of a structure whether or not
+another backend’s changes have been merged yet. Writes append small delta
+records rather than rewriting whole structures.</p>
+<p>The practical limits on write-heavy use are different ones: the WAL each write
+generates, and the cache reload a committed write triggers in other backends.
+B-tree remains preferable under sustained high write throughput.</p>
 </section>
 </section>
 <section id="when-to-use-b-tree-instead-of-biscuit">
@@ -1211,21 +1210,20 @@
 <h3>Biscuit’s Weaknesses<a class="headerlink" href="#biscuits-weaknesses" title="Link to this heading"></a></h3>
 <ul class="simple">
 <li><p><strong>Memory hog</strong>: Larger than B-tree</p></li>
-<li><p><strong>Cache-dependent</strong>: Rebuilds on invalidation (2-300s for large tables)</p></li>
+<li><p><strong>Cache reload after writes</strong>: cached copies reload rather than refresh incrementally</p></li>
+<li><p><strong>Per-connection memory</strong>: each backend holds its own copy</p></li>
 <li><p><strong>No fuzzy matching</strong>: Can’t handle typos</p></li>
 <li><p><strong>No regex</strong>: Limited to LIKE wildcards</p></li>
 <li><p><strong>Poor for equality</strong>: 100x slower than B-tree</p></li>
-<li><p><strong>Write-unfriendly</strong>: Exclusive locks on insert</p></li>
-<li><p><strong>No persistence</strong>: In-memory only, lost on restart</p></li>
+<li><p><strong>Write-heavy workloads</strong>: substantial WAL per indexed write</p></li>
 </ul>
 </section>
 <section id="when-not-to-use-biscuit">
 <h3>When NOT to Use Biscuit<a class="headerlink" href="#when-not-to-use-biscuit" title="Link to this heading"></a></h3>
 <p>🚫 <strong>Production systems with:</strong></p>
 <ul class="simple">
-<li><p>Strict latency SLAs (&lt;10ms)</p></li>
-<li><p>Frequent server restarts</p></li>
-<li><p>Limited memory (&lt;4GB per index)</p></li>
+<li><p>Strict latency SLAs (&lt;10ms) where connections are short-lived</p></li>
+<li><p>Limited memory (&lt;4GB per index), or large connection pools</p></li>
 <li><p>High write throughput (&gt;1k inserts/sec)</p></li>
 <li><p>Primarily equality/range queries</p></li>
 </ul>
@@ -1235,7 +1233,6 @@
 <li><p>Regular expressions</p></li>
 <li><p>Full-text search with ranking</p></li>
 <li><p>Sub-millisecond equality lookups</p></li>
-<li><p>24/7 uptime with zero rebuild latency</p></li>
 </ul>
 </section>
 </section>
@@ -1298,8 +1295,8 @@
 <td><p>Avoids lower()</p></td>
 </tr>
 <tr class="row-even"><td><p>Production 24/7</p></td>
-<td><p><strong>pg_trgm</strong></p></td>
-<td><p>Persistent, no rebuilds</p></td>
+<td><p><strong>Either</strong></p></td>
+<td><p>Both are persistent and crash-safe</p></td>
 </tr>
 <tr class="row-odd"><td><p>Limited memory</p></td>
 <td><p><strong>B-tree</strong> or <strong>pg_trgm</strong></p></td>

@@ -339,8 +339,9 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#disk-persistence">Disk Persistence</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#metadata-only">Metadata Only</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#rebuild-strategy">Rebuild Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#on-disk-structures">On-disk structures</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#load-strategy">Load strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#write-path">Write path</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#limitations-tradeoffs">Limitations &amp; Tradeoffs</a><ul>
@@ -788,6 +789,7 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#advanced-tuning">Advanced Tuning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#runtime-settings">Runtime Settings</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#custom-cost-parameters">Custom Cost Parameters</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#parallel-query-configuration">Parallel Query Configuration</a></li>
 </ul>
@@ -815,7 +817,7 @@
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#sorted-data-access">2. <strong>Sorted Data Access</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#space-efficiency">3. <strong>Space Efficiency</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#universal-compatibility">4. <strong>Universal Compatibility</strong></a></li>
-<li class="toctree-l4"><a class="reference internal" href="tribute.html#lock-free-concurrent-access">5. <strong>Lock-Free Concurrent Access</strong></a></li>
+<li class="toctree-l4"><a class="reference internal" href="tribute.html#concurrent-access">5. <strong>Concurrent Access</strong></a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="tribute.html#when-to-use-b-tree-instead-of-biscuit">When to Use B-tree Instead of Biscuit</a></li>
@@ -1011,7 +1013,7 @@
 <p>See the <a class="reference internal" href="installation.html"><span class="std std-doc">Installation Guide</span></a> for detailed instructions.</p>
 <p>Quick steps:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># Ubuntu/Debian</span>
-sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>postgresql-server-dev-14<span class="w"> </span>build-essential
+sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>postgresql-server-dev-16<span class="w"> </span>build-essential
 git<span class="w"> </span>clone<span class="w"> </span>https://github.com/crystallinecore/biscuit.git
 <span class="nb">cd</span><span class="w"> </span>biscuit
 make
@@ -1176,8 +1178,8 @@ sudo<span class="w"> </span>make<span class="w"> </span>install
 </div>
 </li>
 <li><p><strong>Wrong column indexed</strong></p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Check which columns are indexed</span>
-<span class="err">\</span><span class="n">d</span><span class="w"> </span><span class="n">products</span>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>-- Check which columns are indexed
+\d products
 </pre></div>
 </div>
 </li>
@@ -1447,13 +1449,17 @@ sudo<span class="w"> </span>make<span class="w"> </span>install
 <hr class="docutils" />
 <section id="crashes-or-unexpected-restarts">
 <h3>Crashes or unexpected restarts<a class="headerlink" href="#crashes-or-unexpected-restarts" title="Link to this heading"></a></h3>
+<p>Index state is WAL-logged, so after an abrupt shutdown PostgreSQL replays WAL
+on startup and the index is recovered along with the heap. Committed changes
+are present, uncommitted ones are not, and <strong>no manual rebuild is expected</strong>.</p>
+<p>If an index does appear inconsistent after a restart, that is worth reporting.</p>
 <p><strong>Possible causes</strong>:</p>
 <ol class="arabic simple">
 <li><p><strong>Memory corruption</strong>: Ensure CRoaring is properly installed</p></li>
 <li><p><strong>PostgreSQL crash</strong>: Check PostgreSQL logs</p></li>
 <li><p><strong>Extension bug</strong>: Report at GitHub Issues</p></li>
 </ol>
-<p><strong>Recovery</strong>:</p>
+<p><strong>If a rebuild is needed anyway</strong>:</p>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Drop and rebuild index</span>
 <span class="k">DROP</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="p">;</span>
 <span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">table</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">col</span><span class="p">);</span>
@@ -1535,16 +1541,17 @@ sudo<span class="w"> </span>make<span class="w"> </span>install
 <hr class="docutils" />
 <section id="can-i-use-biscuit-in-read-replicas">
 <h3>Can I use Biscuit in read replicas?<a class="headerlink" href="#can-i-use-biscuit-in-read-replicas" title="Link to this heading"></a></h3>
-<p><strong>Yes</strong>, but indexes must be built separately:</p>
+<p><strong>Yes.</strong> Create the index on the primary; it reaches physical standbys through
+the ordinary WAL stream, with no Biscuit-specific step required.</p>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- On primary</span>
 <span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="k">table</span><span class="w"> </span><span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">col</span><span class="p">);</span>
 
-<span class="c1">-- On replica (after replication catches up)</span>
-<span class="c1">-- Index is automatically created from WAL</span>
-<span class="c1">-- Or rebuild if needed:</span>
-<span class="k">REINDEX</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="p">;</span>
+<span class="c1">-- On a physical standby, once replay catches up, the index is present</span>
+<span class="c1">-- and available to index scans. No REINDEX is required.</span>
 </pre></div>
 </div>
+<p>Hot standbys serve index scans from the replicated index. Point-in-time
+recovery restores index state to the recovery target in the same way.</p>
 </section>
 <hr class="docutils" />
 <section id="how-does-biscuit-handle-null-values">
@@ -1689,7 +1696,8 @@ sudo<span class="w"> </span>rm<span class="w"> </span><span class="k">$(</span>p
 </ul>
 <p><strong>Long-term possibilities</strong>:</p>
 <ul class="simple">
-<li><p>Persistent bitmap storage options</p></li>
+<li><p>Incremental cache refresh in place of full reload on invalidation</p></li>
+<li><p>Reduced write amplification</p></li>
 <li><p>Approximate matching capabilities</p></li>
 <li><p>Additional pattern matching features</p></li>
 <li><p>Enhanced cloud optimizations</p></li>

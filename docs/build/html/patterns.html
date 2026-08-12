@@ -340,8 +340,9 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#disk-persistence">Disk Persistence</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#metadata-only">Metadata Only</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#rebuild-strategy">Rebuild Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#on-disk-structures">On-disk structures</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#load-strategy">Load strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#write-path">Write path</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#limitations-tradeoffs">Limitations &amp; Tradeoffs</a><ul>
@@ -789,6 +790,7 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#advanced-tuning">Advanced Tuning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#runtime-settings">Runtime Settings</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#custom-cost-parameters">Custom Cost Parameters</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#parallel-query-configuration">Parallel Query Configuration</a></li>
 </ul>
@@ -816,7 +818,7 @@
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#sorted-data-access">2. <strong>Sorted Data Access</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#space-efficiency">3. <strong>Space Efficiency</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#universal-compatibility">4. <strong>Universal Compatibility</strong></a></li>
-<li class="toctree-l4"><a class="reference internal" href="tribute.html#lock-free-concurrent-access">5. <strong>Lock-Free Concurrent Access</strong></a></li>
+<li class="toctree-l4"><a class="reference internal" href="tribute.html#concurrent-access">5. <strong>Concurrent Access</strong></a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="tribute.html#when-to-use-b-tree-instead-of-biscuit">When to Use B-tree Instead of Biscuit</a></li>
@@ -943,7 +945,15 @@
   <section id="pattern-syntax-guide">
 <h1>Pattern Syntax Guide<a class="headerlink" href="#pattern-syntax-guide" title="Link to this heading"></a></h1>
 <p><strong>Complete guide to LIKE pattern matching with Biscuit indexes, including optimization strategies for each pattern type.</strong></p>
-<p>ILIKE patterns follow the same execution and optimization paths as LIKE queries in Biscuit. Performance characteristics are therefore comparable; however, actual execution time is primarily influenced by result cardinality and required heap access.</p>
+<p>ILIKE patterns follow the same execution and optimization paths as LIKE
+queries in Biscuit, evaluated against a parallel set of case-insensitive
+structures rather than by rewriting the query. For anchored patterns — prefixes,
+suffixes and both-anchored forms — ILIKE performs comparably to the equivalent
+LIKE, so case-insensitive anchored search needs no <code class="docutils literal notranslate"><span class="pre">lower()</span></code> expression index.</p>
+<p>For unanchored (<code class="docutils literal notranslate"><span class="pre">%substring%</span></code>) patterns the case-insensitive path carries
+additional per-statement overhead, and ILIKE can be noticeably slower than the
+equivalent LIKE. Where an unanchored case-insensitive search is central to a
+workload, benchmark it against <code class="docutils literal notranslate"><span class="pre">pg_trgm</span></code> before committing to Biscuit.</p>
 <hr class="docutils" />
 <section id="wildcard-characters">
 <h2>Wildcard Characters<a class="headerlink" href="#wildcard-characters" title="Link to this heading"></a></h2>

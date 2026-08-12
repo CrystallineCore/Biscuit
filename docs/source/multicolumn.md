@@ -14,6 +14,7 @@ Biscuit's multi-column support allows you to create indexes spanning multiple te
 -  Intelligent query planning
 -  Support for mixed data types
 -  Early termination optimization
+-  Candidate-mask threading: each key restricts the rows the next key examines
 
 ---
 
@@ -355,8 +356,8 @@ WHERE name LIKE '%laptop%'
 ```
 
 Look for:
-- **Index Scan using Biscuit**: ✅ Good
-- **Seq Scan**:  Index not being used
+- **Bitmap Index Scan on a Biscuit index**: ✅ Good
+- **Seq Scan**:  Index not being used — for broad patterns this may still be the better plan
 - **Planning Time**: Should be <1ms
 - **Execution Time**: Should be <20ms for typical queries
 

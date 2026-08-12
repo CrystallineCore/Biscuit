@@ -339,8 +339,9 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#disk-persistence">Disk Persistence</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#metadata-only">Metadata Only</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#rebuild-strategy">Rebuild Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#on-disk-structures">On-disk structures</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#load-strategy">Load strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#write-path">Write path</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#limitations-tradeoffs">Limitations &amp; Tradeoffs</a><ul>
@@ -788,6 +789,7 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#advanced-tuning">Advanced Tuning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#runtime-settings">Runtime Settings</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#custom-cost-parameters">Custom Cost Parameters</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#parallel-query-configuration">Parallel Query Configuration</a></li>
 </ul>
@@ -815,7 +817,7 @@
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#sorted-data-access">2. <strong>Sorted Data Access</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#space-efficiency">3. <strong>Space Efficiency</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#universal-compatibility">4. <strong>Universal Compatibility</strong></a></li>
-<li class="toctree-l4"><a class="reference internal" href="tribute.html#lock-free-concurrent-access">5. <strong>Lock-Free Concurrent Access</strong></a></li>
+<li class="toctree-l4"><a class="reference internal" href="tribute.html#concurrent-access">5. <strong>Concurrent Access</strong></a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="tribute.html#when-to-use-b-tree-instead-of-biscuit">When to Use B-tree Instead of Biscuit</a></li>
@@ -1134,28 +1136,58 @@
 <li><p><strong>Multi-Column Support</strong>: Query across multiple columns simultaneously with intelligent predicate reordering</p></li>
 <li><p><strong>Aggregate Optimization</strong>: Special optimizations for <code class="docutils literal notranslate"><span class="pre">COUNT(*)</span></code> and <code class="docutils literal notranslate"><span class="pre">EXISTS</span></code> queries</p></li>
 <li><p><strong>Full CRUD Support</strong>: INSERT, UPDATE, DELETE operations with automatic index maintenance</p></li>
+<li><p><strong>Crash-Safe and Replicated</strong>: WAL-logged storage, point-in-time recovery, and physical streaming replication</p></li>
 <li><p><strong>Smart Query Planning</strong>: Automatic reordering of predicates based on selectivity analysis</p></li>
 <li><p><strong>Memory Efficient</strong>: Uses Roaring Bitmaps for compact in-memory representation</p></li>
 </ul>
+<blockquote>
+<div><p>Biscuit suits <strong>read-mostly, analytical</strong> workloads: load data, build the
+index, then query. Writes against a live index generate considerably more WAL
+than the heap writes alone, and each backend holds its own cached copy of the
+index, so plan for connection-pool size. See
+<a class="reference internal" href="performance.html"><span class="std std-doc">Performance Tuning</span></a>.</p>
+</div></blockquote>
 </section>
-<section id="version-2-2-2">
-<h2>Version 2.2.2<a class="headerlink" href="#version-2-2-2" title="Link to this heading"></a></h2>
-<section id="performance-improvements">
-<h3>⚡ Performance Improvements<a class="headerlink" href="#performance-improvements" title="Link to this heading"></a></h3>
-<ul>
-<li><p><strong>Refined TID sorting implementation</strong></p>
-<p>Replaced the previous hybrid dense/sparse block radix sorter with a uniform 4-pass radix sort covering the full 32-bit BlockNumber.</p>
-<p>Sorting is now performed using four 8-bit passes, eliminating assumptions about block number density or range.</p>
-</li>
+<section id="whats-new-3-0-0">
+<h2>What’s New — 3.0.0<a class="headerlink" href="#whats-new-3-0-0" title="Link to this heading"></a></h2>
+<section id="durability">
+<h3>Durability<a class="headerlink" href="#durability" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p><strong>WAL-logged, crash-safe storage.</strong> All index state lives in the index
+relation’s own pages and is WAL-logged, replacing the earlier external-file
+snapshot mechanism. The index takes part in crash recovery, point-in-time
+recovery and physical streaming replication, including index scans served
+from a hot standby.</p></li>
+<li><p><strong>Cross-backend cache coherency.</strong> Cached copies are validated against the
+metapage generation and reloaded when stale, so a backend reliably observes
+other backends’ committed writes through the index.</p></li>
 </ul>
 </section>
-<section id="correctness-stability">
-<h3>🛡️ Correctness &amp; Stability<a class="headerlink" href="#correctness-stability" title="Link to this heading"></a></h3>
-<ul>
-<li><p><strong>Aligned TID comparison with PostgreSQL core</strong></p>
-<p>Replaced custom TID comparison logic with PostgreSQL’s native comparison routine to ensure consistent ordering behavior.</p>
-</li>
+<section id="query-execution">
+<h3>Query Execution<a class="headerlink" href="#query-execution" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p><strong>Candidate-mask threading across scan keys.</strong> Conjunctive queries evaluate
+the most selective key first and restrict later keys to the surviving rows,
+rather than evaluating each key independently.</p></li>
+<li><p><strong>Length-predicate support.</strong> Patterns made up only of <code class="docutils literal notranslate"><span class="pre">_</span></code> wildcards are
+recognised as length predicates and answered directly from the length
+bitmaps.</p></li>
+<li><p><strong>Rewritten cost model.</strong> Costs derive from pattern shape, column statistics
+and relation size, so the planner can weigh Biscuit against <code class="docutils literal notranslate"><span class="pre">pg_trgm</span></code> and a
+sequential scan.</p></li>
 </ul>
+</section>
+<section id="index-definition">
+<h3>Index Definition<a class="headerlink" href="#index-definition" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">biscuit_like_ops</span></code> / <code class="docutils literal notranslate"><span class="pre">biscuit_ilike_ops</span></code> operator classes</strong>, for columns
+that need only one case mode, avoiding the build and maintenance cost of the
+structure set they will never be queried with.</p></li>
+</ul>
+<blockquote>
+<div><p><strong>Upgrading:</strong> this is a breaking on-disk format change. Indexes built under
+2.x must be <code class="docutils literal notranslate"><span class="pre">REINDEX</span></code>ed; there is no automatic migration.</p>
+</div></blockquote>
 </section>
 </section>
 <section id="quick-start">
@@ -1202,6 +1234,7 @@
 <li><p>Full-text search (use <code class="docutils literal notranslate"><span class="pre">tsvector</span></code> instead)</p></li>
 <li><p>Exact equality matches (B-tree is sufficient)</p></li>
 <li><p>Low-selectivity patterns (single <code class="docutils literal notranslate"><span class="pre">%</span></code>)</p></li>
+<li><p>Tables under continuous write load, or deployments with large connection pools</p></li>
 </ul>
 </section>
 <section id="system-requirements">

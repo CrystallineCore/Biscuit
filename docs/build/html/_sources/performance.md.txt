@@ -31,7 +31,7 @@ Biscuit includes 12 built-in optimizations:
 6. **TID sorting** - Sequential I/O for large result sets
 7. **Batch TID insertion** - Efficient bitmap scan support
 8. **Direct bitmap iteration** - No intermediate arrays
-9. **Parallel bitmap scan** - Multi-worker support
+9. **Parallel bitmap heap scan** - Multi-worker heap access above a serial index scan
 10. **Batch cleanup** - Tombstone removal at thresholds
 11. **Skip sorting for aggregates** - COUNT(*) doesn't need order
 12. **LIMIT-aware collection** - Early termination for small limits
@@ -303,10 +303,11 @@ Tombstones accumulate from DELETEs:
 -- Check tombstone count
 SELECT biscuit_index_stats('idx_products_name'::regclass);
 
--- Trigger cleanup (automatic at 1000 tombstones)
--- Or force cleanup via:
-VACUUM FULL products;
-REINDEX INDEX idx_products_name;
+-- VACUUM performs a full pending-list drain pass
+VACUUM products;
+
+-- VACUUM does not shrink the index; use REINDEX to reclaim space
+REINDEX INDEX CONCURRENTLY idx_products_name;
 ```
 
 ---
@@ -365,7 +366,7 @@ Biscuit is CPU-bound for:
 
 ### Create Benchmark Suite
 
-```sql
+```text
 -- Create test table
 CREATE TABLE bench_products AS
 SELECT 
@@ -413,7 +414,7 @@ EXPLAIN SELECT * FROM products WHERE name LIKE '%laptop%';
 
 **Solutions**:
 
-```sql
+```text
 -- 1. Update statistics
 ANALYZE products;
 
@@ -500,6 +501,25 @@ USING biscuit (name);
 
 ## Advanced Tuning
 
+### Runtime Settings
+
+Biscuit registers two settings:
+
+```sql
+-- Pending-list drain threshold, in slots (superuser).
+-- Raising it defers compaction and reduces write-time work; lowering it keeps
+-- pending chains shorter, at the cost of more frequent compaction.
+SHOW biscuit.delta_compaction_slots;
+SET biscuit.delta_compaction_slots = 20000;
+
+-- Per-session scan tracing, for diagnostics only.
+SET biscuit.diag_scan_trace = on;
+```
+
+Leave `biscuit.diag_scan_trace` off in production; it is a debugging aid.
+
+---
+
 ### Custom Cost Parameters
 
 ```sql
@@ -517,7 +537,7 @@ SET cpu_index_tuple_cost = 0.001;
 ### Parallel Query Configuration
 
 ```sql
--- Enable parallel bitmap scans
+-- Enable parallel bitmap heap scans
 SET max_parallel_workers_per_gather = 4;
 SET parallel_tuple_cost = 0.01;
 SET parallel_setup_cost = 100;
@@ -527,6 +547,11 @@ EXPLAIN (ANALYZE, VERBOSE)
 SELECT COUNT(*) FROM products WHERE name LIKE '%laptop%';
 -- Look for "Parallel Bitmap Heap Scan"
 ```
+
+The bitmap index scan itself runs serially and feeds a Parallel Bitmap Heap
+Scan above it; heap access and aggregation are parallelised, the index lookup
+is not. For very broad patterns the planner may prefer a parallel sequential
+scan outright, which is often the better plan.
 
 ---
 

@@ -38,24 +38,52 @@ Biscuit is a specialized PostgreSQL index access method designed to dramatically
 - **Multi-Column Support**: Query across multiple columns simultaneously with intelligent predicate reordering
 - **Aggregate Optimization**: Special optimizations for `COUNT(*)` and `EXISTS` queries
 - **Full CRUD Support**: INSERT, UPDATE, DELETE operations with automatic index maintenance
+- **Crash-Safe and Replicated**: WAL-logged storage, point-in-time recovery, and physical streaming replication
 - **Smart Query Planning**: Automatic reordering of predicates based on selectivity analysis
 - **Memory Efficient**: Uses Roaring Bitmaps for compact in-memory representation
 
-## Version 2.2.2
+> Biscuit suits **read-mostly, analytical** workloads: load data, build the
+> index, then query. Writes against a live index generate considerably more WAL
+> than the heap writes alone, and each backend holds its own cached copy of the
+> index, so plan for connection-pool size. See
+> [Performance Tuning](performance.md).
 
-### ⚡ Performance Improvements
+## What's New — 3.0.0
 
-* **Refined TID sorting implementation**
+### Durability
 
-  Replaced the previous hybrid dense/sparse block radix sorter with a uniform 4-pass radix sort covering the full 32-bit BlockNumber.
+* **WAL-logged, crash-safe storage.** All index state lives in the index
+  relation's own pages and is WAL-logged, replacing the earlier external-file
+  snapshot mechanism. The index takes part in crash recovery, point-in-time
+  recovery and physical streaming replication, including index scans served
+  from a hot standby.
 
-  Sorting is now performed using four 8-bit passes, eliminating assumptions about block number density or range.
+* **Cross-backend cache coherency.** Cached copies are validated against the
+  metapage generation and reloaded when stale, so a backend reliably observes
+  other backends' committed writes through the index.
 
-### 🛡️ Correctness & Stability
+### Query Execution
 
-* **Aligned TID comparison with PostgreSQL core**
+* **Candidate-mask threading across scan keys.** Conjunctive queries evaluate
+  the most selective key first and restrict later keys to the surviving rows,
+  rather than evaluating each key independently.
 
-  Replaced custom TID comparison logic with PostgreSQL’s native comparison routine to ensure consistent ordering behavior.
+* **Length-predicate support.** Patterns made up only of `_` wildcards are
+  recognised as length predicates and answered directly from the length
+  bitmaps.
+
+* **Rewritten cost model.** Costs derive from pattern shape, column statistics
+  and relation size, so the planner can weigh Biscuit against `pg_trgm` and a
+  sequential scan.
+
+### Index Definition
+
+* **`biscuit_like_ops` / `biscuit_ilike_ops` operator classes**, for columns
+  that need only one case mode, avoiding the build and maintenance cost of the
+  structure set they will never be queried with.
+
+> **Upgrading:** this is a breaking on-disk format change. Indexes built under
+> 2.x must be `REINDEX`ed; there is no automatic migration.
 
 ## Quick Start
 
@@ -97,6 +125,7 @@ WHERE name LIKE '%laptop%';
 - Full-text search (use `tsvector` instead)
 - Exact equality matches (B-tree is sufficient)
 - Low-selectivity patterns (single `%`)
+- Tables under continuous write load, or deployments with large connection pools
 
 ## System Requirements
 

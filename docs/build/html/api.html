@@ -340,8 +340,9 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#disk-persistence">Disk Persistence</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#metadata-only">Metadata Only</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#rebuild-strategy">Rebuild Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#on-disk-structures">On-disk structures</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#load-strategy">Load strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#write-path">Write path</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#limitations-tradeoffs">Limitations &amp; Tradeoffs</a><ul>
@@ -789,6 +790,7 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#advanced-tuning">Advanced Tuning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#runtime-settings">Runtime Settings</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#custom-cost-parameters">Custom Cost Parameters</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#parallel-query-configuration">Parallel Query Configuration</a></li>
 </ul>
@@ -816,7 +818,7 @@
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#sorted-data-access">2. <strong>Sorted Data Access</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#space-efficiency">3. <strong>Space Efficiency</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#universal-compatibility">4. <strong>Universal Compatibility</strong></a></li>
-<li class="toctree-l4"><a class="reference internal" href="tribute.html#lock-free-concurrent-access">5. <strong>Lock-Free Concurrent Access</strong></a></li>
+<li class="toctree-l4"><a class="reference internal" href="tribute.html#concurrent-access">5. <strong>Concurrent Access</strong></a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="tribute.html#when-to-use-b-tree-instead-of-biscuit">When to Use B-tree Instead of Biscuit</a></li>
@@ -1082,7 +1084,7 @@
 <h3>REINDEX<a class="headerlink" href="#reindex" title="Link to this heading"></a></h3>
 <p>Rebuilds a Biscuit index.</p>
 <p><strong>Syntax</strong>:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">REINDEX</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="p">(</span><span class="w"> </span><span class="k">option</span><span class="w"> </span><span class="p">[,</span><span class="w"> </span><span class="p">...]</span><span class="w"> </span><span class="p">)</span><span class="w"> </span><span class="p">]</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="k">SCHEMA</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="k">DATABASE</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="k">SYSTEM</span><span class="w"> </span><span class="err">}</span><span class="w"> </span><span class="n">name</span><span class="p">;</span>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>REINDEX [ ( option [, ...] ) ] { INDEX | TABLE | SCHEMA | DATABASE | SYSTEM } name;
 </pre></div>
 </div>
 <p><strong>Example</strong>:</p>
@@ -1164,7 +1166,7 @@
 <hr class="docutils" />
 <section id="ilike-operator">
 <h3>ILIKE Operator<a class="headerlink" href="#ilike-operator" title="Link to this heading"></a></h3>
-<p>Case-insensitive pattern matching is supported from versions &gt;= 2.1.0</p>
+<p>Case-insensitive pattern matching is supported by the default <code class="docutils literal notranslate"><span class="pre">biscuit_ops</span></code> operator class, and by <code class="docutils literal notranslate"><span class="pre">biscuit_ilike_ops</span></code> for ILIKE-only columns</p>
 <p><strong>Workaround</strong>:</p>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Create index</span>
 <span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products</span>
@@ -1178,7 +1180,7 @@
 <hr class="docutils" />
 <section id="not-ilike-operator">
 <h3>NOT ILIKE Operator<a class="headerlink" href="#not-ilike-operator" title="Link to this heading"></a></h3>
-<p>Case-insensitive pattern matching is supported from versions &gt;= 2.1.0</p>
+<p>Case-insensitive pattern matching is supported by the default <code class="docutils literal notranslate"><span class="pre">biscuit_ops</span></code> operator class, and by <code class="docutils literal notranslate"><span class="pre">biscuit_ilike_ops</span></code> for ILIKE-only columns</p>
 <p><strong>Workaround</strong>:</p>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Create index</span>
 <span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products</span>
@@ -1463,13 +1465,13 @@ make<span class="w"> </span>clean<span class="w"> </span><span class="o">&amp;&a
 </ul>
 <p><strong>Returns</strong>: Multi-line text report with statistics</p>
 <p><strong>Example</strong>:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Get statistics for an index</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_index_stats</span><span class="p">(</span><span class="s1">&#39;idx_products_name&#39;</span><span class="p">::</span><span class="n">regclass</span><span class="p">);</span>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>-- Get statistics for an index
+SELECT biscuit_index_stats(&#39;idx_products_name&#39;::regclass);
 
-<span class="c1">-- With formatted output</span>
-<span class="err">\</span><span class="n">x</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_index_stats</span><span class="p">(</span><span class="s1">&#39;idx_products_name&#39;</span><span class="p">::</span><span class="n">regclass</span><span class="p">);</span>
-<span class="err">\</span><span class="n">x</span>
+-- With formatted output
+\x
+SELECT biscuit_index_stats(&#39;idx_products_name&#39;::regclass);
+\x
 </pre></div>
 </div>
 <p><strong>Output Format</strong>:</p>
@@ -1752,23 +1754,23 @@ Formatted memory usage (bytes, KB, MB, or GB).</p>
 <section id="session-parameters">
 <h3>Session Parameters<a class="headerlink" href="#session-parameters" title="Link to this heading"></a></h3>
 <p>Parameters you can set per connection:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Increase work memory for this session</span>
-<span class="k">SET</span><span class="w"> </span><span class="n">work_mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;512MB&#39;</span><span class="p">;</span>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>-- Increase work memory for this session
+SET work_mem = &#39;512MB&#39;;
 
-<span class="c1">-- Enable query timing</span>
-<span class="err">\</span><span class="n">timing</span><span class="w"> </span><span class="k">on</span>
+-- Enable query timing
+\timing on
 
-<span class="c1">-- Show query plans</span>
-<span class="k">SET</span><span class="w"> </span><span class="n">client_min_messages</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">INFO</span><span class="p">;</span>
+-- Show query plans
+SET client_min_messages = INFO;
 
-<span class="c1">-- Force index usage (testing)</span>
-<span class="k">SET</span><span class="w"> </span><span class="n">enable_seqscan</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">off</span><span class="p">;</span>
+-- Force index usage (testing)
+SET enable_seqscan = off;
 
-<span class="c1">-- Enable parallel queries</span>
-<span class="k">SET</span><span class="w"> </span><span class="n">max_parallel_workers_per_gather</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span>
+-- Enable parallel queries
+SET max_parallel_workers_per_gather = 4;
 
-<span class="c1">-- Reset all to defaults</span>
-<span class="k">RESET</span><span class="w"> </span><span class="k">ALL</span><span class="p">;</span>
+-- Reset all to defaults
+RESET ALL;
 </pre></div>
 </div>
 </section>
@@ -1842,7 +1844,9 @@ Formatted memory usage (bytes, KB, MB, or GB).</p>
 <hr class="docutils" />
 <section id="error-could-not-open-relation-with-oid">
 <h3>ERROR: could not open relation with OID<a class="headerlink" href="#error-could-not-open-relation-with-oid" title="Link to this heading"></a></h3>
-<p><strong>Cause</strong>: Index cache corruption after crash</p>
+<p><strong>Cause</strong>: A stale reference to a dropped or rebuilt index. Index state itself
+is WAL-logged and recovered by ordinary crash recovery, so this is not expected
+as a consequence of an unclean shutdown.</p>
 <p><strong>Solution</strong>:</p>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="k">REINDEX</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_name</span><span class="p">;</span>
 </pre></div>

@@ -2,7 +2,16 @@
 
 **Complete guide to LIKE pattern matching with Biscuit indexes, including optimization strategies for each pattern type.**
 
-ILIKE patterns follow the same execution and optimization paths as LIKE queries in Biscuit. Performance characteristics are therefore comparable; however, actual execution time is primarily influenced by result cardinality and required heap access.
+ILIKE patterns follow the same execution and optimization paths as LIKE
+queries in Biscuit, evaluated against a parallel set of case-insensitive
+structures rather than by rewriting the query. For anchored patterns — prefixes,
+suffixes and both-anchored forms — ILIKE performs comparably to the equivalent
+LIKE, so case-insensitive anchored search needs no `lower()` expression index.
+
+For unanchored (`%substring%`) patterns the case-insensitive path carries
+additional per-statement overhead, and ILIKE can be noticeably slower than the
+equivalent LIKE. Where an unanchored case-insensitive search is central to a
+workload, benchmark it against `pg_trgm` before committing to Biscuit.
 
 ---
 

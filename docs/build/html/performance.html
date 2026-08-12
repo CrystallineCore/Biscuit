@@ -340,8 +340,9 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#disk-persistence">Disk Persistence</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#metadata-only">Metadata Only</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#rebuild-strategy">Rebuild Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#on-disk-structures">On-disk structures</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#load-strategy">Load strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#write-path">Write path</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#limitations-tradeoffs">Limitations &amp; Tradeoffs</a><ul>
@@ -789,6 +790,7 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="#advanced-tuning">Advanced Tuning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#runtime-settings">Runtime Settings</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#custom-cost-parameters">Custom Cost Parameters</a></li>
 <li class="toctree-l3"><a class="reference internal" href="#parallel-query-configuration">Parallel Query Configuration</a></li>
 </ul>
@@ -816,7 +818,7 @@
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#sorted-data-access">2. <strong>Sorted Data Access</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#space-efficiency">3. <strong>Space Efficiency</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#universal-compatibility">4. <strong>Universal Compatibility</strong></a></li>
-<li class="toctree-l4"><a class="reference internal" href="tribute.html#lock-free-concurrent-access">5. <strong>Lock-Free Concurrent Access</strong></a></li>
+<li class="toctree-l4"><a class="reference internal" href="tribute.html#concurrent-access">5. <strong>Concurrent Access</strong></a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="tribute.html#when-to-use-b-tree-instead-of-biscuit">When to Use B-tree Instead of Biscuit</a></li>
@@ -970,7 +972,7 @@
 <li><p><strong>TID sorting</strong> - Sequential I/O for large result sets</p></li>
 <li><p><strong>Batch TID insertion</strong> - Efficient bitmap scan support</p></li>
 <li><p><strong>Direct bitmap iteration</strong> - No intermediate arrays</p></li>
-<li><p><strong>Parallel bitmap scan</strong> - Multi-worker support</p></li>
+<li><p><strong>Parallel bitmap heap scan</strong> - Multi-worker heap access above a serial index scan</p></li>
 <li><p><strong>Batch cleanup</strong> - Tombstone removal at thresholds</p></li>
 <li><p><strong>Skip sorting for aggregates</strong> - COUNT(*) doesn’t need order</p></li>
 <li><p><strong>LIMIT-aware collection</strong> - Early termination for small limits</p></li>
@@ -1222,10 +1224,11 @@ CRUD Statistics:
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Check tombstone count</span>
 <span class="k">SELECT</span><span class="w"> </span><span class="n">biscuit_index_stats</span><span class="p">(</span><span class="s1">&#39;idx_products_name&#39;</span><span class="p">::</span><span class="n">regclass</span><span class="p">);</span>
 
-<span class="c1">-- Trigger cleanup (automatic at 1000 tombstones)</span>
-<span class="c1">-- Or force cleanup via:</span>
-<span class="k">VACUUM</span><span class="w"> </span><span class="k">FULL</span><span class="w"> </span><span class="n">products</span><span class="p">;</span>
-<span class="k">REINDEX</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_products_name</span><span class="p">;</span>
+<span class="c1">-- VACUUM performs a full pending-list drain pass</span>
+<span class="k">VACUUM</span><span class="w"> </span><span class="n">products</span><span class="p">;</span>
+
+<span class="c1">-- VACUUM does not shrink the index; use REINDEX to reclaim space</span>
+<span class="k">REINDEX</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">CONCURRENTLY</span><span class="w"> </span><span class="n">idx_products_name</span><span class="p">;</span>
 </pre></div>
 </div>
 </section>
@@ -1288,37 +1291,37 @@ CRUD Statistics:
 <h2>Benchmarking Your Setup<a class="headerlink" href="#benchmarking-your-setup" title="Link to this heading"></a></h2>
 <section id="create-benchmark-suite">
 <h3>Create Benchmark Suite<a class="headerlink" href="#create-benchmark-suite" title="Link to this heading"></a></h3>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Create test table</span>
-<span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">bench_products</span><span class="w"> </span><span class="k">AS</span>
-<span class="k">SELECT</span><span class="w"> </span>
-<span class="w">    </span><span class="n">i</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">id</span><span class="p">,</span>
-<span class="w">    </span><span class="s1">&#39;Product &#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">name</span><span class="p">,</span>
-<span class="w">    </span><span class="s1">&#39;Category &#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="p">(</span><span class="n">i</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">category</span><span class="p">,</span>
-<span class="w">    </span><span class="s1">&#39;SKU-&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">LPAD</span><span class="p">(</span><span class="n">i</span><span class="p">::</span><span class="nb">TEXT</span><span class="p">,</span><span class="w"> </span><span class="mi">8</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;0&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">sku</span>
-<span class="k">FROM</span><span class="w"> </span><span class="n">generate_series</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">100000</span><span class="p">)</span><span class="w"> </span><span class="n">i</span><span class="p">;</span>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>-- Create test table
+CREATE TABLE bench_products AS
+SELECT 
+    i as id,
+    &#39;Product &#39; || i as name,
+    &#39;Category &#39; || (i % 10) as category,
+    &#39;SKU-&#39; || LPAD(i::TEXT, 8, &#39;0&#39;) as sku
+FROM generate_series(1, 100000) i;
 
-<span class="c1">-- Create index</span>
-<span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="n">idx_bench</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">bench_products</span><span class="w"> </span>
-<span class="k">USING</span><span class="w"> </span><span class="n">biscuit</span><span class="w"> </span><span class="p">(</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">category</span><span class="p">,</span><span class="w"> </span><span class="n">sku</span><span class="p">);</span>
+-- Create index
+CREATE INDEX idx_bench ON bench_products 
+USING biscuit (name, category, sku);
 
-<span class="c1">-- Run benchmark</span>
-<span class="err">\</span><span class="n">timing</span><span class="w"> </span><span class="k">on</span>
+-- Run benchmark
+\timing on
 
-<span class="c1">-- Test 1: Prefix query</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">bench_products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Product 1%&#39;</span><span class="p">;</span>
+-- Test 1: Prefix query
+SELECT COUNT(*) FROM bench_products WHERE name LIKE &#39;Product 1%&#39;;
 
-<span class="c1">-- Test 2: Substring query</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">bench_products</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%Product 5%&#39;</span><span class="p">;</span>
+-- Test 2: Substring query
+SELECT COUNT(*) FROM bench_products WHERE name LIKE &#39;%Product 5%&#39;;
 
-<span class="c1">-- Test 3: Multi-column query</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">bench_products</span><span class="w"> </span>
-<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%Product%&#39;</span>
-<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">category</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;Category 5%&#39;</span>
-<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">sku</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;SKU-00005%&#39;</span><span class="p">;</span>
+-- Test 3: Multi-column query
+SELECT COUNT(*) FROM bench_products 
+WHERE name LIKE &#39;%Product%&#39;
+  AND category LIKE &#39;Category 5%&#39;
+  AND sku LIKE &#39;SKU-00005%&#39;;
 
-<span class="c1">-- Test 4: Complex pattern</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">bench_products</span><span class="w"> </span>
-<span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%Product%1%0%&#39;</span><span class="p">;</span>
+-- Test 4: Complex pattern
+SELECT COUNT(*) FROM bench_products 
+WHERE name LIKE &#39;%Product%1%0%&#39;;
 </pre></div>
 </div>
 </section>
@@ -1334,17 +1337,17 @@ CRUD Statistics:
 </pre></div>
 </div>
 <p><strong>Solutions</strong>:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- 1. Update statistics</span>
-<span class="k">ANALYZE</span><span class="w"> </span><span class="n">products</span><span class="p">;</span>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>-- 1. Update statistics
+ANALYZE products;
 
-<span class="c1">-- 2. Check if index exists</span>
-<span class="err">\</span><span class="n">d</span><span class="w"> </span><span class="n">products</span>
+-- 2. Check if index exists
+\d products
 
-<span class="c1">-- 3. Verify extension loaded</span>
-<span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">pg_extension</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">extname</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;biscuit&#39;</span><span class="p">;</span>
+-- 3. Verify extension loaded
+SELECT * FROM pg_extension WHERE extname = &#39;biscuit&#39;;
 
-<span class="c1">-- 4. Force index usage (testing only)</span>
-<span class="k">SET</span><span class="w"> </span><span class="n">enable_seqscan</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">off</span><span class="p">;</span>
+-- 4. Force index usage (testing only)
+SET enable_seqscan = off;
 </pre></div>
 </div>
 </section>
@@ -1413,6 +1416,22 @@ CRUD Statistics:
 <hr class="docutils" />
 <section id="advanced-tuning">
 <h2>Advanced Tuning<a class="headerlink" href="#advanced-tuning" title="Link to this heading"></a></h2>
+<section id="runtime-settings">
+<h3>Runtime Settings<a class="headerlink" href="#runtime-settings" title="Link to this heading"></a></h3>
+<p>Biscuit registers two settings:</p>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Pending-list drain threshold, in slots (superuser).</span>
+<span class="c1">-- Raising it defers compaction and reduces write-time work; lowering it keeps</span>
+<span class="c1">-- pending chains shorter, at the cost of more frequent compaction.</span>
+<span class="k">SHOW</span><span class="w"> </span><span class="n">biscuit</span><span class="p">.</span><span class="n">delta_compaction_slots</span><span class="p">;</span>
+<span class="k">SET</span><span class="w"> </span><span class="n">biscuit</span><span class="p">.</span><span class="n">delta_compaction_slots</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">20000</span><span class="p">;</span>
+
+<span class="c1">-- Per-session scan tracing, for diagnostics only.</span>
+<span class="k">SET</span><span class="w"> </span><span class="n">biscuit</span><span class="p">.</span><span class="n">diag_scan_trace</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">on</span><span class="p">;</span>
+</pre></div>
+</div>
+<p>Leave <code class="docutils literal notranslate"><span class="pre">biscuit.diag_scan_trace</span></code> off in production; it is a debugging aid.</p>
+</section>
+<hr class="docutils" />
 <section id="custom-cost-parameters">
 <h3>Custom Cost Parameters<a class="headerlink" href="#custom-cost-parameters" title="Link to this heading"></a></h3>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Fine-tune Biscuit&#39;s cost estimation</span>
@@ -1428,7 +1447,7 @@ CRUD Statistics:
 <hr class="docutils" />
 <section id="parallel-query-configuration">
 <h3>Parallel Query Configuration<a class="headerlink" href="#parallel-query-configuration" title="Link to this heading"></a></h3>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Enable parallel bitmap scans</span>
+<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Enable parallel bitmap heap scans</span>
 <span class="k">SET</span><span class="w"> </span><span class="n">max_parallel_workers_per_gather</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span>
 <span class="k">SET</span><span class="w"> </span><span class="n">parallel_tuple_cost</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">.</span><span class="mi">01</span><span class="p">;</span>
 <span class="k">SET</span><span class="w"> </span><span class="n">parallel_setup_cost</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="p">;</span>
@@ -1439,6 +1458,10 @@ CRUD Statistics:
 <span class="c1">-- Look for &quot;Parallel Bitmap Heap Scan&quot;</span>
 </pre></div>
 </div>
+<p>The bitmap index scan itself runs serially and feeds a Parallel Bitmap Heap
+Scan above it; heap access and aggregation are parallelised, the index lookup
+is not. For very broad patterns the planner may prefer a parallel sequential
+scan outright, which is often the better plan.</p>
 </section>
 </section>
 <hr class="docutils" />

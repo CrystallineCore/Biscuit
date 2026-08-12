@@ -340,8 +340,9 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#disk-persistence">Disk Persistence</a><ul>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#metadata-only">Metadata Only</a></li>
-<li class="toctree-l3"><a class="reference internal" href="architecture.html#rebuild-strategy">Rebuild Strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#on-disk-structures">On-disk structures</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#load-strategy">Load strategy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture.html#write-path">Write path</a></li>
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="architecture.html#limitations-tradeoffs">Limitations &amp; Tradeoffs</a><ul>
@@ -789,6 +790,7 @@
 </ul>
 </li>
 <li class="toctree-l2"><a class="reference internal" href="performance.html#advanced-tuning">Advanced Tuning</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="performance.html#runtime-settings">Runtime Settings</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#custom-cost-parameters">Custom Cost Parameters</a></li>
 <li class="toctree-l3"><a class="reference internal" href="performance.html#parallel-query-configuration">Parallel Query Configuration</a></li>
 </ul>
@@ -816,7 +818,7 @@
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#sorted-data-access">2. <strong>Sorted Data Access</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#space-efficiency">3. <strong>Space Efficiency</strong></a></li>
 <li class="toctree-l4"><a class="reference internal" href="tribute.html#universal-compatibility">4. <strong>Universal Compatibility</strong></a></li>
-<li class="toctree-l4"><a class="reference internal" href="tribute.html#lock-free-concurrent-access">5. <strong>Lock-Free Concurrent Access</strong></a></li>
+<li class="toctree-l4"><a class="reference internal" href="tribute.html#concurrent-access">5. <strong>Concurrent Access</strong></a></li>
 </ul>
 </li>
 <li class="toctree-l3"><a class="reference internal" href="tribute.html#when-to-use-b-tree-instead-of-biscuit">When to Use B-tree Instead of Biscuit</a></li>
@@ -971,7 +973,7 @@
 <h4>Step 1: Install Build Dependencies<a class="headerlink" href="#step-1-install-build-dependencies" title="Link to this heading"></a></h4>
 <p><strong>Ubuntu/Debian:</strong></p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sudo<span class="w"> </span>apt-get<span class="w"> </span>update
-sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>postgresql-server-dev-14<span class="w"> </span>build-essential<span class="w"> </span>git
+sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span>postgresql-server-dev-16<span class="w"> </span>build-essential<span class="w"> </span>git
 </pre></div>
 </div>
 <p><strong>RHEL/CentOS/Fedora:</strong></p>
@@ -1061,7 +1063,7 @@ sudo<span class="w"> </span>make<span class="w"> </span>install
 <p>Expected output:</p>
 <div class="highlight-default notranslate"><div class="highlight"><pre><span></span>   <span class="n">name</span>   <span class="o">|</span> <span class="n">default_version</span> <span class="o">|</span> <span class="n">installed_version</span> <span class="o">|</span> <span class="n">comment</span>
 <span class="o">----------+-----------------+-------------------+---------</span>
- <span class="n">biscuit</span>  <span class="o">|</span> <span class="mf">1.0</span>             <span class="o">|</span> <span class="mf">1.0</span>               <span class="o">|</span> <span class="n">Bitmap</span><span class="o">-</span><span class="n">based</span><span class="o">...</span>
+ <span class="n">biscuit</span>  <span class="o">|</span> <span class="o">&lt;</span><span class="n">version</span><span class="o">&gt;</span>       <span class="o">|</span> <span class="o">&lt;</span><span class="n">version</span><span class="o">&gt;</span>         <span class="o">|</span> <span class="n">Bitmap</span><span class="o">-</span><span class="n">based</span><span class="o">...</span>
 </pre></div>
 </div>
 </section>
@@ -1070,7 +1072,10 @@ sudo<span class="w"> </span>make<span class="w"> </span>install
 <h2>Post-Installation Configuration<a class="headerlink" href="#post-installation-configuration" title="Link to this heading"></a></h2>
 <section id="set-appropriate-memory-limits">
 <h3>Set Appropriate Memory Limits<a class="headerlink" href="#set-appropriate-memory-limits" title="Link to this heading"></a></h3>
-<p>Biscuit stores indexes in memory. Adjust PostgreSQL memory settings:</p>
+<p>Index state is stored durably on disk, but each backend also loads a copy into
+session-local memory on first use. Total memory therefore scales with the
+number of concurrent connections using the index. Adjust PostgreSQL memory
+settings and size connection pools accordingly:</p>
 <div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- In postgresql.conf</span>
 <span class="n">shared_buffers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="n">GB</span><span class="w">           </span><span class="o">#</span><span class="w"> </span><span class="n">Increase</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="k">large</span><span class="w"> </span><span class="n">indexes</span>
 <span class="n">work_mem</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">256</span><span class="n">MB</span><span class="w">               </span><span class="o">#</span><span class="w"> </span><span class="k">For</span><span class="w"> </span><span class="n">sorting</span><span class="w"> </span><span class="n">operations</span>
@@ -1081,11 +1086,11 @@ sudo<span class="w"> </span>make<span class="w"> </span>install
 <section id="enable-query-logging-optional">
 <h3>Enable Query Logging (Optional)<a class="headerlink" href="#enable-query-logging-optional" title="Link to this heading"></a></h3>
 <p>Monitor Biscuit performance:</p>
-<div class="highlight-sql notranslate"><div class="highlight"><pre><span></span><span class="c1">-- Enable timing</span>
-<span class="err">\</span><span class="n">timing</span><span class="w"> </span><span class="k">on</span>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>-- Enable timing
+\timing on
 
-<span class="c1">-- Log slow queries</span>
-<span class="k">SET</span><span class="w"> </span><span class="n">log_min_duration_statement</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="p">;</span><span class="w">  </span><span class="c1">-- Log queries &gt; 100ms</span>
+-- Log slow queries
+SET log_min_duration_statement = 100;  -- Log queries &gt; 100ms
 </pre></div>
 </div>
 </section>
@@ -1112,14 +1117,17 @@ sudo<span class="w"> </span>make<span class="w"> </span>install
 <span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">test_biscuit</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="k">LIKE</span><span class="w"> </span><span class="s1">&#39;%product_42%&#39;</span><span class="p">;</span>
 </pre></div>
 </div>
-<p>Expected output should show:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">Index</span> <span class="n">Scan</span> <span class="n">using</span> <span class="n">idx_test_name</span> <span class="n">on</span> <span class="n">test_biscuit</span>
-  <span class="p">(</span><span class="n">cost</span><span class="o">=</span><span class="mf">0.00</span><span class="o">.</span><span class="mf">.8.27</span> <span class="n">rows</span><span class="o">=</span><span class="mi">1</span> <span class="n">width</span><span class="o">=...</span><span class="p">)</span>
-  <span class="n">Index</span> <span class="n">Cond</span><span class="p">:</span> <span class="p">(</span><span class="n">name</span> <span class="o">~~</span> <span class="s1">&#39;%product_42%&#39;</span><span class="p">::</span><span class="n">text</span><span class="p">)</span>
-<span class="n">Planning</span> <span class="n">Time</span><span class="p">:</span> <span class="mf">0.123</span> <span class="n">ms</span>
-<span class="n">Execution</span> <span class="n">Time</span><span class="p">:</span> <span class="mf">0.567</span> <span class="n">ms</span>
+<p>Expected output should show a Biscuit index path rather than a sequential
+scan, for example:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">Bitmap</span> <span class="n">Heap</span> <span class="n">Scan</span> <span class="n">on</span> <span class="n">test_biscuit</span>
+  <span class="n">Recheck</span> <span class="n">Cond</span><span class="p">:</span> <span class="p">(</span><span class="n">name</span> <span class="o">~~</span> <span class="s1">&#39;%product_42%&#39;</span><span class="p">::</span><span class="n">text</span><span class="p">)</span>
+  <span class="o">-&gt;</span>  <span class="n">Bitmap</span> <span class="n">Index</span> <span class="n">Scan</span> <span class="n">on</span> <span class="n">idx_test_name</span>
+        <span class="n">Index</span> <span class="n">Cond</span><span class="p">:</span> <span class="p">(</span><span class="n">name</span> <span class="o">~~</span> <span class="s1">&#39;%product_42%&#39;</span><span class="p">::</span><span class="n">text</span><span class="p">)</span>
 </pre></div>
 </div>
+<p>On a table this small the planner may still prefer a sequential scan, which is
+a reasonable choice. To confirm the index is usable, repeat the query with
+<code class="docutils literal notranslate"><span class="pre">SET</span> <span class="pre">enable_seqscan</span> <span class="pre">=</span> <span class="pre">off;</span></code> — for testing only, not as a production setting.</p>
 </section>
 <hr class="docutils" />
 <section id="troubleshooting">
@@ -1197,11 +1205,11 @@ sudo<span class="w"> </span>rm<span class="w"> </span><span class="k">$(</span>p
 <section id="docker">
 <h3>Docker<a class="headerlink" href="#docker" title="Link to this heading"></a></h3>
 <p>Run Biscuit in Docker:</p>
-<div class="highlight-dockerfile notranslate"><div class="highlight"><pre><span></span><span class="k">FROM</span><span class="w"> </span><span class="s">postgres:14</span>
+<div class="highlight-dockerfile notranslate"><div class="highlight"><pre><span></span><span class="k">FROM</span><span class="w"> </span><span class="s">postgres:16</span>
 
 <span class="c"># Install build dependencies</span>
 <span class="k">RUN</span><span class="w"> </span>apt-get<span class="w"> </span>update<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>apt-get<span class="w"> </span>install<span class="w"> </span>-y<span class="w"> </span><span class="se">\</span>
-<span class="w">    </span>postgresql-server-dev-14<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>postgresql-server-dev-16<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>build-essential<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>git
 
