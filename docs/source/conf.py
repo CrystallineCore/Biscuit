@@ -1,95 +1,202 @@
 import os
 import sys
-sys.path.insert(0, os.path.abspath('../../'))
 
-# -- Project Information -----------------------------------------------------
+# Add project root to Python path if documentation imports project modules.
+sys.path.insert(0, os.path.abspath("../../"))
 
-project = 'BISCUIT'
-author = 'Sivaprasad Murali'
-copyright = '2025'
-release = '2.1.3'
-version = '2.1.3'
+# =============================================================================
+# Project Information
+# =============================================================================
 
-# -- General Configuration ---------------------------------------------------
+project = "BISCUIT"
+author = "Sivaprasad Murali"
+copyright = "2026, Sivaprasad Murali"
+
+# Exact release and documentation series.
+release = "3.0.0"
+version = "3.0"
+
+# =============================================================================
+# General Configuration
+# =============================================================================
 
 extensions = [
-    "myst_parser",          # Markdown support
-    "sphinx_sitemap",       # SEO
-    "sphinx.ext.mathjax",   # Optional, remove if not needed
+    "myst_parser",
+    "sphinx_sitemap",
+    "sphinx.ext.mathjax",
+    "sphinx.ext.todo",
+    "sphinx.ext.viewcode",
 ]
 
-templates_path = ['_templates']
-exclude_patterns = []
+templates_path = ["_templates"]
 
-# Support Markdown + RST
+exclude_patterns = [
+    "_build",
+    "Thumbs.db",
+    ".DS_Store",
+]
+
+# =============================================================================
+# Source Files
+# =============================================================================
+
 source_suffix = {
-    '.rst': 'restructuredtext',
-    '.md': 'markdown',
+    ".rst": "restructuredtext",
+    ".md": "markdown",
 }
 
-# Main document (index.md)
-master_doc = 'index'
+master_doc = "index"
 
-# Language
-language = 'en'
+language = "en"
 
-# -- HTML Output -------------------------------------------------------------
-
-html_theme = 'sphinx_rtd_theme'
-html_static_path = ['_static']
-
-html_title = f"{project} {release} Documentation"
-html_short_title = "BISCUIT Docs"
-html_favicon = '_static/favicon.ico'
-html_logo = '_static/logo.png'
-
-html_theme_options = {
-    'collapse_navigation': False,
-    'sticky_navigation': True,
-    'navigation_depth': 4,
-    'style_nav_header_background': '#2C3E50',
-}
-
-# -- Sitemap / SEO ----------------------------------------------------------
-
-html_baseurl = "https://biscuit.readthedocs.io/"
-
-html_meta = {
-    "description": (
-        "BISCUIT – A PostgreSQL Index Access Method (IAM) for ultra-fast, "
-        "deterministic substring search across multiple columns. "
-        "A modern alternative to pg_trgm for high-performance text matching."
-    ),
-    "keywords": (
-        "postgresql index access method, biscuit iam, pgxn biscuit, "
-        "substring index, multi-column index, postgres extension, "
-        "postgres performance, text search acceleration"
-    ),
-    "author": "Sivaprasad Murali",
-    "robots": "index, follow",
-    "viewport": "width=device-width, initial-scale=1.0",
-
-    # OpenGraph / Social
-    "og:title": "BISCUIT – PostgreSQL Index Access Method",
-    "og:description": "A modern IAM for deterministic multi-column substring search.",
-    "og:type": "website",
-    "og:url": "https://biscuit.readthedocs.io/",
-    "og:image": "https://biscuit.readthedocs.io/en/latest/_static/logo.png",
-
-    "twitter:card": "summary_large_image",
-    "twitter:title": "BISCUIT – PostgreSQL IAM",
-    "twitter:description": "Fast, deterministic multi-column substring matching.",
-}
-
-# -- MyST Configuration (Markdown) ------------------------------------------
+# =============================================================================
+# MyST Markdown
+# =============================================================================
 
 myst_enable_extensions = [
     "colon_fence",
     "deflist",
     "smartquotes",
     "tasklist",
+    "attrs_inline",
+    "attrs_block",
 ]
 
-# -- Sitemap Settings --------------------------------------------------------
+myst_heading_anchors = 3
+
+# =============================================================================
+# HTML Output
+# =============================================================================
+
+html_theme = "sphinx_rtd_theme"
+
+html_static_path = ["_static"]
+
+html_title = (
+    "BISCUIT 3.0.0 Documentation - PostgreSQL Index Access Method"
+)
+
+html_short_title = "BISCUIT Docs"
+
+html_favicon = "_static/favicon.ico"
+html_logo = "_static/logo.png"
+
+html_theme_options = {
+    "collapse_navigation": False,
+    "sticky_navigation": True,
+    "navigation_depth": 4,
+    "style_nav_header_background": "#2C3E50",
+}
+
+pygments_style = "sphinx"
+
+# =============================================================================
+# Canonical URL
+# =============================================================================
+
+html_baseurl = "https://biscuit.readthedocs.io/"
+
+# =============================================================================
+# SEO Metadata
+# =============================================================================
+
+# =============================================================================
+# SEO Metadata
+# =============================================================================
+
+html_meta = {
+    "description": (
+        "BISCUIT 3.0.0 is a PostgreSQL Index Access Method (IAM) designed "
+        "for fast and deterministic wildcard pattern matching. It provides "
+        "specialized bitmap-based indexing for SQL LIKE and ILIKE queries "
+        "and supports multi-column pattern matching workloads in PostgreSQL."
+    ),
+
+    "keywords": (
+        "BISCUIT, BISCUIT PostgreSQL, BISCUIT IAM, "
+        "PostgreSQL Index Access Method, PostgreSQL IAM, "
+        "PostgreSQL index, PostgreSQL extension, "
+        "PostgreSQL wildcard search, PostgreSQL wildcard index, "
+        "PostgreSQL pattern matching, PostgreSQL LIKE index, "
+        "PostgreSQL ILIKE index, PostgreSQL LIKE optimization, "
+        "PostgreSQL ILIKE optimization, PostgreSQL wildcard matching, "
+        "PostgreSQL text indexing, PostgreSQL performance, "
+        "PostgreSQL database indexing, PostgreSQL multi-column index, "
+        "deterministic index, bitmap index, bitmap indexing, "
+        "PGXN, PostgreSQL WAL, PostgreSQL crash recovery, "
+        "PostgreSQL point-in-time recovery, PostgreSQL streaming replication"
+    ),
+
+    "author": author,
+
+    "robots": "index, follow",
+
+    "viewport": "width=device-width, initial-scale=1.0",
+
+    # =========================================================================
+    # OpenGraph / Social Sharing
+    # =========================================================================
+
+    "og:title": (
+        "BISCUIT 3.0.0 - PostgreSQL Index Access Method "
+        "for Fast Wildcard Pattern Matching"
+    ),
+
+    "og:description": (
+        "BISCUIT is a deterministic PostgreSQL Index Access Method "
+        "for high-performance wildcard pattern matching with SQL LIKE "
+        "and ILIKE queries. It provides bitmap-based indexing and "
+        "multi-column index support. BISCUIT 3.0.0 introduces WAL "
+        "integration and durable index storage for crash recovery, "
+        "point-in-time recovery, and PostgreSQL replication."
+    ),
+
+    "og:type": "website",
+
+    "og:url": html_baseurl,
+
+    "og:site_name": "BISCUIT Documentation",
+
+    "og:image": (
+        "https://biscuit.readthedocs.io/en/latest/"
+        "_static/logo.png"
+    ),
+
+    # =========================================================================
+    # Twitter / X
+    # =========================================================================
+
+    "twitter:card": "summary_large_image",
+
+    "twitter:title": (
+        "BISCUIT 3.0.0 - PostgreSQL Index Access Method"
+    ),
+
+    "twitter:description": (
+        "A deterministic PostgreSQL Index Access Method for fast "
+        "wildcard pattern matching with LIKE and ILIKE, bitmap-based "
+        "indexing, and multi-column search support."
+    ),
+
+    "twitter:image": (
+        "https://biscuit.readthedocs.io/en/latest/"
+        "_static/logo.png"
+    ),
+}
+# =============================================================================
+# Sitemap
+# =============================================================================
 
 sitemap_url_scheme = "{link}"
+
+# =============================================================================
+# Documentation Behavior
+# =============================================================================
+
+todo_include_todos = False
+
+nitpicky = False
+
+html_show_sourcelink = True
+html_show_sphinx = False
+html_show_copyright = True
