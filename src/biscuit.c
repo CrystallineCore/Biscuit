@@ -48,19 +48,18 @@
  *
  * Biscuit has no shared-memory state or background workers: every
  * BiscuitIndex is built (or rebuilt) synchronously and kept in the
- * session-scoped cache (biscuit_cache.c). All durable state now lives
- * in the index relation's own pages (directory + compacted-blob +
+ * session-scoped cache (biscuit_cache.c). All durable state lives in
+ * the index relation's own pages (directory + compacted-blob +
  * pending-list, see biscuit_persist.c), so it is cleaned up for free
  * whenever the relation's storage is dropped -- core unlinks the whole
  * relfilenode at commit, and every page we own lives inside it.
  *
- * The only thing we still register an object_access_hook for is
- * evicting the process-local cache entry, since nothing in the core AM
- * callback table (ambuild/aminsert/ambulkdelete/amvacuumcleanup) is
- * invoked on DROP INDEX or on the "drop the old index" step of REINDEX
- * CONCURRENTLY. It deliberately does NOT free any pages: see
- * biscuit_object_access_hook() below for why that was actively
- * destructive.
+ * The object_access_hook is registered solely to evict the
+ * process-local cache entry, since nothing in the core AM callback
+ * table (ambuild/aminsert/ambulkdelete/amvacuumcleanup) is invoked on
+ * DROP INDEX or on the "drop the old index" step of REINDEX
+ * CONCURRENTLY. It must not free any pages: see
+ * biscuit_object_access_hook() below.
  * ================================================================ */
 
 /*
@@ -92,25 +91,24 @@ static object_access_hook_type prev_object_access_hook = NULL;
 
 /*
  * Fired for every dropped object in the backend (tables, indexes,
- * functions, ...). We only care about OAT_DROP on pg_class entries
- * that are (a) indexes and (b) belong to our AM -- everything else is
+ * functions, ...). Only OAT_DROP on pg_class entries that are (a)
+ * indexes and (b) belong to our AM is of interest -- everything else is
  * ignored immediately.
  *
  * This covers both DROP INDEX (direct call with the dropped index's
  * OID) and REINDEX CONCURRENTLY (which builds a new index under a new
- * OID, swaps relfilenodes, then drops the old index under its
- * original OID). Plain REINDEX keeps the same index OID and goes back
- * through biscuit_build(), which naturally overwrites the existing
- * directory entries in place, so there's nothing extra to do for that
- * case.
+ * OID, swaps relfilenodes, then drops the old index under its original
+ * OID). Plain REINDEX keeps the same index OID and goes back through
+ * biscuit_build(), which overwrites the existing directory entries in
+ * place, so that case needs nothing extra.
  *
  * WHY THIS HOOK MUST NOT FREE PAGES
  * ---------------------------------
- * This hook used to also call biscuit_persist_drop(objectId) to free
- * the index's directory/blob/pending-list chains. That was a data-loss
- * bug, because OAT_DROP fires when the DROP statement *executes* --
- * inside the still-open transaction, before commit -- while the two
- * halves of a drop unwind on abort in opposite ways:
+ * This hook must never call biscuit_persist_drop() to free the index's
+ * directory/blob/pending-list chains. OAT_DROP fires when the DROP
+ * statement *executes* -- inside the still-open transaction, before
+ * commit -- while the two halves of a drop unwind on abort in opposite
+ * ways:
  *
  *   - Core's DROP INDEX is transactional. On ROLLBACK the pg_class row
  *     comes back and the relfilenode is never unlinked (unlink is
@@ -121,29 +119,28 @@ static object_access_hook_type prev_object_access_hook = NULL;
  *     go through GenericXLog, which is durable against crash but is
  *     never undone by abort.
  *
- * So "BEGIN; DROP INDEX foo; ROLLBACK;" restored the catalog entry on
- * top of storage whose directory and blob chains had already been
- * retired, with the cache entry evicted too. The next query then hit
- * biscuit_load_index() -> biscuit_persist_load() -> NULL and raised
- * "no on-disk snapshot found", permanently, with no from-heap rebuild
- * path to recover through. Only REINDEX could bring the index back.
+ * Freeing here would therefore let "BEGIN; DROP INDEX foo; ROLLBACK;"
+ * restore the catalog entry on top of storage whose directory and blob
+ * chains had already been retired, with the cache entry evicted too. The
+ * next query reaches biscuit_load_index() -> biscuit_persist_load() ->
+ * NULL and raises "no on-disk snapshot found", permanently, with no
+ * from-heap rebuild path to recover through; only REINDEX brings the
+ * index back.
  *
- * The frees were also redundant on the success path: every page biscuit
- * owns lives inside the index's own relfilenode, which core unlinks
- * wholesale at commit for both DROP INDEX and the drop half of REINDEX
- * CONCURRENTLY. So the call bought nothing on commit and destroyed the
- * index on abort. It is removed rather than deferred to a PRE_COMMIT
- * xact callback, since a PRE_COMMIT version would only be doing work
- * that core is about to make irrelevant.
+ * The frees would also be redundant on the success path: every page
+ * biscuit owns lives inside the index's own relfilenode, which core
+ * unlinks wholesale at commit for both DROP INDEX and the drop half of
+ * REINDEX CONCURRENTLY. Deferring them to a PRE_COMMIT xact callback
+ * would only do work that core is about to make irrelevant.
  *
- * biscuit_persist_drop() itself is left in place in biscuit_persist.c
- * for callers that own a relation whose storage will outlive the drop
- * (there are none today); it must never be reached from a path that a
- * ROLLBACK can rewind.
+ * biscuit_persist_drop() remains in biscuit_persist.c for callers that
+ * own a relation whose storage will outlive the drop (there are none
+ * today); it must never be reached from a path that a ROLLBACK can
+ * rewind.
  *
- * Evicting the cache here remains correct and safe: it is likewise not
- * undone by abort, but the worst case is a cache miss that reloads the
- * (still fully intact) durable state from disk.
+ * Evicting the cache here is correct and safe: it is likewise not undone
+ * by abort, but the worst case is a cache miss that reloads the (still
+ * fully intact) durable state from disk.
  */
 static void
 biscuit_object_access_hook(ObjectAccessType access, Oid classId,
@@ -206,30 +203,25 @@ _PG_init(void)
      * How many rows may accumulate in the pending log before the append
      * path ships a prefix of it into the base blobs.
      *
-     * This is the knob that replaced BISCUIT_PENDLOG_DRAIN_PAGES as the
-     * real trigger, and it is denominated in ROWS deliberately. The old
-     * threshold was 512 pages = 4 MB, sized when a row cost ~3.9 kB of
-     * derived pending records, i.e. a few thousand rows. A row now costs 8
-     * bytes, so the same byte figure would admit roughly 500x more rows --
-     * and rows, not bytes, are what set delta rebuild time and therefore
-     * the latency of the first read after a write burst.
+     * Denominated in ROWS deliberately: rows, not bytes, are what set delta
+     * rebuild time and therefore the latency of the first read after a
+     * write burst.
      *
      * It is a GUC rather than a constant because the correct value follows
      * from a measurement that has not been taken: whether delta rebuild is
-     * dominated by the STRCACHE walk or by bitmap construction. The
-     * estimate behind the default is that construction dominates by
-     * roughly an order of magnitude (CREATE INDEX measures ~31 s per 1M
-     * rows against ~1.4 s to bulk load the same data, while the walk is a
-     * few amortised buffer reads per row), which puts rebuild near 30
-     * us/row and makes 20,000 rows about 0.6 s. That is a defensible
-     * ceiling on what a cold start should be willing to redo -- but it is
-     * arithmetic on an estimate, not a measurement, and the cheapest way
-     * to settle it is to time CREATE INDEX against a bulk load on
-     * identical data.
+     * dominated by the STRCACHE walk or by bitmap construction. The estimate
+     * behind the default is that construction dominates by roughly an order
+     * of magnitude (CREATE INDEX measures ~31 s per 1M rows against ~1.4 s
+     * to bulk load the same data, while the walk is a few amortised buffer
+     * reads per row), which puts rebuild near 30 us/row and makes 20,000
+     * rows about 0.6 s -- a defensible ceiling on what a cold start should
+     * be willing to redo. That is arithmetic on an estimate, not a
+     * measurement; the cheapest way to settle it is to time CREATE INDEX
+     * against a bulk load on identical data.
      *
-     * PGC_SUSET rather than PGC_USERSET: raising it lets one session
-     * impose unbounded rebuild cost on every other backend reading the
-     * same index, since the log is index-wide and shared.
+     * PGC_SUSET rather than PGC_USERSET: raising it lets one session impose
+     * unbounded rebuild cost on every other backend reading the same index,
+     * since the log is index-wide and shared.
      */
     DefineCustomIntVariable("biscuit.delta_compaction_slots",
                             "Rows of pending log tolerated before compaction.",
@@ -745,16 +737,13 @@ biscuit_index_memory_size(PG_FUNCTION_ARGS)
 
         /*
          * column_data_cache_lower -- the ILIKE lowercase string cache's
-         * multi-column counterpart to data_cache_lower above. This was
-         * missing from the multi-column branch entirely (the single-column
-         * branch above has always accounted for BOTH data_cache and
-         * data_cache_lower): a multi-column index with any ILIKE-opclass
-         * column undercounts its own reported memory footprint by exactly
-         * that column's lowercase string bytes, silently, for every such
-         * index. Purely a diagnostic/observability gap -- nothing here
-         * feeds sizing or allocation decisions -- but biscuit_index_stats()
-         * and this function exist precisely so an operator doesn't have to
-         * guess at that number.
+         * multi-column counterpart to data_cache_lower above. Both must be
+         * accounted for, as the single-column branch does: omitting it makes a
+         * multi-column index with any ILIKE-opclass column undercount its own
+         * reported memory footprint by exactly that column's lowercase string
+         * bytes. This is observability only -- nothing here feeds sizing or
+         * allocation decisions -- but biscuit_index_stats() and this function
+         * exist precisely so an operator does not have to guess at that number.
          */
         if (idx->column_data_cache_lower)
         {

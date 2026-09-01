@@ -117,28 +117,24 @@ biscuit_beginscan(Relation index, int nkeys, int norderbys)
      * DIAGNOSTIC ONLY (biscuit.diag_scan_trace) -- reader-vs-durable probe.
      *
      * Logs so->index->num_records/gen (what biscuit_get_current_index()
-     * decided to serve for this scan) side by side with a fresh,
-     * uncached biscuit_read_metadata_from_disk() read taken right here,
-     * right now. This distinguishes the two failure shapes a "stuck at
-     * build count" report is consistent with, which nothing measured so
-     * far tells apart:
+     * decided to serve for this scan) side by side with a fresh, uncached
+     * biscuit_read_metadata_from_disk() read taken at this moment. That
+     * separates the two shapes a "row count stuck at build value" report can
+     * have:
      *
-     *   - STALE CACHE, NOT RELOADING: this line shows a live num_records
-     *     well above so->index->num_records on every single scan for the
-     *     affected backend -- i.e. biscuit_get_current_index()'s gen
-     *     check is comparing against a live value it never acts on. That
-     *     points back at the gen-consistency chain (biscuit_persist_load()
-     *     -> biscuit_load_index() -> biscuit_get_current_index()).
+     *   - STALE CACHE, NOT RELOADING: the live num_records reads well above
+     *     so->index->num_records on every scan for the affected backend --
+     *     biscuit_get_current_index()'s gen check is comparing against a live
+     *     value it never acts on. Points at the gen-consistency chain
+     *     (biscuit_persist_load() -> biscuit_load_index() ->
+     *     biscuit_get_current_index()).
      *
-     *   - ACTIVELY RELOADING TO A WRONG VALUE: this line shows the live
-     *     read *also* at the low value at the moment of the probe (i.e.
-     *     the durable metapage itself is briefly or persistently wrong,
-     *     not just this backend's cached view of it). That points at the
-     *     write path -- something durably regressing meta->num_records --
-     *     not at caching/staleness at all.
+     *   - RELOADING TO A WRONG VALUE: the live read is *also* low at the
+     *     moment of the probe, i.e. the durable metapage itself is wrong
+     *     rather than just this backend's cached view of it. Points at the
+     *     write path durably regressing meta->num_records, not at caching.
      *
-     * No effect on results either way; this is read-only and gated off by
-     * default.
+     * Read-only, no effect on results, gated off by default.
      */
     if (unlikely(biscuit_diag_scan_trace))
     {
@@ -194,16 +190,16 @@ biscuit_beginscan(Relation index, int nkeys, int norderbys)
  * Returns the candidate slot set for this rescan, or NULL when there is
  * nothing to collect. The caller owns the result and must free it.
  *
- * TID COLLECTION DELIBERATELY DOES NOT HAPPEN HERE ANY MORE.
+ * TID COLLECTION DELIBERATELY DOES NOT HAPPEN HERE.
  *
- * This used to end by calling biscuit_collect_sorted_tids_parallel(). It
- * cannot, now that biscuit_rescan() may discard a candidate set and rebuild
- * it (see the drain-guard retry loop there): under a parallel scan, that
- * function atomically claims a disjoint chunk range from the shared
- * descriptor, and claiming twice from one participant would hand Gather a
- * torn result -- some chunks twice, others never. Splitting the build from
- * the collection keeps the retry confined to work that is pure and
- * repeatable, and leaves the one-shot, side-effecting step downstream of it.
+ * biscuit_rescan() may discard a candidate set and rebuild it (see the
+ * drain-guard retry loop there). Under a parallel scan,
+ * biscuit_collect_sorted_tids_parallel() atomically claims a disjoint
+ * chunk range from the shared descriptor, and claiming twice from one
+ * participant would hand Gather a torn result -- some chunks twice,
+ * others never. Keeping the build separate from the collection confines
+ * the retry to work that is pure and repeatable, and leaves the one-shot,
+ * side-effecting step downstream of it.
  */
 static RoaringBitmap *
 biscuit_build_candidates_multicolumn(IndexScanDesc scan,
@@ -247,7 +243,7 @@ biscuit_build_candidates_multicolumn(IndexScanDesc scan,
             continue;
 
         /*
-         * FIX 1: pass the running row-candidate set as a mask. Row
+         * Pass the running row-candidate set as a mask. Row
          * indices are shared across columns in this index, so a mask
          * built from an earlier predicate on a *different* column is
          * still a valid restriction here -- only the rows still alive
@@ -341,14 +337,14 @@ biscuit_build_candidates_singlecolumn(IndexScanDesc scan,
     /*
      * ---- Single-column: AND all key results ----
      *
-     * FIX 3: reuse the same cost-based ordering as the
+     * Reuse the same cost-based ordering as the
      * multi-column path (biscuit_build_query_plan() sorts
      * predicates by selectivity_score, most selective first) so
      * an anchored key (usr\_1234\_%, ~26 rows) runs before an
      * infix key (%abcdef%) rather than in whatever order
      * Postgres happened to hand us the keys.
      *
-     * FIX 1: thread the running candidate set into each
+     * Thread the running candidate set into each
      * subsequent key evaluation via *_masked() instead of
      * computing every key's full-table result and ANDing
      * afterward. After the first (cheapest) key narrows the
@@ -464,26 +460,16 @@ biscuit_build_candidates_singlecolumn(IndexScanDesc scan,
         mask = key_result;
 
         /*
-         * Per-key candidate cardinality.
+         * DIAGNOSTIC ONLY (biscuit.diag_scan_trace) -- per-key candidate
+         * cardinality.
          *
-         * This is the measurement the series has never taken. Both
-         * ends of the scan are now instrumented and both have been
-         * silent on failing runs: the tombstone filter reports
-         * before == after, and the collection boundary reports
-         * candidates in == TIDs out. Two equal counts at both ends
-         * mean the candidate set was ALREADY short when it arrived,
-         * so the loss is upstream of everything measured so far --
-         * inside this loop, where each key's bitmap is built and
-         * ANDed into the running mask.
-         *
-         * Reporting per key rather than per scan matters because a
-         * single-key query (which the reproducer runs) collapses to
-         * one line, and that line is directly comparable between the
-         * healthy round and the failing one. If the number is short
-         * here, biscuit_query_pattern_masked() and the reconcile
-         * path beneath it own the defect; if it is correct here and
-         * the final result is short, the loss is between this point
-         * and the tombstone filter, which is a handful of lines.
+         * Reports the size of each key's bitmap as it is ANDed into the running
+         * mask. Reporting per key rather than per scan is what makes it useful: a
+         * single-key query collapses to one line that is directly comparable
+         * between a healthy run and a failing one, which localises a short
+         * candidate set to either biscuit_query_pattern_masked() and the
+         * reconcile path beneath it (short here) or to the few lines between this
+         * point and the tombstone filter (correct here, short at the end).
          */
         if (unlikely(biscuit_diag_scan_trace))
             ereport(WARNING,
@@ -517,62 +503,47 @@ biscuit_build_candidates_singlecolumn(IndexScanDesc scan,
     /*
      * Filter tombstones (for non-NOT-LIKE keys that may remain).
      *
-     * INSTRUMENTED -- this is the last mutation of the candidate set
-     * before TID collection, and the only one on this path that can
-     * remove slots without any of the delta-side or collection-side
-     * guards seeing it.
+     * INSTRUMENTED: this is the last mutation of the candidate set before TID
+     * collection, and the only one on this path that can remove slots without
+     * any of the delta-side or collection-side guards seeing it. The guards
+     * on either side of it cover their own halves -- the pendlog
+     * live-subset-of-expanded invariant and the zero-identity counter
+     * (biscuit_pendlog.c, biscuit_delta.c) establish that the delta
+     * contributed every slot it owed, and the invalid-TID ereport plus the
+     * out-of-range counter (biscuit_tid.c) establish that nothing is
+     * discarded during collection -- so a subtraction sitting between them
+     * needs its own instrumentation.
      *
-     * The guards on either side of it are now known silent while the
-     * count still diverges: the pendlog live-subset-of-expanded
-     * invariant and the zero-identity counter (biscuit_pendlog.c,
-     * biscuit_delta.c) prove the delta contributed every slot it owed,
-     * and the invalid-TID ereport plus the out-of-range counter
-     * (biscuit_tid.c) prove nothing is discarded during collection.
-     * A subtraction sitting between two clean checkpoints is where an
-     * omission-only, never-extra loss would have to live.
+     * The condition worth catching is a tombstone bitmap that marks slots
+     * which are actually live. Note the asymmetry documented at the end of
+     * biscuit_bulkdelete(): a STALE tombstone bitmap (marking too few)
+     * produces a loud "slot N with no valid TID" error, while the opposite
+     * skew -- marking too many -- has no such backstop, and subtracts live
+     * rows to return a smaller but entirely plausible answer.
      *
-     * The specific suspicion is a tombstone bitmap that marks slots
-     * which are actually live. Note the failure documented at the end
-     * of biscuit_bulkdelete(): a STALE tombstone bitmap (marking too
-     * few) produces a loud "slot N with no valid TID" error. The
-     * opposite skew -- marking too many -- has no such backstop. It
-     * subtracts live rows and returns a smaller, entirely plausible
-     * answer, which is the shape being hunted.
-     *
-     * Two numbers are worth having together. `tombstone_count` is a
-     * scalar carried in the HEADER blob; the bitmap is a separate
-     * durable structure. They are written by the same call but
-     * maintained independently -- biscuit_insert()'s UPDATE branch
-     * calls biscuit_roaring_remove() on the bitmap without
-     * decrementing the counter, for one -- so a divergence between
-     * them is itself evidence about which of the two is wrong.
-     *
-     * This is a diagnostic, not a fix. It fires per scan; drop it once
-     * the stage is identified.
+     * Two numbers are worth having together. `tombstone_count` is a scalar
+     * carried in the HEADER blob; the bitmap is a separate durable structure.
+     * They are written by the same call but maintained independently --
+     * biscuit_insert()'s UPDATE branch calls biscuit_roaring_remove() on the
+     * bitmap without decrementing the counter, for one -- so a divergence
+     * between them is itself evidence about which of the two is wrong.
      */
     /*
-     * WARNING -> conditional (BISCUIT-3.0.0-GA-Report.md Section 10.1 /
-     * Risk 4). This block shipped as leftover diagnostic scaffolding: the
-     * comment above it already says "This is a diagnostic, not a fix ...
-     * drop it once the stage is identified" -- but the WARNING fired on
-     * `card_before != card_after` alone, which is true on every ordinary
-     * scan of a table that has ANY dead tombstoned rows. That is routine,
-     * not anomalous: DELETE is expected to shrink the candidate set, and
-     * doing so on every statement of a delete-heavy or concurrent workload
-     * is exactly the "essentially every statement" firing rate the report
-     * measured (up to ~250 warnings/session).
+     * Two conditions are checked here and they are reported differently.
      *
-     * Split the two conditions this block was conflating:
-     *   - card_before != card_after: expected whenever there are live
-     *     tombstones, carries no anomaly signal by itself. Downgraded to
-     *     the same biscuit.diag_scan_trace gate every other per-key/
-     *     per-scan trace line in this file already uses.
+     *   - card_before != card_after: expected whenever the table has any
+     *     live tombstones, since DELETE is supposed to shrink the candidate
+     *     set. It carries no anomaly signal on its own and would otherwise
+     *     fire on essentially every statement of a delete-heavy or
+     *     concurrent workload, so it is gated on biscuit.diag_scan_trace,
+     *     like every other per-key/per-scan trace line in this file.
+     *
      *   - tomb_card != tombstone_count: the bitmap's own cardinality
-     *     disagreeing with the scalar counter that is supposed to track
-     *     it IS a genuine internal-consistency defect (the scenario the
-     *     errhint below describes -- a bitmap marking more slots dead
-     *     than the scalar believes). That one stays a WARNING
-     *     unconditionally; it should be rare and is worth surfacing.
+     *     disagreeing with the scalar counter that is supposed to track it
+     *     is a genuine internal-consistency defect -- the scenario the
+     *     errhint below describes, a bitmap marking more slots dead than the
+     *     scalar believes. That stays a WARNING unconditionally; it should
+     *     be rare and is worth surfacing.
      */
     {
         uint64_t card_before = biscuit_roaring_count(result);
@@ -758,11 +729,12 @@ biscuit_rescan(IndexScanDesc scan,
                 return;
             }
 
-            /* DIAGNOSTIC ONLY (biscuit.diag_scan_trace) -- see the matching
-             * probe in biscuit_beginscan() for what this checks and why. It
-             * now fires once per ATTEMPT, which is the more useful shape: a
-             * retry line followed by a second probe showing a higher cached
-             * num_records is the fix working, end to end, in the log. */
+            /*
+             * DIAGNOSTIC ONLY (biscuit.diag_scan_trace) -- see the matching probe in
+             * biscuit_beginscan() for what this checks and why. It fires once per
+             * ATTEMPT, so a retry line followed by a second probe showing a higher
+             * cached num_records shows the reload path working end to end.
+             */
             if (unlikely(biscuit_diag_scan_trace))
             {
                 int    live_records = 0, live_columns = 0, live_max_len = 0;
@@ -792,12 +764,11 @@ biscuit_rescan(IndexScanDesc scan,
                 break;
 
             /*
-             * Discard unconditionally, including when the build returned
-             * NULL. "No candidates" reached under a drain is exactly as
-             * untrustworthy as a short count -- an AND against a
-             * post-drain-but-pre-reload bitmap can empty the set outright --
-             * and treating it as a legitimate zero would turn the loud
-             * version of this bug back into the silent one.
+             * Discard unconditionally, including when the build returned NULL. "No
+             * candidates" reached under a drain is exactly as untrustworthy as a
+             * short count -- an AND against a post-drain-but-pre-reload bitmap can
+             * empty the set outright -- and treating it as a legitimate zero would
+             * convert a detectable undercount into a silent one.
              */
             if (result)
             {
@@ -833,38 +804,35 @@ biscuit_rescan(IndexScanDesc scan,
          * Parallel-aware TID collection.
          *
          * When scan->parallel_scan is set, the Gather node has launched
-         * background workers that will each call biscuit_rescan()
-         * independently on their own private IndexScanDesc.  Without
-         * coordination every participant evaluates the full bitmap and
-         * returns the full TID set, causing N× row duplication.
+         * background workers that will each call biscuit_rescan() independently
+         * on their own private IndexScanDesc.  Without coordination every
+         * participant evaluates the full bitmap and returns the full TID set,
+         * causing N× row duplication.
          *
-         * Fix: biscuit_collect_sorted_tids_parallel() handles this
-         * transparently.  Every participant (leader and workers alike)
-         * evaluates the bitmap locally — the result is identical for all
-         * because the bitmap and index data are read-only and deterministic.
-         * An atomic CAS on pdesc->next_chunk elects exactly one initializer
-         * which writes total_tids/total_chunks into the shared DSM
-         * descriptor; the others spin-wait.  Then each participant atomically
-         * claims a disjoint chunk range and returns only those TIDs to its
-         * local Gather feeder — so the Gather node assembles exactly one
-         * copy of the full result.
+         * biscuit_collect_sorted_tids_parallel() handles this transparently.
+         * Every participant (leader and workers alike) evaluates the bitmap
+         * locally — the result is identical for all because the bitmap and index
+         * data are read-only and deterministic.  An atomic CAS on
+         * pdesc->next_chunk elects exactly one initializer which writes
+         * total_tids/total_chunks into the shared DSM descriptor; the others
+         * spin-wait.  Then each participant atomically claims a disjoint chunk
+         * range and returns only those TIDs to its local Gather feeder — so the
+         * Gather node assembles exactly one copy of the full result.
          *
          * When scan->parallel_scan is NULL the function is identical to
          * biscuit_collect_sorted_tids_single().
          *
          * DELIBERATELY OUTSIDE THE RETRY LOOP. The chunk claim is a
-         * side-effecting, one-shot operation against shared DSM state;
-         * calling it twice from one participant would hand Gather some chunks
-         * twice and others never. Only the pure, repeatable half of the scan
-         * is retried.
+         * side-effecting, one-shot operation against shared DSM state; calling it
+         * twice from one participant would hand Gather some chunks twice and
+         * others never. Only the pure, repeatable half of the scan is retried.
          *
-         * pdesc is currently always NULL -- amcanparallel is false, because
-         * the drain guard makes each participant self-consistent but cannot
-         * make two participants agree with each other, and this scheme
-         * partitions by offset into an array every participant recomputes.
-         * See biscuit.c's amcanparallel comment. The split above is kept
-         * regardless: it is what a re-enabled parallel path would need, and
-         * it costs nothing now.
+         * pdesc is currently always NULL -- amcanparallel is false, because the
+         * drain guard makes each participant self-consistent but cannot make two
+         * participants agree with each other, and this scheme partitions by
+         * offset into an array every participant recomputes. See biscuit.c's
+         * amcanparallel comment. The split above is kept regardless: it is what a
+         * re-enabled parallel path would need, and it costs nothing now.
          */
         {
             BiscuitParallelScanDesc *pdesc = NULL;
@@ -896,25 +864,21 @@ biscuit_rescan(IndexScanDesc scan,
              * never reached the loop at all.
              */
             /*
-             * WARNING -> DEBUG1 for the plain mismatch case
-             * (BISCUIT-3.0.0-GA-Report.md Section 10.1 / Risk 4).
+             * DEBUG1 by default, WARNING under biscuit.diag_scan_trace.
              *
-             * A candidate/TID mismatch is the same benign cache-lag
-             * condition biscuit_load_index() reports (see that function's
-             * comment): candidate slots this backend's cache knows about
-             * but whose TID has since been reclaimed, or that belong to a
-             * transaction not visible in this backend's snapshot. Under
-             * sustained concurrent write activity this is routine and was
-             * observed firing on essentially every statement, at WARNING,
-             * which reads as corruption to an operator despite results
-             * remaining correct (verified in-snapshot, 120/120 against a
-             * sequential scan).
+             * A candidate/TID mismatch is the same benign cache-lag condition
+             * biscuit_load_index() reports (see that function's comment): candidate
+             * slots this backend's cache knows about but whose TID has since been
+             * reclaimed, or that belong to a transaction not visible in this
+             * backend's snapshot. Under sustained concurrent write activity it is
+             * routine and fires on essentially every statement; at WARNING that reads
+             * as corruption to an operator even though results remain correct within
+             * the backend's own snapshot.
              *
-             * biscuit.diag_scan_trace still gets a WARNING unconditionally
-             * (an operator who turned that GUC on asked for exactly this
-             * kind of per-scan detail); everyone else gets DEBUG1, which
-             * preserves the diagnostic for anyone who raises log verbosity
-             * without spamming default-configuration clients.
+             * An operator who enabled biscuit.diag_scan_trace asked for exactly this
+             * kind of per-scan detail and gets a WARNING; everyone else gets DEBUG1,
+             * which preserves the diagnostic for anyone raising log verbosity without
+             * spamming default-configuration clients.
              */
             if (pdesc == NULL)
             {

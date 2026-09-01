@@ -1,18 +1,19 @@
 /*
  * biscuit_pendlog.h
  *
- * The single index-wide append-only pending log that replaced the old
+ * The single index-wide append-only pending log, in place of
  * per-structure pending chains.
  *
  * The problem it solves
  * ----------------------
- * Every steady-state bitmap mutation used to append to its own
- * structure's private pending chain and then update that structure's
- * directory entry. A structure is a (col, is_lower, kind, ch, position)
- * tuple, and a single indexed row touches a lot of them -- positional and
- * negative-offset bitmaps for every character, per-character caches,
- * length and length-ge bitmaps, all doubled for the lowercase set. Each
- * of those structures had its own chain, hence its own page.
+ * Giving every structure its own pending chain means each steady-state
+ * bitmap mutation appends to that structure's private chain and then
+ * updates that structure's directory entry. A structure is a
+ * (col, is_lower, kind, ch, position) tuple, and a single indexed row
+ * touches a lot of them -- positional and negative-offset bitmaps for
+ * every character, per-character caches, length and length-ge bitmaps,
+ * all doubled for the lowercase set. Each of those structures has its own
+ * chain, hence its own page.
  *
  * PostgreSQL charges a full-page image for a page's first modification
  * after each checkpoint, so WAL volume tracked *page count*, and page
@@ -36,9 +37,10 @@
  * implied by which chain a record sits in. That is a delta-size cost, not
  * a page-count cost, so it is charged against the cheap term.
  *
- * More significantly, reads get harder. Reconciling one structure used to
- * mean walking that structure's own short chain; now the relevant records
- * are scattered through a shared log. Scanning the whole log per structure
+ * More significantly, reads get harder. With per-structure chains,
+ * reconciling one structure means walking that structure's own short
+ * chain; here the relevant records are scattered through a shared log.
+ * Scanning the whole log per structure
  * would be O(structures x log size) per query -- catastrophic. So the read
  * path materializes the log into an in-memory hash keyed by structure
  * identity, once per statement, and reconciles from that
@@ -76,10 +78,10 @@
  * page-rollover path, where the tail pointer and page count have to
  * advance. This is deliberate and is the single most important property
  * of this function: pages-per-append is the quantity the whole design
- * exists to minimize, and an earlier version that maintained an exact
- * record count on the metapage paid for it twice -- every append carried
- * the metapage into its WAL record (doubling pages-per-append) and every
- * writer serialized on one exclusive metapage lock.
+ * exists to minimize. Maintaining an exact record count on the metapage
+ * would cost twice over -- every append would carry the metapage into its
+ * WAL record, doubling pages-per-append, and every writer would serialize
+ * on one exclusive metapage lock.
  *
  * So the steady-state cost of an append is one page, and it is the same
  * page for every append in the index, which is what collapses the
@@ -89,16 +91,16 @@
  * There is NO directory lookup and NO directory update here. Entries are
  * created lazily at drain time for whatever structures actually appear.
  *
- * WHAT CHANGED, AND WHY THE SIGNATURE SHRANK SO MUCH
- * --------------------------------------------------
- * This used to take a full structure identity plus a rec_idx, and was
- * called once per structure a row touched -- roughly 8N+4 times for an
- * N-character string, since every character contributes POS, NEG and CACHE
- * per case mode on top of LEN and the LEN_GE ladder. Collapsing those onto
- * one page fixed the full-page-image bill but left the record count alone,
- * and record count is where the remaining amplification lived: ~196 records
- * and ~3.9 kB of derived data per 24-character row, measured at 5131 B of
- * WAL per row against 158 B for the heap alone.
+ * WHY THE SIGNATURE IS THIS SMALL
+ * -------------------------------
+ * Taking a full structure identity plus a rec_idx would mean one call per
+ * structure a row touches -- roughly 8N+4 times for an N-character string,
+ * since every character contributes POS, NEG and CACHE per case mode on top
+ * of LEN and the LEN_GE ladder. Collapsing those onto one page fixes the
+ * full-page-image bill but leaves the record count alone, and record count
+ * is where the remaining amplification lives: ~196 records and ~3.9 kB of
+ * derived data per 24-character row, measuring 5131 B of WAL per row
+ * against 158 B for the heap alone.
  *
  * All of it was derivation. The set of structures a row belongs to is a
  * function of the row's text, and the text is already durable and already
@@ -204,10 +206,10 @@ typedef struct BiscuitPendLogKey
  * and that absence is the design, not an omission -- see BiscuitPendLogSnapshot
  * .kill below.
  *
- * (BiscuitPendLogDelta, the old ordered (rec_idx, op) array element, is
- * gone with it. Ordering mattered when a structure carried its own
- * interleaved adds and removes; it does not now, because the additions are
- * derived from each slot's CURRENT text and are therefore a set.)
+ * (There is no ordered (rec_idx, op) array element. Ordering would matter
+ * if a structure carried its own interleaved adds and removes; it does not
+ * here, because the additions are derived from each slot's CURRENT text
+ * and are therefore a set.)
  */
 typedef struct BiscuitPendLogEntry
 {
@@ -413,7 +415,7 @@ extern void biscuit_pendlog_drain_state(Relation index, uint64 *drains,
 /* ==================== SCAN-LIFETIME DRAIN GUARD ==================== */
 
 /*
- * A scan is not a point in time, and the read path used to assume it was.
+ * A scan is not a point in time, and the read path must not assume it is.
  *
  * biscuit_pendlog_snapshot() above is called on EVERY bitmap fetch, and one
  * ILIKE 'alpha%' costs six of them (five biscuit_get_pos_bitmap_lower()

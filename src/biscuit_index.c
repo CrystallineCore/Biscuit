@@ -11,15 +11,13 @@
 #include "biscuit_cache.h"
 #include "biscuit_index.h"
 #include "utils/spccache.h"   /* get_tablespace_page_costs() -- cost model */
-#include "biscuit_blob.h"   /* biscuit_page_write_blob() -- the per-structure
-                              * pending-chain primitives this used to need are
-                              * gone; see biscuit_pendlog.h */
+#include "biscuit_blob.h"   /* biscuit_page_write_blob() */
 #include "biscuit_dir.h"    /* biscuit_dir_find/_insert/_update, BiscuitDirEntry */
 #include "biscuit_fanout.h" /* biscuit_fanout_string() -- the single answer to
                              * "what structures does this string belong to",
                              * shared with the delta builder and the drain */
-#include "biscuit_pendlog.h" /* shared index-wide pending log: replaced the
-                              * per-structure pending chains on the write path */
+#include "biscuit_pendlog.h" /* shared index-wide pending log, used by the
+                              * write path in place of per-structure chains */
 #include "access/xact.h"    /* RegisterXactCallback, XACT_EVENT_* */
 
 /*
@@ -53,14 +51,13 @@ extern bool biscuit_diag_scan_trace;
  * content, so each mutating call just marks its index OID dirty here and a
  * single pre-commit xact callback flushes every dirty index exactly once.
  *
- * Scope note: TIDS and STRCACHE used to go through this path too, and it
- * was load-bearing then -- they were whole-array blob rewrites, so doing
- * one per row would have been O(n^2) for a bulk insert. That is no longer
- * the case: both are now written per-row, in place, at the mutation site
+ * Scope note: TIDS and STRCACHE do NOT go through this path. Both are
+ * written per-row, in place, at the mutation site
  * (biscuit_persist_row_identity_write_record(), called from
- * biscuit_insert()), and biscuit_persist_save_row_identity() no longer
- * touches them at all. What remains here is O(1) per flush, so this
- * machinery is now a redundancy-avoidance measure rather than a
+ * biscuit_insert()), and biscuit_persist_save_row_identity() does not
+ * touch them at all. Routing them through here would mean whole-array blob
+ * rewrites, i.e. O(n^2) for a bulk insert. What remains here is O(1) per
+ * flush, so this machinery is a redundancy-avoidance measure rather than a
  * complexity-class fix -- worth keeping (writing the same header once per
  * row is pure waste) but no longer a correctness-critical amortization.
  *
@@ -130,13 +127,13 @@ biscuit_flush_dirty_row_identity(void)
              * there is no in-memory state left to serialize, so skipping is
              * the only option.
              *
-             * This used to be silently destructive: the skipped write left
-             * the HEADER's num_records at whatever older value it held,
-             * while biscuit_claim_new_slot() had already advanced the
-             * metapage, and a later cold load trusted the header. It no
-             * longer is -- biscuit_persist_load() reconciles against the
-             * metapage, and biscuit_persist_save_row_identity() clamps up to
-             * it rather than overwriting with a possibly-lower value. What
+             * Skipping the write leaves the HEADER's num_records at whatever
+             * older value it held, while biscuit_claim_new_slot() has
+             * already advanced the metapage. That is not destructive only
+             * because biscuit_persist_load() reconciles against the
+             * metapage rather than trusting the header, and
+             * biscuit_persist_save_row_identity() clamps up to it rather
+             * than overwriting with a possibly-lower value. What
              * is still lost here is the counters/tombstones/freelist delta
              * for this transaction, which the next flush re-derives.
              */
@@ -270,7 +267,7 @@ biscuit_get_column_case_mode(Relation index, int col)
  * Validate a buffer's contents as a Biscuit metapage and return the
  * special-area struct, or NULL if it isn't one.
  *
- * WHY THIS EXISTS (BLOCKER-1). The metapage readers below used to gate on
+ * WHY THIS EXISTS. The metapage readers below must not gate on
  *
  *     if (PageIsNew(page) || PageIsEmpty(page))
  *         return false;
@@ -373,13 +370,12 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
      * plain (non-FULL_IMAGE) registration instead of PageInit()-ing and
      * rewriting the whole page.
      *
-     * This function used to run PageInit() + GENERIC_XLOG_FULL_IMAGE
-     * unconditionally on every call: an unconditional full BLCKSZ WAL
-     * image (forced every time, unlike ordinary full-page-write
-     * suppression which only fires once per checkpoint) to persist what
-     * is, on this path, a one-or-two-field counter bump -- dwarfing by
-     * roughly three orders of magnitude the entire point of
-     * biscuit_pendlog.c's row-batching redesign, and holding the
+     * Running PageInit() + GENERIC_XLOG_FULL_IMAGE unconditionally on every
+     * call is not an option here: that is a full BLCKSZ WAL image, forced
+     * every time rather than suppressed after the first write of a
+     * checkpoint, to persist what is on this path a one-or-two-field
+     * counter bump. It would dwarf by roughly three orders of magnitude the
+     * entire point of biscuit_pendlog.c's row-batching design, and hold the
      * metapage's one global exclusive lock far longer than the update
      * needs. biscuit_claim_new_slot(), a few dozen lines up, already does
      * the cheap version of this; this now matches it.
@@ -433,7 +429,7 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
             /*
              * GEN FIX (cross-backend staleness race).
              *
-             * gen used to be published as Max(meta->gen, idx->gen). Unlike
+             * gen must NOT be published as Max(meta->gen, idx->gen). Unlike
              * num_records, idx->gen is NOT a cached copy of the one shared
              * counter -- it is seeded from disk_gen at load time and then
              * bumped once per row *this backend itself* writes (see
@@ -459,7 +455,7 @@ biscuit_write_metadata_to_disk(Relation index, BiscuitIndex *idx)
              * behind it. Not on-disk damage: a missed reload, caused by a
              * gen counter that failed to advance on a genuine commit.
              *
-             * Fix: gen becomes a genuinely shared, atomically-advanced
+             * gen is therefore a genuinely shared, atomically-advanced
              * counter -- the same pattern biscuit_claim_new_slot() already
              * uses for num_records, and pendlog_clear_draining() already
              * uses for its own bump. Increment the durable counter by
@@ -561,14 +557,14 @@ biscuit_read_metadata_from_disk(Relation index,
     page = BufferGetPage(buf);
 
     /*
-     * BLOCKER-1 FIX. This used to be
+     * This must NOT be written as
      *
      *     if (PageIsNew(page) || PageIsEmpty(page))
      *
      * followed by an inline magic/version check. PageIsEmpty() is always
      * true for a Biscuit metapage (all its data lives in the special
-     * area, so pd_lower never moves off SizeOfPageHeaderData), so this
-     * function returned false for *every* index, always -- including
+     * area, so pd_lower never moves off SizeOfPageHeaderData), so that
+     * form returns false for *every* index, always -- including
      * perfectly healthy ones. See biscuit_metapage_data().
      *
      * The two consequences were exactly the reported symptom:
@@ -782,14 +778,13 @@ biscuit_claim_new_slot(Relation index, BiscuitIndex *idx)
  * Grow the per-slot arrays so that `slot` is addressable, zero-filling the
  * newly allocated tail.
  *
- * This replaces the single "if (num_records >= capacity) capacity *= 2"
- * step that used to live inline in biscuit_insert(). It must loop now: a
- * claimed slot can be arbitrarily far past this backend's last-known
- * num_records (another backend may have claimed many slots since), so one
- * doubling is no longer guaranteed to be enough.
+ * A single "if (num_records >= capacity) capacity *= 2" step is not
+ * sufficient, hence the loop: a claimed slot can be arbitrarily far past
+ * this backend's last-known num_records (another backend may have claimed
+ * many slots since), so one doubling is not guaranteed to be enough.
  *
- * Zero-filling is not optional -- see FIX A/B/C in the original inline
- * version. repalloc leaves the tail uninitialized, and both the NULL guard
+ * Zero-filling is not optional. repalloc leaves the tail uninitialized,
+ * and both the NULL guard
  * in biscuit_insert() and the has_data test in biscuit_bulkdelete() treat
  * garbage bytes as a live pointer.
  */
@@ -1006,10 +1001,10 @@ biscuit_read_pending_list_limit(Relation index)
  *
  * What consumes the resulting record: biscuit_delta.c, which reads the
  * row's text back out of STRCACHE and runs biscuit_fanout_string() over it
- * to reconstruct exactly the identities this function used to enumerate.
- * The fan-out has not disappeared -- it left the write path and became
- * delta-build work, paid on the first read after a write burst rather than
- * on every write. For load-then-query it is never paid at all, because the
+ * to reconstruct exactly the identities this record stands for. The
+ * fan-out is not skipped, it is relocated: it is delta-build work rather
+ * than write-path work, paid on the first read after a write burst rather
+ * than on every write. For load-then-query it is never paid at all, because the
  * delta is empty by query time.
  *
  * The multi-column case collapses for free: one row is one record no
@@ -1121,11 +1116,11 @@ biscuit_consume_self_drain_reload(Oid indexoid)
  *
  * self_gen, NOT A FRESH DISK READ.
  *
- * This used to re-read meta->gen here via a second, independent call to
+ * meta->gen must NOT be re-read here via a second, independent call to
  * biscuit_read_metadata_from_disk() -- a plain BUFFER_LOCK_SHARE read,
- * taken after the drain that triggered this call had already released
+ * taken after the drain that triggered this call has already released
  * its own serializing lock (LockPage(BISCUIT_METAPAGE_BLKNO,
- * ExclusiveLock) in pendlog_drain_internal()). That left a genuine race:
+ * ExclusiveLock) in pendlog_drain_internal()). That is a genuine race:
  * meta->gen is a single counter bumped by every backend's drain,
  * including autovacuum's biscuit_bulkdelete(), and nothing stops a
  * concurrent drain from running -- and bumping gen further -- in the gap
@@ -1351,16 +1346,16 @@ biscuit_pending_mutate_row(Relation index, BiscuitIndex *idx, uint32 slot, uint8
  * to enumerate, because a cached bitmap is a concrete object with the slot
  * concretely in it.
  *
- * The durable half is now a single record. It used to be one
+ * The durable half is a single record. One
  * biscuit_pending_mutate_structure() call per structure, appended inside
- * the loop below, so deleting one N-character row wrote ~8N+4 records
- * naming every structure it belonged to. That made DELETE the most
- * expensive operation in the extension, and all of it was derivation.
+ * the loop below, would mean deleting one N-character row wrote ~8N+4
+ * records naming every structure it belonged to -- making DELETE the most
+ * expensive operation in the extension, all of it derivation.
  *
  * The reconciler does NOT recover that list by re-deriving it. It cannot:
  * by the time anything reads this record, an UPDATE may already have
  * overwritten STRCACHE with the replacement row's text, so the identities
- * this slot used to have are unrecoverable. Instead the slot joins the
+ * this slot previously had are unrecoverable. Instead the slot joins the
  * kill set, and every base bitmap a reader touches has the kill set
  * subtracted from it before the delta's additions are applied (see
  * biscuit_pendlog_apply()). That is order-independent and survives slot
@@ -1541,10 +1536,10 @@ biscuit_remove_from_all_indices(Relation index, BiscuitIndex *idx,
  *
  * The write path's half of "one fan-out, three callers".
  *
- * biscuit_index_single_record() and biscuit_index_column_record() used to
- * contain their own copy of the rule for which structures a string belongs
- * to -- the same rule biscuit_fanout_string() now owns and the delta
- * builder depends on. Two implementations of that rule is the risk the
+ * biscuit_index_single_record() and biscuit_index_column_record() must not
+ * carry their own copy of the rule for which structures a string belongs
+ * to. That rule is owned by biscuit_fanout_string(), which the delta
+ * builder also depends on. Two implementations of it is the risk the
  * design lists as "delta and base disagree on fan-out", and it is a
  * particularly unpleasant one: the two would not disagree loudly, they
  * would disagree on some strings and not others, and the in-memory copy is
@@ -1574,12 +1569,11 @@ typedef struct InMemFanoutCtx
  * LEN slots left NULL and created on demand, LEN_GE slots pre-created.
  *
  * max_length is the ALLOCATED CAPACITY of these arrays, not a
- * "longest string seen" counter, and treating it as the latter is a bug
- * with a history here: biscuit_index_single_record() used to bump it,
- * which made biscuit_insert() read an already-bumped value as the old
- * capacity, leaving a gap of uninitialized RoaringBitmap* entries that
- * crashed inside libroaring on the next longer insert. Only this function
- * moves it.
+ * "longest string seen" counter. Only this function may move it. If
+ * biscuit_index_single_record() were to bump it as well, biscuit_insert()
+ * would read an already-bumped value as the old capacity, leaving a gap of
+ * uninitialized RoaringBitmap* entries that crashes inside libroaring on
+ * the next longer insert.
  */
 static void
 inmem_grow_lengths(RoaringBitmap ***len_arr, RoaringBitmap ***len_ge_arr,
@@ -1818,8 +1812,8 @@ inmem_fanout_emit(void *ctxp,
  * one bulk pass at the end), and no LEN/LEN_GE maintenance here, because
  * biscuit_build() has a dedicated length-bitmap pass that recomputes those
  * arrays from scratch after every record is in. The steady-state insert
- * path has no such pass, so it maintains them here -- which is where the
- * four open-coded copies that used to live in biscuit_insert() went.
+ * path has no such pass, so it maintains them here, in one place rather
+ * than open-coded at each call site in biscuit_insert().
  */
 static void
 biscuit_index_single_record(Relation      index,
@@ -1838,7 +1832,7 @@ biscuit_index_single_record(Relation      index,
     (void) pending_list_limit;   /* the row's single log record is appended
                                    * by biscuit_insert(), after the row's
                                    * text is durable -- not here, once per
-                                   * structure, as it used to be */
+                                   * structure */
 
     /*
      * The lowercased copy is computed ONCE, here, and handed to the
@@ -1987,7 +1981,7 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
      * are 1-based). Expressions were never evaluated anywhere in this
      * file.
      *
-     * Fix: get the type from the index's own tuple descriptor
+     * Get the type from the index's own tuple descriptor
      * (RelationGetDescr(index)) instead of the heap's -- this is correct
      * for both plain columns and expressions, since PostgreSQL always
      * populates the index tuple descriptor with the actual result type of
@@ -2006,12 +2000,12 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
      * MemoryContextDelete(rd_indexcxt) inside RelationClearRelation on any
      * relcache invalidation (ANALYZE, DDL, cache sweeps), which would free
      * all our data while the cache entry still holds the pointer.
-     * CacheMemoryContext itself is never reset by PostgreSQL, but a bare
-     * switch straight into it (the old behavior) meant nothing could ever
-     * be freed again except at backend exit -- every reload leaked the
-     * entire previous copy of the index (BISCUIT-3.0.0-GA-Report.md
-     * §10.4). A dedicated child context gives this one load a single
-     * handle biscuit_cache_remove() can MemoryContextDelete() as a unit;
+     * CacheMemoryContext itself is never reset by PostgreSQL, so a bare
+     * switch straight into it would mean nothing could ever be freed
+     * again except at backend exit, leaking the entire previous copy of
+     * the index on every reload. A dedicated child context gives this one
+     * load a single handle biscuit_cache_remove() can
+     * MemoryContextDelete() as a unit;
      * see biscuit_persist_load()'s matching comment in biscuit_persist.c
      * and idx->reserved[0]'s ownership contract below.
      */
@@ -2595,13 +2589,13 @@ biscuit_load_index(Relation index)
      * check (disk_gen <= idx->gen) correctly trigger a reload once such a
      * commit lands.
      *
-     * This block used to unconditionally overwrite idx->gen with a *second*,
-     * fresh biscuit_read_metadata_from_disk() call made here -- i.e. after
-     * biscuit_persist_load() had already finished decoding every bitmap and
+     * idx->gen must NOT be overwritten here with a *second*, fresh
+     * biscuit_read_metadata_from_disk() call -- i.e. one made after
+     * biscuit_persist_load() has already finished decoding every bitmap and
      * STRCACHE column for potentially thousands of rows. Under concurrent
      * writers that decode window is long enough for meta->gen to advance far
      * past what idx->num_records actually covers, so the overwritten
-     * idx->gen ends up "ahead of itself" relative to the data actually
+     * idx->gen would end up "ahead of itself" relative to the data actually
      * loaded. Every subsequent commit's gen bump then still looks like it
      * happened before this load, so biscuit_get_current_index() never
      * reloads again -- freezing this backend's readers at whatever
@@ -2636,12 +2630,11 @@ biscuit_load_index(Relation index)
         }
 
         /*
-         * The record count used to be discarded here (into a variable
-         * literally named unused_records) even though the metapage is the
+         * The record count must not be discarded here: the metapage is the
          * authoritative high-water mark for slot allocation and the HEADER
-         * blob it was silently overriding is not. That was one half of the
-         * lost-post-build-rows defect; the reconciliation itself now lives
-         * in biscuit_persist_load(), which is the only place that can widen
+         * blob is not, so letting the HEADER silently override it loses
+         * rows written after the build. The reconciliation itself lives in
+         * biscuit_persist_load(), which is the only place that can widen
          * idx->capacity before the per-slot arrays are allocated.
          *
          * This is left as a belt-and-braces check rather than a second fix:
@@ -2652,20 +2645,17 @@ biscuit_load_index(Relation index)
          * every read of a merely-truncated index.
          */
         /*
-         * WARNING -> DEBUG1 (BISCUIT-3.0.0-GA-Report.md Section 10.1 /
-         * Risk 4). This condition is the *expected* shape of a
+         * DEBUG1 by default. This condition is the *expected* shape of a
          * concurrent-write workload, not an anomaly: it fires whenever
          * another backend committed rows this backend's cache has not
          * yet caught up to, which is routine under sustained concurrent
-         * INSERT/UPDATE activity and was measured firing on essentially
-         * every statement in that regime (up to ~250/session). The
-         * report's own in-snapshot check found 0/120 mismatches against a
-         * sequential scan while this was actively firing -- the slots it
-         * reports are legitimately invisible to this backend's snapshot,
-         * not lost. A client-visible WARNING at that frequency reads as
-         * data corruption to an operator and is a GA-blocking usability
-         * defect independent of (and worse than) the underlying
-         * cache-staleness it is reporting.
+         * INSERT/UPDATE activity and so fires on essentially every
+         * statement in that regime. The slots it reports are legitimately
+         * invisible to this backend's snapshot rather than lost, and
+         * results remain correct within that snapshot. A client-visible
+         * WARNING at that frequency reads as data corruption to an
+         * operator, which is worse than the underlying cache-staleness it
+         * is reporting.
          *
          * Left at WARNING when biscuit.diag_scan_trace is explicitly
          * enabled, matching every other diagnostic in this codebase gated
@@ -2723,7 +2713,7 @@ biscuit_load_index(Relation index)
  * about; it cannot manufacture idx->tids[]/idx->num_records entries for
  * slots it has never loaded, so it cannot close this gap by itself.
  *
- * Fix: before trusting a cached BiscuitIndex for a read, compare it
+ * Before trusting a cached BiscuitIndex for a read, compare it
  * against the metapage's authoritative, monotonically non-decreasing
  * generation counter (meta->gen -- bumped and durably persisted at the end
  * of every biscuit_insert()/biscuit_bulkdelete(), by whichever backend
@@ -3031,11 +3021,11 @@ biscuit_insert(Relation index,
             biscuit_index_single_record(index, idx, str, byte_len, slot, pending_list_limit);
 
             /*
-             * The LEN / LEN_GE arrays used to be grown and populated here,
-             * in four near-identical open-coded blocks (case-sensitive and
-             * lowercase, times legacy and multi-column). They are now
-             * maintained by inmem_fanout_emit(), driven from
-             * biscuit_index_single_record() above via the same
+             * The LEN / LEN_GE arrays are NOT grown or populated here.
+             * Doing so takes four near-identical open-coded blocks
+             * (case-sensitive and lowercase, times legacy and
+             * multi-column). They are maintained by inmem_fanout_emit(),
+             * driven from biscuit_index_single_record() above via the same
              * biscuit_fanout_string() the delta builder uses.
              *
              * That is the point of the extraction: the length ladder is
@@ -3081,7 +3071,7 @@ biscuit_insert(Relation index,
                 biscuit_index_column_record(index, idx, col, str, out_len, slot, pending_list_limit);
 
                 /*
-                 * FIX 5 — multi-column length bitmaps never updated on insert.
+                 * Maintain the multi-column length bitmaps on insert.
                  *
                  * biscuit_index_column_record() only maintains the per-character
                  * position/negative-position bitmaps and char_cache for this
@@ -3106,15 +3096,14 @@ biscuit_insert(Relation index,
                  * inmem_fanout_emit() from biscuit_index_column_record(),
                  * not open-coded here.
                  *
-                 * Worth noting what this block originally fixed, since the
-                 * replacement must keep fixing it:
-                 * biscuit_index_column_record() used to maintain only the
-                 * per-character structures, so newly inserted rows were
+                 * What this guarantees: if
+                 * biscuit_index_column_record() maintained only the
+                 * per-character structures, newly inserted rows would be
                  * invisible to any length-based predicate on the
                  * multi-column scan path -- "insert is on disk and in
                  * data_cache, but queries don't see it". Routing lengths
                  * through the shared fan-out means that class of omission
-                 * cannot recur: a caller either gets the whole fan-out or
+                 * cannot occur: a caller either gets the whole fan-out or
                  * none of it.
                  */
             }
@@ -3219,7 +3208,7 @@ biscuit_insert(Relation index,
      * appended by biscuit_remove_from_all_indices() above -- crucially,
      * before the new text overwrote the old in STRCACHE, though the
      * reconciler does not depend on that, since it withdraws the slot from
-     * base wholesale rather than by re-deriving what it used to match.
+     * base wholesale rather than by re-deriving what it previously matched.
      */
     biscuit_pending_mutate_row(index, idx, (uint32) slot,
                                 BISCUIT_PENDING_OP_ADD, pending_list_limit);
@@ -3236,8 +3225,6 @@ biscuit_insert(Relation index,
     biscuit_mark_row_identity_dirty(RelationGetRelid(index));
 
     /*
-     * FIX 2 — INSERT → SELECT returns 0.
-     *
      * Write the updated index back into the global cache so the next
      * beginscan — in this session or any other — picks up the newly
      * inserted record via the bitmap path instead of a stale cached copy
@@ -3512,10 +3499,9 @@ biscuit_bulkdelete(IndexVacuumInfo *info,
  * groups records by structure itself and so visits each structure once
  * regardless of how many times it was touched.
  *
- * The kind guard that used to live here (refusing TIDS/STRCACHE/HEADER so
- * their repurposed value-heap fields were never read as pending-record
- * chains) is no longer needed for the same reason: nothing walks
- * directory entries looking for pending chains any more.
+ * No kind guard is needed here (refusing TIDS/STRCACHE/HEADER so their
+ * value-heap fields are never read as pending-record chains), for the same
+ * reason: nothing walks directory entries looking for pending chains.
  */
 
 /* ================================================================
@@ -3584,140 +3570,82 @@ biscuit_canreturn(Relation index, int attno)
  * SECTION 6a -- Cost model
  * ================================================================
  *
- * Replaces the "TEMPORARY DIAGNOSTIC" flat *indexTotalCost = 1.0 that
- * made Biscuit win every LIKE/ILIKE path unconditionally, including the
- * cases where it is one to three orders of magnitude slower than the
- * alternatives.
- *
- * Measured on PG 18.4, one core, warm steady state.  Each figure is the
- * median of 7 runs using a DIFFERENT literal per run, so repeated
- * identical lookups cannot inflate the result by re-reading the same
- * cached posting lists; the first two runs of each class are discarded.
- * (Repeating one literal understated prefix latency by ~7x, so this
- * matters.)  Cold (post-restart, page cache dropped) numbers are
- * deliberately NOT used here -- see the note on startup cost below.
- *
- * Baseline table, 500k rows (heap 40MB / 5150 pages, Biscuit 211MB,
- * pg_trgm GIN 45MB), all times in ms:
- *
- *   class                     Biscuit     GIN      Seq    fastest
- *   ------------------------------------------------------------
- *   prefix   'usr\_1111\_%'      0.60    10.07    36.61   Biscuit
- *   suffix   '%a1\_log'          3.24    16.45    69.54   Biscuit
- *   infix 1 concrete '%a%'     182.57   525.75    78.75   Seq
- *   infix 2 concrete '%ab%'    411.09   546.47    74.03   Seq
- *   infix 3 concrete '%abc%'   423.95     7.57    71.19   GIN
- *   infix 4 concrete '%abcd%'  386.59     1.44    84.94   GIN
- *   infix 6 concrete           353.11     0.46    82.06   GIN
- *   '%a_c%'   (run 1)          389.34   522.29    72.91   Seq
- *   '%a_c_e%' (run 1)          398.50   541.01    72.31   Seq
- *   '%abc%def%' (2 parts)       27.42     0.62    81.21   GIN
- *   '%ab%cd%ef%' (3 parts)     246.81   547.88    83.51   Seq
+ * Costs are expressed as multiples of a locally recomputed
+ * sequential-scan baseline, so the model scales with the table rather
+ * than hard-coding absolute cost units. The constants below were
+ * calibrated on PG 18.4, one core, warm steady state, taking the median
+ * of 7 runs with a DIFFERENT literal per run so that repeated identical
+ * lookups could not inflate a result by re-reading the same cached
+ * posting lists. Cold numbers are deliberately not used; see the note on
+ * startup cost below.
  *
  * Three structural facts drive the model:
  *
- * 1. Biscuit's infix cost is independent of selectivity.  Holding the
- *    pattern shape fixed at 1M rows and varying only the match fraction
- *    (uppercase markers, so marker frequency == selectivity exactly):
+ * 1. Biscuit's infix cost is independent of selectivity. Holding the
+ *    pattern shape fixed and varying only the match fraction across a
+ *    5000x selectivity range moves Biscuit by about 2%, while GIN moves
+ *    by three orders of magnitude. An infix probe does fixed
+ *    whole-structure work and cannot benefit from a selective
+ *    predicate. Anchored probes are 2-3 orders of magnitude cheaper, so
+ *    the anchor -- not the selectivity -- is what makes Biscuit fast.
  *
- *      selectivity        50%     10%      1%    0.1%   0.01%
- *      Biscuit (run 2)  1243.4  1248.5  1260.7  1243.6  1234.3
- *      Seq               172.2   154.5   144.2   139.8   139.0
- *      GIN     (run 4)   137.0    26.7     2.8    0.65    0.12
- *
- *    Biscuit varies by 2% across a 5000x selectivity range; GIN varies by
- *    ~1100x.  An infix probe does fixed whole-structure work and cannot
- *    benefit from a selective predicate.  Anchored probes are 2-3 orders
- *    of magnitude cheaper, so the anchor -- not the selectivity -- is
- *    what makes Biscuit fast.
- *
- * 1a. Nor does the picture change with table size.  Biscuit's infix time
- *    and the seqscan both scale linearly, so their ratio is flat and the
- *    lines never cross:
- *
- *      N        Biscuit '%ab%'    Seq     ratio   Biscuit prefix / Seq
- *      125k          102.6       18.6      5.5x      0.07 /   6.3
- *      500k          418.9       72.1      5.8x      0.35 /  35.9
- *      2M           1834.3      361.5      5.1x      1.35 / 156.5
- *      4M           3430.1      713.2      4.8x     14.78 / 321.3
- *
- *    A 32x span in table size holds the infix ratio between 4.8x and
- *    5.8x with no trend toward 1.  Anchored patterns stay dominant at
- *    every size.  Note also that CREATE INDEX memory scales with N: an
- *    8M-row build was OOM-killed at 3.78GB RSS on a 4GB host, and at 4M
- *    the index is 1626MB against a 322MB heap (~5x the table).
+ * 1a. Nor does the picture change with table size. Biscuit's infix time
+ *    and the seqscan both scale linearly, so their ratio is flat (4.8x
+ *    to 5.8x across a 32x span in row count) and the lines never cross.
+ *    Anchored patterns stay dominant at every size. Note that CREATE
+ *    INDEX memory scales with N: an 8M-row build was OOM-killed at
+ *    3.78GB RSS on a 4GB host, and at 4M rows the index is roughly 5x
+ *    the size of the heap.
  *
  * 2. pg_trgm needs THREE CONSECUTIVE concrete characters to extract a
- *    trigram.  '%ab%' and '%a_c%' yield no usable trigram, so GIN
- *    degrades to a full index scan (520-550ms) and PostgreSQL's own GIN
- *    cost estimate correctly balloons (69839 vs 216 for '%abcd%').  This
- *    is exactly the region the requirement reserves for Biscuit, and it
- *    is why an earlier revision discriminated on the longest RUN of
- *    consecutive concrete characters (a run of 3 is what pg_trgm can
- *    actually consume).  THAT DISCRIMINATOR IS DELIBERATELY GONE, and
- *    nothing below branches on run length.  Two reasons:
+ *    trigram. Patterns like '%ab%' and '%a_c%' yield no usable trigram,
+ *    so GIN degrades to a full index scan and PostgreSQL's own GIN cost
+ *    estimate correctly balloons. That is the region the requirement
+ *    reserves for Biscuit. Nothing below branches on the longest run of
+ *    consecutive concrete characters, for two reasons:
  *
- *      a) Biscuit's own infix cost does not vary with run length.
- *         Measured at L=48, 500k rows: '%ab%' 441ms, '%abc%' 459ms,
- *         '%abcd%' 449ms.  The position sweep dominates and the literal
- *         is almost free, so a single infixBase is the honest estimate
- *         for all of them.
+ *      a) Biscuit's own infix cost does not vary with run length: at a
+ *         fixed string length, '%ab%', '%abc%' and '%abcd%' all measure
+ *         within a few percent of each other. The position sweep
+ *         dominates and the literal is almost free, so a single
+ *         infixBase is the honest estimate for all of them.
  *      b) The run distinction is a fact about GIN, not about Biscuit,
- *         and GIN's own estimator already prices it correctly (69839 for
- *         '%ab%', which it cannot serve with a trigram, against 216 for
- *         '%abcd%', which it can).  Encoding a competitor's cost model
- *         here would duplicate knowledge that the planner already has
- *         and would go stale independently of it.
+ *         and GIN's own estimator already prices it correctly. Encoding
+ *         a competitor's cost model here would duplicate knowledge the
+ *         planner already has and would go stale independently of it.
  *
  *    '_' still favours Biscuit, but that is expressed where it belongs:
  *    as a discount on the anchored branch, not as a run computation.
  *
- * Anchors take priority over the infix rules: the requirement discourages
- * "infix only" patterns, and 'usr\_1%abc%' (prefix + infix part) measures
- * 2.68ms for Biscuit against 8.26ms GIN / 41.16ms Seq, so an anchored
- * pattern stays cheap regardless of what its infix parts look like.
- *
- * Costs are expressed as multiples of a locally recomputed sequential-scan
- * baseline so the model scales with the table instead of hard-coding
- * absolute cost units.  On the benchmark table the baseline evaluates to
- * 5150*1.0 + 500000*(0.01+0.0025) = 11400, which matches the planner's own
- * Seq Scan estimate of 11400.00 exactly.
- */
+ * 3. Anchors take priority over the infix rules. The requirement
+ *    discourages "infix only" patterns, and a mixed pattern such as
+ *    'usr\\_1%abc%' stays cheap for Biscuit regardless of what its infix
+ *    parts look like, so an anchored pattern is priced on its anchor.
+ * ================================================================ */
 
 /*
  * ABSOLUTE infix cost model.
  *
- * Earlier revisions priced infix as a fixed multiple of the sequential-scan
- * baseline.  That was wrong in kind, not merely in calibration: a controlled
- * experiment with the SAME strings and the SAME index over two heaps of 2703
- * and 8621 pages measured Biscuit at 28.300ms and 28.046ms (ratio 0.99) while
- * the seqscan went 37.355ms -> 67.368ms (ratio 1.80).  Biscuit's infix cost is
- * INDEPENDENT of heap width; the seqscan's is proportional to it.  Tying one to
- * the other guaranteed a wrong answer on any table whose row width and string
- * length were not in the ratio of the calibration set.
+ * Infix cost is priced in absolute terms rather than as a fixed multiple
+ * of the sequential-scan baseline, because the two do not track each
+ * other. A controlled experiment with the SAME strings and the SAME index
+ * over two heaps of 2703 and 8621 pages measured Biscuit at 28.300ms and
+ * 28.046ms (ratio 0.99) while the seqscan went 37.355ms -> 67.368ms
+ * (ratio 1.80). Biscuit's infix cost is INDEPENDENT of heap width; the
+ * seqscan's is proportional to it. Tying one to the other gives a wrong
+ * answer on any table whose row width and string length are not in the
+ * ratio of the calibration set.
  *
- * What infix cost actually tracks is row count times the SQUARE of the string
- * length -- the position sweep is O(L) and each step's bitmap work grows with L
- * again.  Measured on 500k rows, pattern '%abc%', varying only string length:
+ * What infix cost actually tracks is row count times the SQUARE of the
+ * string length -- the position sweep is O(L) and each step's bitmap work
+ * grows with L again. Measured across an 8x range of string lengths,
+ * time/(N*L^2) holds constant to within +-5%.
  *
- *     L      time      ms/(N*L^2)
- *     12     28.3ms    3.93e-07
- *     24    122.9ms    4.27e-07
- *     48    459.5ms    3.99e-07
- *     96   1804.9ms    3.92e-07     <- constant to +-5% over an 8x range
- *
- * BISCUIT_INFIX_K converts that into planner cost units, anchored so that the
- * L=48 case (459ms Biscuit vs 107ms seqscan against a seqBaseline of 11405)
- * lands at the correct side of the comparison.  Validated against every dataset
- * measured, including a reported production table:
- *
- *     table          L     N      heapPg  bisCost  seqBase  picks  actual
- *     l12           12    500k     2703     3058     8953   bis    28 vs 37ms  OK
- *     l24           24    500k     3677    12231     9927   seq   123 vs 58ms  OK
- *     l48           48    500k     5155    48925    11405   seq   459 vs107ms  OK
- *     l96           96    500k     8197   195702    14447   seq  1805 vs171ms  OK
- *     w12           12    500k     8621     3058    14871   bis    28 vs 67ms  OK
- *     interactions  15    1M      16528     9556    29028   bis    21 vs 70ms  OK
+ * BISCUIT_INFIX_K converts that into planner cost units, anchored so that
+ * the L=48 case lands on the correct side of the comparison against the
+ * sequential-scan baseline. It was validated against every dataset
+ * measured, including a reported production table, spanning string
+ * lengths 12-96 and heap widths 2703-16528 pages.
  */
 #define BISCUIT_INFIX_K                4.25e-5  /* cost units per tuple per L^2 */
 #define BISCUIT_DEFAULT_STRLEN         32       /* when avgwidth is unavailable */
@@ -3726,98 +3654,75 @@ biscuit_canreturn(Relation index, int attno)
 /*
  * Multi-part infix factors, relative to a single infix part.
  *
- * These correct an outright inversion in the previous model, which DISABLED
- * every pattern with two or more infix parts.  Extra parts are additional
- * constraints that prune the sweep, so two parts are an order of magnitude
- * CHEAPER than one, consistently across string lengths:
+ * Extra parts are additional constraints that prune the sweep, so two
+ * parts are an order of magnitude CHEAPER than one, consistently across
+ * string lengths (measured ratios 0.056 to 0.103 for L from 12 to 48).
+ * Patterns with two or more infix parts must therefore not be disabled.
  *
- *     L     1 part   2 parts   ratio    3 parts   ratio
- *     12    30.4ms    1.7ms    0.056     5.1ms    0.17
- *     24   119.4ms   10.5ms    0.088    71.3ms    0.60
- *     48   467.7ms   48.3ms    0.103   691.6ms    1.48
+ * Three or more parts stop benefiting and scale worse than L^2 (about
+ * L^3.5), so they are charged ABOVE a single part. 1.50 is the L=48
+ * measurement and is deliberately conservative at shorter lengths, where
+ * 3-part patterns are in fact cheaper -- erring toward a seqscan there
+ * costs little in absolute terms.
  *
- * Three or more parts stop benefiting and scale worse than L^2 (about L^3.5),
- * so they are charged ABOVE a single part.  1.50 is the L=48 measurement and is
- * deliberately conservative at shorter lengths, where 3-part patterns are in
- * fact cheaper -- erring toward a seqscan there costs little in absolute terms.
- *
- * Note this factor applies WITHIN one pattern.  Separate scan keys
+ * Note this factor applies WITHIN one pattern. Separate scan keys
  * ('s LIKE a AND s LIKE b') remain additive and are summed by the caller:
- * that path shares no sweep and does not prune (measured: adding a 26-row
- * anchored key to an infix key saved nothing, 1543ms vs 1549ms).  Conflating
- * the two is what produced the disable rule this replaces.
+ * that path shares no sweep and does not prune, so adding a highly
+ * selective anchored key to an infix key saves essentially nothing. The
+ * two must not be conflated.
  */
 #define BISCUIT_PARTS2_FACTOR          0.10
 #define BISCUIT_PARTS3_FACTOR          1.50
 
 /*
- * Length-predicate patterns: no concrete characters at all, but at least one
- * '_'.  '______' is "length = 6"; '______%' is "length >= 6".  Biscuit answers
- * these from its length bitmaps with a SINGLE lookup -- no position sweep, no
- * character ANDs -- so they are cheaper than an anchored probe, not more
- * expensive.
+ * Length-predicate patterns: no concrete characters at all, but at least
+ * one '_'. '______' is "length = 6"; '______%' is "length >= 6". Biscuit
+ * answers these from its length bitmaps with a SINGLE lookup -- no
+ * position sweep, no character ANDs -- so they are cheaper than an
+ * anchored probe, not more expensive, and must not be lumped in with '%'
+ * and hard-disabled at BISCUIT_COST_DISABLED.
  *
- * These were previously lumped in with '%' and hard-disabled at
- * BISCUIT_COST_DISABLED, which was simply wrong.  Measured on a 1M-row table
- * against a pg_trgm GIN + B-tree reference (which must seqscan these, since
- * neither a trigram nor a B-tree range can express "length = k"):
+ * Measured on a 1M-row table against a pg_trgm GIN + B-tree reference
+ * (which must seqscan these, since neither a trigram nor a B-tree range
+ * can express "length = k"), Biscuit wins 8 of 10 such patterns and 1.62x
+ * on aggregate time, with the margin growing sharply as the underscore
+ * count rises: roughly 2x at 8-12 underscores and 7x-24x at 17-19.
  *
- *     pattern                  underscores   Biscuit   reference   speedup
- *     '______'                      6         69.94ms    93.68ms     1.34x
- *     '______%'                     6        163.68ms   124.87ms     0.76x
- *     '________'                    8         70.08ms   128.95ms     1.84x
- *     '____________'               12         67.24ms   134.07ms     1.99x
- *     '_______________'            15         14.68ms    44.34ms     3.02x
- *     '_________________'          17          7.22ms    51.28ms     7.10x
- *     '___________________'        19          2.32ms    50.48ms    21.80x
- *     '___________________%'       19          1.98ms    47.72ms    24.11x
- *
- * Biscuit wins 8 of 10 and 1.62x on aggregate time (530ms vs 857ms), yet the
- * old rule refused to generate a path for any of them.
- *
- * Note the cost below deliberately does NOT try to model how many rows a given
- * underscore count selects.  The two losses above are the two least selective
- * patterns ('______%' matches 962,308 of 1,000,000 rows), and those are exactly
- * the cases PostgreSQL's own bitmap-heap costing rejects on its own once the
- * index cost stops being infinite: at 96% selectivity a bitmap heap scan prices
- * above a seqscan without any help from us.  Reporting a cheap, honest index
- * cost and letting the heap-access model gate selectivity is the correct
- * division of labour, and it is what makes the unselective cases fall back
- * while the selective ones (7x-24x) get the index.
+ * The cost below deliberately does NOT try to model how many rows a given
+ * underscore count selects. The two losses are the two least selective
+ * patterns ('______%' matches 96% of the table), and those are exactly the
+ * cases PostgreSQL's own bitmap-heap costing rejects on its own once the
+ * index cost stops being infinite: at that selectivity a bitmap heap scan
+ * prices above a seqscan without any help from us. Reporting a cheap,
+ * honest index cost and letting the heap-access model gate selectivity is
+ * the correct division of labour, and it is what makes the unselective
+ * cases fall back while the selective ones get the index.
  */
 #define BISCUIT_COST_LENGTH_FRAC       0.002  /* single length-bitmap lookup */
 
 /* Cost as a fraction/multiple of the sequential-scan baseline. */
 /*
- * 0.005, not the 0.02 first calibrated at 500k rows.  GIN's own estimate
- * for an anchored pattern grows faster with N than this fraction does:
- * at 4M rows 0.02 puts Biscuit at 1824 against GIN's 1864, a 1.02x margin,
- * so a slightly larger table would flip prefix queries to GIN even though
- * Biscuit measures 14.8ms there against GIN's 75.7ms.  0.005 holds a ~4-5x
- * margin at both 500k and 4M and stays far below the measured ratio
- * (prefix Biscuit/Seq is 0.009-0.046 across the sizes tested), so the
- * anchored path cannot be lost to rounding as the table grows.
+ * The anchored fraction is held well below the measured Biscuit/Seq ratio
+ * so the anchored path cannot be lost to rounding as the table grows.
+ * GIN's own estimate for an anchored pattern grows faster with N than
+ * this fraction does, so a fraction calibrated at 500k rows (0.02) leaves
+ * only a 1.02x margin at 4M rows and would flip prefix queries to GIN on
+ * a slightly larger table, even though Biscuit measures roughly 5x faster
+ * there.
  */
 /*
- * 0.002, lowered from 0.005 after a GA accuracy test on Costly Cookies-v3
- * (1M rows, biscuit + pg_trgm GIN + B-tree text_pattern_ops, planner free).
+ * Lowered to 0.002 after an accuracy test on a 1M-row table carrying
+ * biscuit, pg_trgm GIN and a B-tree text_pattern_ops index, with the
+ * planner left free to choose.
  *
- * At 0.005 every both-anchored and long-suffix query lost to GIN by a 10-15%
- * cost margin while being 6-12x FASTER in reality:
- *
- *     query                 bis cost  ref cost  margin   bis ms  ref ms
- *     'derek%1a'               484.1     434.9   11.3%     0.53    4.64
- *     'd__ek%1a'               414.2     374.9   10.5%     0.42    2.59
- *     ILIKE 'DEREK%1A'         484.1     434.9   11.3%     0.38    4.52
- *     '%grey1a'                484.1     422.0   14.7%     0.23    1.19
- *     ILIKE '%GREY1A'          484.1     422.0   14.7%     0.21    1.49
- *
- * 0.002 closes all of them.  It is safe against the B-tree because pure-prefix
- * queries lose on cost by 88%-427% -- two orders of magnitude more than this
- * delta moves -- so they stay with the B-tree, which is correct: it beat
- * Biscuit on 5 of 6 selective prefixes.  Measured effect over the 36-query GA
- * set: accuracy 69% -> 83%, mean penalty 2.46x -> 1.16x, worst case
- * 12.52x -> 2.30x.
+ * At 0.005 every both-anchored and long-suffix query lost to GIN by a
+ * 10-15% cost margin while being 6-12x FASTER in reality. 0.002 closes
+ * all of them. It is safe against the B-tree because pure-prefix queries
+ * lose on cost by 88%-427% -- two orders of magnitude more than this
+ * delta moves -- so they stay with the B-tree, which is correct: the
+ * B-tree beat Biscuit on 5 of 6 selective prefixes. Over the 36-query
+ * test set the change moved accuracy from 69% to 83%, mean penalty from
+ * 2.46x to 1.16x, and worst case from 12.52x to 2.30x.
  */
 #define BISCUIT_COST_ANCHORED_FRAC     0.002  /* prefix and/or suffix */
 #define BISCUIT_COST_USCORE_DISCOUNT   0.5    /* favour '_' patterns              */

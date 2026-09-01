@@ -114,59 +114,22 @@ typedef struct {
 /* ==================== CONSTANTS ==================== */
 
 #define BISCUIT_MAGIC                   0x42495343  /* "BISC" */
-#define BISCUIT_VERSION                 3           /* on-disk format cutover:
-                                                       * the old best-effort/
-                                                       * proc-exit-flush
-                                                       * snapshot machinery
-                                                       * (BISCUIT_SNAPSHOT_GEN_THRESHOLD,
-                                                       * biscuit_cache.c's
-                                                       * proc-exit save) is
-                                                       * deleted outright, and
-                                                       * biscuit_persist_save()/
-                                                       * biscuit_persist_load()
-                                                       * failures now
-                                                       * propagate instead of
-                                                       * being swallowed.
-                                                       * No dual-path reader --
-                                                       * version-1 (old
-                                                       * external-file) and
-                                                       * version-2 indexes
-                                                       * must be REINDEXed.
-                                                       *
-                                                       * DELIBERATELY NOT
-                                                       * bumped for the
-                                                       * row-identity in-place
-                                                       * storage rewrite
-                                                       * (biscuit_rowstore.c),
-                                                       * which changes the
-                                                       * on-disk layout of
-                                                       * TIDS/STRCACHE/HEADER
-                                                       * incompatibly: version 3
-                                                       * (BISCUIT_LIBRARY_VERSION
-                                                       * "3.0.0 - Player") was
-                                                       * never shipped, so there
-                                                       * is no deployed
-                                                       * version-3 index
-                                                       * anywhere for a bump to
-                                                       * distinguish this format
-                                                       * from. That is also
-                                                       * exactly why this
-                                                       * rewrite carries no
-                                                       * backward-compatibility
-                                                       * obligation and needs no
-                                                       * dual-format reader --
-                                                       * the only readers that
-                                                       * ever existed for the
-                                                       * old TIDS/STRCACHE blob
-                                                       * layout are in this same
-                                                       * unreleased tree, and
-                                                       * they are replaced, not
-                                                       * kept alongside. Any
-                                                       * index built from an
-                                                       * intermediate
-                                                       * development checkout
-                                                       * must be REINDEXed, same
-                                                       * as always. */
+/*
+ * BISCUIT_VERSION -- on-disk format version.
+ *
+ * There is no dual-path reader: an index written by any earlier format must
+ * be REINDEXed. biscuit_persist_save() and biscuit_persist_load() failures
+ * propagate rather than being swallowed.
+ *
+ * Deliberately NOT bumped for the row-identity in-place storage layout
+ * (biscuit_rowstore.c), which changes the on-disk layout of
+ * TIDS/STRCACHE/HEADER incompatibly: version 3 (BISCUIT_LIBRARY_VERSION
+ * "3.0.0 - Player") was never shipped, so there is no deployed version-3
+ * index anywhere for a bump to distinguish that format from, and nothing for
+ * a compatibility path to read. An index built from an intermediate
+ * development checkout must be REINDEXed.
+ */
+#define BISCUIT_VERSION                 3
 #define BISCUIT_METAPAGE_BLKNO          0
 
 /*
@@ -247,11 +210,10 @@ typedef struct {
 /*
  * Disk meta-page.
  *
- * BISCUIT_VERSION 2: this is a clean format cutover (see design doc) --
- * the old `root` field (dead weight, never pointed at anything under the
- * legacy file-snapshot design) is dropped outright rather than kept
- * unused for compatibility, since old (version-1) indexes must be
- * REINDEXed anyway and there is no dual-path reader.
+ * The format is a clean cutover (see design doc): there is no dual-path
+ * reader and older indexes must be REINDEXed, so fields that carry no
+ * meaning under the current design are dropped outright rather than kept
+ * unused for compatibility.
  */
 typedef struct BiscuitMetaPageData {
     uint32 magic;
@@ -338,51 +300,44 @@ typedef struct BiscuitMetaPageData {
 
     /* ---------------- Shared pending log (biscuit_pendlog.c) ----------
      *
-     * The single index-wide append-only log that replaced the old
-     * per-structure pending chains. Every steady-state bitmap mutation
-     * now appends one self-describing BiscuitPendLogRecord here instead
-     * of appending to (and updating the directory entry of) its own
-     * structure's private chain.
+     * A single index-wide append-only log. Every steady-state bitmap
+     * mutation appends one self-describing BiscuitPendLogRecord here,
+     * rather than appending to (and updating the directory entry of)
+     * its own structure's private chain.
      *
-     * Why: a row touching K structures used to dirty ~K distinct pages,
-     * and PostgreSQL charges a full-page image per distinct page per
-     * checkpoint interval. Measured on one insert of a 9-character
-     * string: 82 pages, 84 FPIs, 60KB of WAL. With one shared log those
-     * K records (20 bytes each) land on the *same* tail page, so the
-     * page count -- and therefore the FPI bill -- stops scaling with the
-     * number of structures a row touches.
+     * Why: a row touching K structures would otherwise dirty ~K
+     * distinct pages, and PostgreSQL charges a full-page image per
+     * distinct page per checkpoint interval. Measured on one insert
+     * of a 9-character string, that shape costs 82 pages, 84 FPIs and
+     * 60KB of WAL. With one shared log those K records (20 bytes
+     * each) land on the *same* tail page, so the page count -- and
+     * therefore the FPI bill -- stops scaling with the number of
+     * structures a row touches.
      *
-     * BiscuitDirEntry's per-structure pending fields were consequently
-     * removed outright: a bitmap-kind entry now carries only blob_head.
-     * See BiscuitDirEntry's per-kind field table below.
+     * BiscuitDirEntry consequently carries no per-structure pending
+     * fields: a bitmap-kind entry holds only blob_head. See
+     * BiscuitDirEntry's per-kind field table below.
      */
     BlockNumber pendlog_head;     /* first page of the shared log chain,
                                     * InvalidBlockNumber when the log is
                                     * empty (nothing appended since the
                                     * last drain) */
-    BlockNumber pendlog_tail;     /* current append target; the O(1) tail
-                                    * pointer, same role the old
-                                    * per-structure tail pointer served */
-    uint32      pendlog_npages;   /* pages currently in the log chain.
-                                    *
-                                    * Deliberately a PAGE count, not a record
-                                    * count: it is only touched when the log
-                                    * grows a page, so the metapage stays out
-                                    * of the per-append WAL record entirely.
-                                    * An earlier version kept an exact record
-                                    * count here and paid for it twice --
-                                    * every append carried the metapage into
-                                    * its WAL record (doubling pages-per-append,
-                                    * the very quantity this design minimizes)
-                                    * and every writer serialized on one
-                                    * exclusive metapage lock.
-                                    *
-                                    * npages * BLCKSZ is the log's size for
-                                    * drain-trigger purposes, which is all the
-                                    * trigger ever needed. Exact record counts
-                                    * are available per page in
-                                    * BiscuitPendLogPageHeader.num_records for
-                                    * anything that genuinely needs them. */
+    BlockNumber pendlog_tail;     /* current append target; the O(1) tail pointer */
+    uint32      pendlog_npages;   /*
+                                   * pages currently in the log chain.
+                                   *
+                                   * Deliberately a PAGE count, not a record count: it is only touched when
+                                   * the log grows a page, so the metapage stays out of the per-append WAL
+                                   * record entirely. An exact record count here would cost twice -- every
+                                   * append would carry the metapage into its WAL record, doubling
+                                   * pages-per-append, the very quantity this design minimizes, and every
+                                   * writer would serialize on one exclusive metapage lock.
+                                   *
+                                   * npages * BLCKSZ is the log's size for drain-trigger purposes, which is
+                                   * all the trigger needs. Exact record counts are available per page in
+                                   * BiscuitPendLogPageHeader.num_records for anything that genuinely needs
+                                   * them.
+                                   */
 
     BlockNumber pendlog_draining;  /* Head of a chain that has been detached
                                      * for draining but whose merge has not
@@ -460,12 +415,11 @@ typedef BiscuitMetaPageData *BiscuitMetaPage;
 /*
  * ---- row-identity in-place storage (biscuit_rowstore.c) ----
  *
- * Added for the TIDS/STRCACHE/HEADER in-place rewrite (biscuit_rowstore.c;
- * no BISCUIT_VERSION bump -- version 3 was never shipped, see that
- * constant's comment): unlike the compacted-blob/pending-list chains
- * above, these are mutated with single-page in-place GenericXLog writes,
- * not rewritten wholesale on every commit. See biscuit_rowstore.c's file
- * header for the full design.
+ * Unlike the compacted-blob/pending-list chains above, these pages are
+ * mutated with single-page in-place GenericXLog writes rather than
+ * rewritten wholesale on every commit. They carry no BISCUIT_VERSION
+ * bump -- version 3 was never shipped, see that constant's comment. See
+ * biscuit_rowstore.c's file header for the full design.
  *
  *   BISCUIT_PAGE_PAGEDIR  -- append-only chain mapping a dense logical
  *                            page number (0, 1, 2, ...) to the physical
@@ -506,9 +460,9 @@ typedef BiscuitMetaPageData *BiscuitMetaPage;
  * a packed BiscuitPendLogRecord[] array; chained via opaque.next, with the
  * tail marked BISCUIT_PENDING_FLAG_TAIL.
  *
- * This replaced the per-structure pending page (retired kind 2, see
- * BISCUIT_PAGE_PENDING_RETIRED above); nothing writes or reads that
- * format any more.
+ * This is the only pending format in use; the per-structure pending page
+ * (retired kind 2, see BISCUIT_PAGE_PENDING_RETIRED above) is neither
+ * written nor read.
  */
 #define BISCUIT_PAGE_PENDLOG  9     /* shared index-wide pending log page  */
 
@@ -518,19 +472,15 @@ typedef BiscuitMetaPageData *BiscuitMetaPage;
  * Hard ceiling (in pages) on log size, at which the append path drains
  * opportunistically. VACUUM drains unconditionally regardless of this.
  *
- * THIS IS NO LONGER THE PRIMARY TRIGGER. Read
- * biscuit.delta_compaction_slots (biscuit_delta.c) first; this constant is
- * now the backstop beneath it.
+ * THIS IS NOT THE PRIMARY TRIGGER. Read biscuit.delta_compaction_slots
+ * (biscuit_delta.c) first; this constant is the backstop beneath it.
  *
- * Why it was demoted: 512 pages = 4 MB was sized against records that
- * averaged ~3.9 kB per row, i.e. a few thousand rows. A row now costs 8
- * bytes, so the same byte threshold admits on the order of 500x more rows
- * before firing. Bytes were never the quantity that mattered -- what a
- * large log costs is delta rebuild time, and rebuild time scales with the
- * number of ROWS in the log (one STRCACHE materialization plus one
- * fan-out each), not with how few bytes each row's record occupied. A
- * threshold in bytes is now nearly uncorrelated with the cost it was
- * meant to bound.
+ * A byte-denominated threshold is nearly uncorrelated with the cost it is
+ * meant to bound. What a large log costs is delta rebuild time, and
+ * rebuild time scales with the number of ROWS in the log (one STRCACHE
+ * materialization plus one fan-out each), not with how few bytes each
+ * row's record occupied. At 8 bytes per row, 512 pages of log is on the
+ * order of half a million rows.
  *
  * The row-denominated threshold lives in a GUC because the right value
  * follows from a measurement that has not been taken yet: whether delta
@@ -616,22 +566,21 @@ typedef BiscuitMetaPageData *BiscuitMetaPage;
  * biscuit_rowstore_tid_write()'s in-place branch, where it becomes an
  * assertion about what that slot must currently contain on disk.
  *
- * This exists as defense-in-depth for the slot-allocation race fixed in
- * biscuit_index.c's biscuit_claim_new_slot(). Slot numbers used to be
- * handed out from a process-local counter, so two backends routinely
- * computed the same slot_idx for different rows; the TIDSLOT page's
- * buffer lock serialized the two writes without preventing the
- * collision, and the second writer silently clobbered the first row.
- * biscuit_pagedir_append()'s dense-in-order check was the only guard in
- * this area and it only fires when a whole new *logical page* is
- * allocated, which is why the collision showed up as a loud error in a
- * minority of runs and as silent, total row loss in all of them.
+ * This is defense-in-depth for slot-allocation atomicity, which is
+ * enforced at the allocator in biscuit_index.c's
+ * biscuit_claim_new_slot(). If slot numbers were ever handed out from a
+ * process-local counter again, two backends would compute the same
+ * slot_idx for different rows; the TIDSLOT page's buffer lock serializes
+ * the two writes without preventing the collision, and the second writer
+ * would silently clobber the first row. biscuit_pagedir_append()'s
+ * dense-in-order check is the only other guard in this area and it fires
+ * only when a whole new *logical page* is allocated, so such a collision
+ * would be loud in a minority of runs and silent in the rest.
  *
  * With a mode passed down, a fresh claim landing on an already-occupied
- * slot raises an ERROR at the moment of the overwrite instead. The point
- * is not to catch today's bug -- that is fixed at the allocator -- but to
- * make any future regression in slot-allocation atomicity fail loudly and
- * immediately rather than corrupting data invisibly.
+ * slot raises an ERROR at the moment of the overwrite instead, making any
+ * future regression fail loudly and immediately rather than corrupting
+ * data invisibly.
  */
 typedef enum BiscuitSlotWriteMode
 {
@@ -820,9 +769,7 @@ typedef struct BiscuitBlobChunkHeader
  *
  *     These kinds have NO per-structure pending chain. Undrained deltas
  *     live in the index-wide shared log (biscuit_pendlog.c) and are keyed
- *     by structure identity there, so nothing per-entry tracks them. The
- *     old pending_head/pending_tail/pending_count/pending_bytes fields
- *     that used to serve that purpose are gone; see the note below.
+ *     by structure identity there, so nothing per-entry tracks them.
  *
  *   FREELIST
  *     blob_head     -- compacted-blob chain holding a flat uint32_t[] dump.
@@ -850,25 +797,19 @@ typedef struct BiscuitBlobChunkHeader
  *                      reallocated once the first write creates it).
  *     strheap_*     -- unused.
  *
- * Why strheap_head/strheap_tail rather than reused pending fields
- * ---------------------------------------------------------------
- * These two fields used to be pending_head/pending_tail, silently
- * reinterpreted as the STRCACHE value heap for that one kind while
- * meaning "pending-delta chain" for the bitmap kinds. That was a
- * comment-level rename only, and it was a live hazard: biscuit_persist.c's
- * drop walk branches on kind to decide how to free them, and one missing
- * or mis-ordered case would have freed a STRHEAP chain as if it were a
- * pending chain (or walked a pending chain as a value heap). With the
- * bitmap kinds' pending chains gone entirely there is no longer anything
- * to share these fields *with*, so they are named for their only real
- * user. Nothing forced the old shape to be preserved -- no format is
- * shipped -- so the honest names win.
+ * strheap_head/strheap_tail are named for their only user and must not
+ * be repurposed as general-purpose per-kind fields. Overloading one pair
+ * of fields to mean "value heap" for STRCACHE and something else for the
+ * bitmap kinds is a live hazard rather than a naming preference:
+ * biscuit_persist.c's drop walk branches on kind to decide how to free
+ * them, and one missing or mis-ordered case frees a STRHEAP chain as if
+ * it were a pending chain, or walks a pending chain as a value heap.
  *
- * pending_count/pending_bytes are also gone: they existed for the
- * per-structure size-threshold drain trigger, and the shared log's
- * trigger is a page count on the metapage (pendlog_npages) instead.
- * Dropping all four fields shrinks the entry from 32 to 24 bytes, which
- * directly raises BiscuitDirPageMaxEntries().
+ * The entry carries no pending_count/pending_bytes either: those would
+ * serve a per-structure size-threshold drain trigger, and the shared
+ * log's trigger is a page count on the metapage (pendlog_npages)
+ * instead. Keeping the entry at 24 bytes rather than 32 directly raises
+ * BiscuitDirPageMaxEntries().
  *
  * ALWAYS initialize with BiscuitDirEntryInit() rather than
  * memset()-then-assign: a zeroed BlockNumber is block 0 (the metapage),
@@ -923,18 +864,18 @@ BiscuitDirEntryInit(BiscuitDirEntry *e, int32 col, bool is_lower,
 #define BISCUIT_DIR_KIND_LEN_GE   5
 
 /*
- * Additional BISCUIT_DIR_KIND_* values, added for the biscuit_persist.c
- * rewrite (Phase after the pending-list design doc). The design doc's
- * directory (§5) only ever specified `(col, is_lower, kind, ch, position)`
- * for the per-character/per-length RoaringBitmap-shaped structures
- * (POS/NEG/CACHE/LEN/LEN_GE above) -- it explicitly did not cover the rest
- * of BiscuitIndex's persistent state (the tid array, the tombstone
- * bitmap, the free-slot list, the per-record string caches), because
- * biscuit_blob.c's chunk-chain primitive is bitmap-agnostic ("just bytes
- * in, bytes out", §1) and works equally well for any of these once they're
- * serialized to a flat byte buffer -- so the same directory+blob
- * machinery is reused here rather than inventing a second, parallel
- * addressing scheme just for non-bitmap state.
+ * Additional BISCUIT_DIR_KIND_* values, covering BiscuitIndex persistent
+ * state that is not per-character/per-length bitmap-shaped.
+ *
+ * The design doc's directory (§5) specifies
+ * `(col, is_lower, kind, ch, position)` for the RoaringBitmap-shaped
+ * structures (POS/NEG/CACHE/LEN/LEN_GE above) and does not cover the tid
+ * array, the tombstone bitmap, the free-slot list or the per-record
+ * string caches. biscuit_blob.c's chunk-chain primitive is
+ * bitmap-agnostic ("just bytes in, bytes out", §1) and works equally well
+ * for any of these once they are serialized to a flat byte buffer, so the
+ * same directory+blob machinery is reused rather than inventing a second,
+ * parallel addressing scheme for non-bitmap state.
  *
  *   BISCUIT_DIR_KIND_TIDS        -- idx->tids (ItemPointerData[num_records]),
  *                                    a flat array dump, no bitmap involved.
@@ -984,17 +925,16 @@ BiscuitDirEntryInit(BiscuitDirEntry *e, int32 col, bool is_lower,
 /*
  * BiscuitDirEntry.col sentinels, beyond real column indices (0..N-1):
  *
- *   BISCUIT_DIR_COL_LEGACY    (-1) -- already used by the design doc for
- *                                     the single-column (legacy) field
- *                                     set's POS/NEG/CACHE/LEN/LEN_GE and,
- *                                     as of this phase, its STRCACHE too.
- *   BISCUIT_DIR_COL_SINGLETON (-2) -- new in this phase: TIDS/TOMBSTONES/
- *                                     FREELIST, which exist exactly once
- *                                     per index regardless of column
- *                                     count, so they don't belong to any
- *                                     particular column's chain. Always
- *                                     stored in the array slot 0 chain
- *                                     (see biscuit_dir.c's
+ *   BISCUIT_DIR_COL_LEGACY    (-1) -- the single-column (legacy) field
+ *                                     set's POS/NEG/CACHE/LEN/LEN_GE and
+ *                                     its STRCACHE.
+ *   BISCUIT_DIR_COL_SINGLETON (-2) -- TIDS/TOMBSTONES/FREELIST, which
+ *                                     exist exactly once per index
+ *                                     regardless of column count, so they
+ *                                     don't belong to any particular
+ *                                     column's chain. Always stored in the
+ *                                     array slot 0 chain (see
+ *                                     biscuit_dir.c's
  *                                     biscuit_dir_slot_for_col()) alongside
  *                                     whatever column-0 or legacy entries
  *                                     also live there -- entries are
@@ -1262,47 +1202,42 @@ typedef struct BiscuitStrHeapHeader
 
 /* ---- METAPAGE EXTENSION ----
  *
- * Implemented above (BiscuitMetaPageData): this is a clean format cutover
- * (BISCUIT_VERSION bumped to 2, REINDEX required, no dual-path reader --
- * see design doc), so the old `root` field and the old reserved[4] slots
- * were dropped/promoted outright rather than kept behind a version check.
+ * Implemented above (BiscuitMetaPageData). The format is a clean cutover
+ * (REINDEX required, no dual-path reader -- see design doc), so fields
+ * that carry no meaning under the current design are dropped rather than
+ * kept behind a version check.
  *
- * One deliberate deviation from the design doc's original single
- * `dir_root`: the metapage now holds one directory-chain root per
- * indexed column (`dir_roots[BISCUIT_MAX_DIR_COLUMNS]`,
- * `num_dir_columns`) instead of a single shared root with `col` as just
- * another field inside each BiscuitDirEntry. This keeps each column's
- * directory chain, and therefore its locking (§6) and drain traffic,
- * fully independent at the chain-root level, not just at the
- * individual-entry level -- a multi-column index's columns never have to
- * walk or contend on a shared root page to find their own entries. The
- * per-entry `col` field on BiscuitDirEntry is kept regardless, since a
- * single column's chain can still hold entries for multiple `kind`s and
- * multiple case-mode sets and having the field is cheap self-description
- * for page-level tooling; it should just always agree with the chain's
- * dir_roots[] index it was reached through.
+ * One deliberate deviation from the design doc's single `dir_root`: the
+ * metapage holds one directory-chain root per indexed column
+ * (`dir_roots[BISCUIT_MAX_DIR_COLUMNS]`, `num_dir_columns`) instead of a
+ * single shared root with `col` as just another field inside each
+ * BiscuitDirEntry. This keeps each column's directory chain, and
+ * therefore its locking (§6) and drain traffic, fully independent at the
+ * chain-root level, not just at the individual-entry level -- a
+ * multi-column index's columns never have to walk or contend on a shared
+ * root page to find their own entries. The per-entry `col` field on
+ * BiscuitDirEntry is kept regardless, since a single column's chain can
+ * still hold entries for multiple `kind`s and multiple case-mode sets and
+ * having the field is cheap self-description for page-level tooling; it
+ * should just always agree with the dir_roots[] index it was reached
+ * through.
  *
- * FSM bootstrap (`fsm_root`, `fsm_page_count`) is new relative to the
- * design doc's text but implements the deferred-recycle mechanism the
- * doc already specifies (Addressing review feedback, point 1): a page
- * with recycle_xid set is not immediately FSM-eligible, so something has
- * to hold onto "pages retired but not yet recyclable" until
+ * FSM bootstrap (`fsm_root`, `fsm_page_count`) implements the
+ * deferred-recycle mechanism the design doc specifies: a page with
+ * recycle_xid set is not immediately FSM-eligible, so something has to
+ * hold onto "pages retired but not yet recyclable" until
  * biscuit_vacuumcleanup()'s horizon check clears them for the ordinary
  * index FSM. fsm_root is that holding chain's head.
  *
- * `page_format_version` is new relative to the design doc's text too --
- * see its own comment above (BISCUIT_PAGE_FORMAT_VERSION) for why it's
- * tracked separately from `version`.
+ * See BISCUIT_PAGE_FORMAT_VERSION's own comment above for why
+ * `page_format_version` is tracked separately from `version`.
  *
  * total_pending_bytes is deliberately NOT maintained synchronously on the
- * append path (an earlier version of the design doc described it as
- * bumped on every append "same spirit as BiscuitIndex.gen" -- that was
- * wrong, and was corrected; see design doc Round 5, finding 1, for why a
- * per-append write to a single shared metapage field is a global
- * serialization point that contradicts §6's no-cross-structure-contention
- * guarantee). The shared log's drain trigger reads pendlog_npages, which
- * the append path only writes when the log grows a page -- so the common
- * append still touches nothing index-wide.
+ * append path. A per-append write to a single shared metapage field is a
+ * global serialization point that contradicts §6's
+ * no-cross-structure-contention guarantee. The shared log's drain trigger
+ * reads pendlog_npages, which the append path only writes when the log
+ * grows a page -- so the common append still touches nothing index-wide.
  *
  * Scope note: this header only defines the metapage layout and the page
  * structs it points at (BiscuitDirPageHeader alongside the existing
@@ -1310,8 +1245,7 @@ typedef struct BiscuitStrHeapHeader
  * lookup/insert, compacted-blob chunk read/write, and shared-log
  * append/drain logic live in their own files -- see biscuit_index.c's
  * biscuit_write_metadata_to_disk()/biscuit_read_metadata_from_disk() for
- * the metapage read/write that *is* wired up in this phase, and the
- * design doc for what's still pending.
+ * the metapage read/write wired up here.
  */
 
 /* ==================== DESIGN NOTES (see accompanying doc) ==================== */
@@ -1472,23 +1406,21 @@ typedef struct {
     int limit_remaining;
 
     /*
-     * SCRATCH CONTEXT for pending-list reconciliation's fresh bitmap
-     * copies (biscuit_reconcile_pending()/
-     * biscuit_reconcile_register_cleanup(), biscuit_pattern.c).
+     * SCRATCH CONTEXT for pending-list reconciliation's fresh bitmap copies
+     * (biscuit_reconcile_pending()/biscuit_reconcile_register_cleanup(),
+     * biscuit_pattern.c).
      *
-     * Created once in biscuit_beginscan(), MemoryContextReset() at the
-     * start of every biscuit_rescan() (bounding growth across repeated
-     * rescans of the SAME scan object -- e.g. a prepared statement's
-     * index scan reused across many pgbench transactions, which is
-     * exactly the access pattern that outlived an earlier version of
-     * this fix that relied on the ambient CurrentMemoryContext instead
-     * of an explicitly owned one), and MemoryContextDelete()'d in
-     * biscuit_endscan(). Explicit, scan-owned teardown, independent of
-     * whatever the executor's own ambient context happens to be or how
-     * long it happens to live -- see biscuit_scan.c's
-     * biscuit_reconcile_scratch_cxt for how this gets threaded down to
-     * biscuit_pattern.c without changing every call signature in
-     * between.
+     * Created once in biscuit_beginscan(), MemoryContextReset() at the start
+     * of every biscuit_rescan(), and MemoryContextDelete()'d in
+     * biscuit_endscan(). The reset is what bounds growth across repeated
+     * rescans of the SAME scan object -- e.g. a prepared statement's index
+     * scan reused across many pgbench transactions, an access pattern that
+     * outlives the ambient CurrentMemoryContext this would otherwise rely on.
+     * Explicit, scan-owned teardown, independent of whatever the executor's
+     * own ambient context happens to be or how long it happens to live -- see
+     * biscuit_scan.c's biscuit_reconcile_scratch_cxt for how this gets
+     * threaded down to biscuit_pattern.c without changing every call
+     * signature in between.
      */
     MemoryContext scratch_cxt;
 } BiscuitScanOpaque;

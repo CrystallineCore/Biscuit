@@ -219,12 +219,7 @@ biscuit_dir_find(Relation index,
  * GenericXLogRegisterBuffer() returned (the scratch copy), not
  * BufferGetPage() -- writing to the latter would bypass the WAL delta.
  *
- * Now static: this was briefly exported so biscuit_pending_append_with_dir()
- * (biscuit_blob.c) could fold a directory update into its own GenericXLog
- * transaction. That function and the whole per-structure pending chain it
- * served are gone -- the shared pendlog never touches the directory on the
- * append path at all -- so biscuit_dir_update() below is once again the
- * only caller, and this is just its inner half.
+ * biscuit_dir_update() below is the only caller; this is its inner half.
  */
 static void
 biscuit_dir_entry_write_registered(Page page, int index,

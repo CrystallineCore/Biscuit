@@ -31,22 +31,18 @@ extern bool biscuit_diag_scan_trace;
 /* ==================== COMPACTION THRESHOLD GUC ==================== */
 
 /*
- * The old drain trigger was BISCUIT_PENDLOG_DRAIN_PAGES = 512 pages of
- * *derived* records. At ~3.9 kB of derived records per row that was a few
- * thousand rows; at 8 bytes per row the same byte threshold admits roughly
- * 500x more rows before firing (§7.1).
+ * The drain threshold is denominated in ROWS rather than bytes.
  *
- * Bytes were never the quantity that mattered. What a large log costs is
+ * Bytes are not the quantity that matters. What a large log costs is
  * delta rebuild time, and rebuild time scales with the number of ROWS in
  * it -- each row costs one STRCACHE materialization plus one fan-out,
- * regardless of how few bytes its log record occupied. So the threshold is
- * re-derived in rows and made a GUC, because the right value follows from
- * a measurement (§11) that has not been taken yet.
+ * regardless of how few bytes its log record occupied.
  *
- * The default is a placeholder derived from the design's own estimate of
- * ~30 us/row of rebuild: 20,000 rows is ~0.6 s, which is the stated
- * ceiling on what a cold start should be willing to lose. Treat it as a
- * starting point for that measurement, not as a tuned value.
+ * It is a GUC because the right value follows from a measurement that has
+ * not been taken yet. The default is derived from the design's estimate
+ * of ~30 us/row of rebuild: 20,000 rows is ~0.6 s, the stated ceiling on
+ * what a cold start should be willing to redo. Treat it as a starting
+ * point for that measurement, not as a tuned value.
  */
 int biscuit_delta_compaction_slots = 20000;
 
@@ -206,9 +202,9 @@ biscuit_delta_expand_slots(Relation index,
         int          i;
 
         /*
-         * DIAGNOSTIC ONLY (biscuit.diag_scan_trace), reset per column --
-         * see the report emitted at the bottom of this column's block for
-         * what these measure and why.
+         * Diagnostic counters, gated on biscuit.diag_scan_trace and reset per
+         * column. See the report emitted at the bottom of this column's block
+         * for what they measure.
          */
         int    diag_min_len = -1;
         int    diag_max_len = -1;
@@ -284,14 +280,13 @@ biscuit_delta_expand_slots(Relation index,
             /*
              * len_ge_bound = -1: unbounded.
              *
-             * The write path clamped its LEN_GE loop to the live allocated
-             * capacity of length_ge_bitmaps[], which is an in-memory array
-             * size, not a property of the data. The delta has no such
-             * array -- it is keyed sparsely by identity (§5) -- so it
-             * emits the full ladder. This is the correct direction to
-             * differ in: the clamp could only ever have dropped rungs the
-             * data called for, and a drain creates whatever directory
-             * entries it is handed.
+             * The write path clamps its LEN_GE loop to the live allocated capacity
+             * of length_ge_bitmaps[], which is an in-memory array size rather than a
+             * property of the data. The delta has no such array -- it is keyed
+             * sparsely by identity (§5) -- so it emits the full ladder. This is the
+             * safe direction to differ in: the clamp can only ever drop rungs the
+             * data called for, and a drain creates whatever directory entries it is
+             * handed.
              */
             biscuit_fanout_string(s, s ? (int) strlen(s) : 0,
                                   l, l ? (int) strlen(l) : 0,
@@ -330,20 +325,15 @@ biscuit_delta_expand_slots(Relation index,
     /*
      * Report, once per expansion, how many logged slots expanded to nothing.
      *
-     * Promoted from DEBUG1 to WARNING. At DEBUG1 this was invisible at any
-     * default log level, which meant the v38 run that was meant to test this
-     * hypothesis could not have observed it either way -- the absence of the
-     * line in that run's logs carries no information.
-     *
-     * The original reason for DEBUG1 was that a zero-identity expansion is
-     * routine on an index over a nullable column, so a WARNING would fire
-     * constantly on correct workloads. That is still true, and it is why the
-     * check is now gated on BISCUIT_DELTA_WARN_SILENT_SLOTS rather than
-     * simply raised: a handful per expansion is noise, and a run of dozens is
-     * the failure being hunted. The threshold is a blunt instrument and the
-     * right long-term answer is to distinguish "column value was NULL" from
-     * "STRCACHE read found nothing" at the point of the read, which needs a
-     * signal biscuit_rowstore_str_read_slots() does not currently return.
+     * A zero-identity expansion is routine on an index over a nullable
+     * column, so an unconditional WARNING would fire constantly on correct
+     * workloads. The check is therefore gated on
+     * BISCUIT_DELTA_WARN_SILENT_SLOTS: a handful per expansion is noise, a
+     * run of dozens indicates a failure. The threshold is a blunt
+     * instrument; the better answer is to distinguish "column value was
+     * NULL" from "STRCACHE read found nothing" at the point of the read,
+     * which needs a signal biscuit_rowstore_str_read_slots() does not
+     * currently return.
      *
      * On an all-NOT-NULL workload the expected count is zero and any firing
      * at all is meaningful.

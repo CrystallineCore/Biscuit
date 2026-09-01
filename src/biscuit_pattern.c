@@ -55,18 +55,17 @@ MemoryContext biscuit_reconcile_scratch_cxt = NULL;
  * them.
  *
  * WHY A MEMORY-CONTEXT CALLBACK RATHER THAN, SAY, THE SNAPSHOT ITSELF:
- * an earlier version of this fix registered the fresh copy with the
- * pendlog snapshot it was reconciled against, freeing it alongside
- * kill/live/seen/expanded when that snapshot was next rebuilt or
- * evicted. That is bounded in principle but not in practice: a
+ * registering the fresh copy with the pendlog snapshot it was
+ * reconciled against, to be freed alongside kill/live/seen/expanded when
+ * that snapshot is next rebuilt or evicted, is bounded in principle but
+ * not in practice: a
  * snapshot's common-case read path is to incrementally *extend* in
  * place (biscuit_pendlog_snapshot(), biscuit_pendlog.c) rather than
  * rebuild, and a workload whose query mix rarely forces a full rebuild
  * (no drain, no relid contention for one of the 8 cache slots) could
  * leave that snapshot -- and every fresh copy ever attached to it --
- * alive for the rest of the session. That is a real, observed leak
- * (BISCUIT-3.0.0-GA-Report.md's v63->v65 series: the slope dropped but
- * never plateaued), just a shallower one than the original.
+ * alive for the rest of the session. That is a real, observed leak:
+ * per-backend memory climbs without ever plateauing.
  *
  * A context reset callback fixes this by tying the fresh copy's
  * lifetime to something that resets on a bounded, predictable cadence
@@ -85,9 +84,9 @@ MemoryContext biscuit_reconcile_scratch_cxt = NULL;
  * regardless of which case (a)/(b) they got back from this function.
  * See their own comments.
  *
- * (This function used to say a fresh copy was "context-scoped, reclaimed
- * by ordinary memory-context cleanup" -- true of the *scaffolding*
- * pointing at it, never of the RoaringBitmap itself: under HAVE_ROARING a
+ * (A fresh copy is NOT "context-scoped, reclaimed by ordinary
+ * memory-context cleanup". That is true of the *scaffolding* pointing at
+ * it, never of the RoaringBitmap itself: under HAVE_ROARING a
  * RoaringBitmap is CRoaring-allocated, not palloc'd, so no ordinary
  * MemoryContextDelete/Reset ever reclaims it on its own -- it takes an
  * explicit callback, which is exactly what
@@ -123,12 +122,11 @@ biscuit_reconcile_register_cleanup(RoaringBitmap *bm)
      * scan-owned lifetime -- reset every rescan, deleted at endscan; see
      * biscuit_reconcile_scratch_cxt's declaration in biscuit_pattern.h)
      * over the ambient CurrentMemoryContext, whose lifetime this file
-     * has no way to verify and which an earlier version of this fix
-     * learned not to trust (BISCUIT-3.0.0-GA-Report.md's v65->v66 §10
-     * finding: flat under read-only load, still climbing under
-     * write-concurrent load -- consistent with CurrentMemoryContext
-     * living far longer than one statement on at least one access
-     * pattern this codebase exercises).
+     * has no way to verify. Relying on CurrentMemoryContext alone
+     * measures flat under read-only load but still climbing under
+     * write-concurrent load, which is consistent with it living far
+     * longer than one statement on at least one access pattern this
+     * codebase exercises.
      */
     target = biscuit_reconcile_scratch_cxt ? biscuit_reconcile_scratch_cxt : CurrentMemoryContext;
 
@@ -782,13 +780,12 @@ biscuit_get_col_length_ge_lower(Relation index, ColumnIndex *col, int col_idx, i
  *
  * WHY THIS EXISTS -- this is a correctness fix, not a refactor.
  *
- * biscuit_scan.c used to build this set by reading
- * col->length_ge_bitmaps[0] directly out of the in-memory ColumnIndex,
- * with no reconciliation, and then subtract from it a col_result that HAD
- * been reconciled. While per-structure pending chains existed that was
- * survivable in practice; once the shared pending log deferred drains far
- * longer (BISCUIT_PENDLOG_DRAIN_PAGES = 4MB, deliberately, for OLAP bulk
- * loads) the two sides routinely disagreed about which slots exist.
+ * This set must NOT be built by reading col->length_ge_bitmaps[0] directly
+ * out of the in-memory ColumnIndex, with no reconciliation, and then
+ * subtracting from it a col_result that HAS been reconciled. With the
+ * shared pending log deferring drains for as long as it does
+ * (BISCUIT_PENDLOG_DRAIN_PAGES = 4MB, deliberately, for OLAP bulk loads),
+ * the two sides routinely disagree about which slots exist.
  *
  * The observable failure: insert 600 rows, delete 80, VACUUM, insert 80
  * more (which recycle the freed slots via the free list). The recycled
@@ -864,8 +861,7 @@ biscuit_get_negation_base_set_legacy(Relation index, BiscuitIndex *idx,
              * absorbed into that copy and is now dead weight; free it
              * rather than leaving it an orphan (it is a real,
              * CRoaring-allocated bitmap like any other, not
-             * context-scoped scratch, whatever an earlier version of
-             * this comment claimed). And since our own caller's contract
+             * context-scoped scratch). And since our own caller's contract
              * is "you own what this returns, free it whenever", hand
              * back an independent copy of our own rather than the
              * registered-for-callback `reconciled` -- returning that
@@ -1689,12 +1685,12 @@ typedef struct WMFrame {
  * simultaneously, and the stack fills before every combination has been
  * tried.
  *
- * The code used to treat a full stack as "this candidate matches": any row
- * that reached here was OR'd straight into `result`, without ever checking
- * whether the *remaining* parts (the ones that would have been explored had
- * there been stack room) actually occur in the row's text. For
- * repeat('ab',500) against '%a%b%c%', a row that matched "a" then "b" got
- * treated as matching '%a%b%c%' even though the row has no 'c' at all. That
+ * A full stack must NOT be treated as "this candidate matches". OR-ing such
+ * a row straight into `result` without checking whether the *remaining*
+ * parts (the ones that would have been explored had there been stack room)
+ * actually occur in the row's text is wrong: for repeat('ab',500) against
+ * '%a%b%c%', a row matching "a" then "b" would count as matching
+ * '%a%b%c%' even though the row has no 'c' at all. That
  * is a genuine false positive, not a lossy approximation the executor
  * cleans up afterward: BISCUIT's amgetbitmap() always reports
  * recheck = false (see biscuit_scan.c), so PostgreSQL never re-evaluates
@@ -1901,9 +1897,9 @@ biscuit_recursive_windowed_match(
     int i;
     WMFrame *stack     = (WMFrame *) palloc(WM_MAX_STACK * sizeof(WMFrame));
     int      stack_top = 0;
-    /* FIX 5 (position-loop half): once `result` already contains every
-     * candidate row, no further position/part probe can add anything
-     * back -- stop draining the stack instead of continuing to probe. */
+    /* Once `result` already contains every candidate row, no further
+     * position/part probe can add anything back -- stop draining the
+     * stack instead of continuing to probe. */
     uint64_t total_candidates = biscuit_roaring_count(current_candidates);
     /*
      * Upper bound on result's cardinality, cheap to maintain (just an
@@ -1911,7 +1907,7 @@ biscuit_recursive_windowed_match(
      * O(containers), not O(1) -- on every single OR in a wide sweep.
      * cands frames can overlap (the same row can satisfy the pattern at
      * more than one position), so this sum can overcount the true
-     * result cardinality; that's fine, it's only used to skip the exact
+     * result cardinality. That is harmless: it only skips the exact
      * check below until saturation is actually plausible.
      */
     uint64_t result_count_upper_bound = 0;
@@ -2055,9 +2051,9 @@ biscuit_recursive_windowed_match_ilike(
     int i;
     WMFrame *stack     = (WMFrame *) palloc(WM_MAX_STACK * sizeof(WMFrame));
     int      stack_top = 0;
-    /* FIX 5 (position-loop half): once `result` already contains every
-     * candidate row, no further position/part probe can add anything
-     * back -- stop draining the stack instead of continuing to probe. */
+    /* Once `result` already contains every candidate row, no further
+     * position/part probe can add anything back -- stop draining the
+     * stack instead of continuing to probe. */
     uint64_t total_candidates = biscuit_roaring_count(current_candidates);
     /*
      * Upper bound on result's cardinality, cheap to maintain (just an
@@ -2065,7 +2061,7 @@ biscuit_recursive_windowed_match_ilike(
      * O(containers), not O(1) -- on every single OR in a wide sweep.
      * cands frames can overlap (the same row can satisfy the pattern at
      * more than one position), so this sum can overcount the true
-     * result cardinality; that's fine, it's only used to skip the exact
+     * result cardinality. That is harmless: it only skips the exact
      * check below until saturation is actually plausible.
      */
     uint64_t result_count_upper_bound = 0;
@@ -2410,9 +2406,9 @@ biscuit_recursive_windowed_match_col(
     int i;
     WMFrame *stack     = (WMFrame *) palloc(WM_MAX_STACK * sizeof(WMFrame));
     int      stack_top = 0;
-    /* FIX 5 (position-loop half): once `result` already contains every
-     * candidate row, no further position/part probe can add anything
-     * back -- stop draining the stack instead of continuing to probe. */
+    /* Once `result` already contains every candidate row, no further
+     * position/part probe can add anything back -- stop draining the
+     * stack instead of continuing to probe. */
     uint64_t total_candidates = biscuit_roaring_count(current_candidates);
     /*
      * Upper bound on result's cardinality, cheap to maintain (just an
@@ -2420,7 +2416,7 @@ biscuit_recursive_windowed_match_col(
      * O(containers), not O(1) -- on every single OR in a wide sweep.
      * cands frames can overlap (the same row can satisfy the pattern at
      * more than one position), so this sum can overcount the true
-     * result cardinality; that's fine, it's only used to skip the exact
+     * result cardinality. That is harmless: it only skips the exact
      * check below until saturation is actually plausible.
      */
     uint64_t result_count_upper_bound = 0;
@@ -2558,9 +2554,9 @@ biscuit_recursive_windowed_match_col_ilike(
     int i;
     WMFrame *stack     = (WMFrame *) palloc(WM_MAX_STACK * sizeof(WMFrame));
     int      stack_top = 0;
-    /* FIX 5 (position-loop half): once `result` already contains every
-     * candidate row, no further position/part probe can add anything
-     * back -- stop draining the stack instead of continuing to probe. */
+    /* Once `result` already contains every candidate row, no further
+     * position/part probe can add anything back -- stop draining the
+     * stack instead of continuing to probe. */
     uint64_t total_candidates = biscuit_roaring_count(current_candidates);
     /*
      * Upper bound on result's cardinality, cheap to maintain (just an
@@ -2568,7 +2564,7 @@ biscuit_recursive_windowed_match_col_ilike(
      * O(containers), not O(1) -- on every single OR in a wide sweep.
      * cands frames can overlap (the same row can satisfy the pattern at
      * more than one position), so this sum can overcount the true
-     * result cardinality; that's fine, it's only used to skip the exact
+     * result cardinality. That is harmless: it only skips the exact
      * check below until saturation is actually plausible.
      */
     uint64_t result_count_upper_bound = 0;
@@ -2819,7 +2815,7 @@ biscuit_query_pattern_masked(Relation index, BiscuitIndex *idx, const char *patt
                 if (!ts) biscuit_roaring_add(result, i);
             }
             biscuit_free_parsed_pattern(parsed);
-            parsed = NULL; /* FIX 5: prevent double-free in PG_CATCH */
+            parsed = NULL; /* guard against double-free in PG_CATCH */
             return result;
         }
 
@@ -2859,8 +2855,8 @@ biscuit_query_pattern_masked(Relation index, BiscuitIndex *idx, const char *patt
                         int part_char_len = parsed->part_lens[0];
                         RoaringBitmap *lf = biscuit_get_length_ge(index, idx, part_char_len);
                         if (lf) { biscuit_roaring_and_inplace(candidates, lf); biscuit_roaring_free(lf); }
-                        /* FIX 1: shrink the verify set with the caller's
-                         * mask before the O(candidates x string_length)
+                        /* Shrink the verify set with the caller's mask
+                         * before the O(candidates x string_length)
                          * scalar substring scan below, instead of
                          * scanning every char_cache hit in the table. */
                         if (mask) biscuit_roaring_and_inplace(candidates, mask);
@@ -2931,7 +2927,7 @@ biscuit_query_pattern_masked(Relation index, BiscuitIndex *idx, const char *patt
             RoaringBitmap *candidates;
             result = biscuit_roaring_create();
             candidates = biscuit_get_length_ge(index, idx, min_len);
-            /* FIX 1: seed the sweep from the caller's mask too, so a
+            /* Seed the sweep from the caller's mask too, so a
              * small mask (e.g. from a cheap sibling predicate already
              * evaluated in biscuit_rescan()) collapses the per-position
              * bitmap ANDs in biscuit_recursive_windowed_match() to a
@@ -2952,7 +2948,7 @@ biscuit_query_pattern_masked(Relation index, BiscuitIndex *idx, const char *patt
         }
 
         biscuit_free_parsed_pattern(parsed);
-        parsed = NULL; /* FIX 5: prevent double-free in PG_CATCH */
+        parsed = NULL; /* guard against double-free in PG_CATCH */
     }
     PG_CATCH();
     {
@@ -3093,7 +3089,7 @@ biscuit_query_pattern_ilike_masked(Relation index, BiscuitIndex *idx, const char
 #endif
                 if (!ts) biscuit_roaring_add(result, i);
             }
-            biscuit_free_parsed_pattern(parsed); parsed = NULL; /* FIX 5 */ pfree(pl); return result;
+            biscuit_free_parsed_pattern(parsed); parsed = NULL; /* guard against double-free in PG_CATCH */ pfree(pl); return result;
         }
         min_len = 0;
         for (i = 0; i < parsed->part_count; i++) min_len += parsed->part_lens[i];
@@ -3130,7 +3126,7 @@ biscuit_query_pattern_ilike_masked(Relation index, BiscuitIndex *idx, const char
                     int pcl = parsed->part_lens[0];
                     RoaringBitmap *lf = biscuit_get_length_ge_lower(index, idx, pcl);
                     if (lf) { biscuit_roaring_and_inplace(candidates, lf); biscuit_roaring_free(lf); }
-                    /* FIX 1 */
+                    /* restrict the sweep with the caller's mask */
                     if (mask) biscuit_roaring_and_inplace(candidates, mask);
                     #ifdef HAVE_ROARING
                     { roaring_uint32_iterator_t *iter = roaring_iterator_create(candidates);
@@ -3181,7 +3177,7 @@ biscuit_query_pattern_ilike_masked(Relation index, BiscuitIndex *idx, const char
             RoaringBitmap *candidates;
             result = biscuit_roaring_create();
             candidates = biscuit_get_length_ge_lower(index, idx, min_len);
-            /* FIX 1 */
+            /* restrict the sweep with the caller's mask */
             if (mask && candidates) biscuit_roaring_and_inplace(candidates, mask);
             if (candidates && !biscuit_roaring_is_empty(candidates)) {
                 if (!parsed->starts_percent) { RoaringBitmap *first = biscuit_match_part_at_pos_ilike(index, idx, parsed->parts[0], parsed->part_byte_lens[0], 0); if (first) { biscuit_roaring_and_inplace(first, candidates); biscuit_roaring_free(candidates); candidates = first; } }
@@ -3192,7 +3188,7 @@ biscuit_query_pattern_ilike_masked(Relation index, BiscuitIndex *idx, const char
         }
 
         biscuit_free_parsed_pattern(parsed);
-        parsed = NULL; /* FIX 5 */
+        parsed = NULL; /* guard against double-free in PG_CATCH */
     }
     PG_CATCH();
     {
@@ -3305,7 +3301,7 @@ biscuit_query_column_pattern_masked(Relation index, BiscuitIndex *idx, int col_i
             RoaringBitmap *lgb = biscuit_reconcile_pending(index, col->length_ge_bitmaps[0],
                                                              col_idx, false, BISCUIT_DIR_KIND_LEN_GE, -1, 0);
             result = lgb ? biscuit_roaring_copy(lgb) : biscuit_roaring_create();
-            biscuit_free_parsed_pattern(parsed); parsed = NULL; /* FIX 5 */ return result;
+            biscuit_free_parsed_pattern(parsed); parsed = NULL; /* guard against double-free in PG_CATCH */ return result;
         }
         min_len = 0;
         for (i = 0; i < parsed->part_count; i++) min_len += parsed->part_lens[i];
@@ -3360,7 +3356,7 @@ biscuit_query_column_pattern_masked(Relation index, BiscuitIndex *idx, int col_i
                     RoaringBitmap *lf    = biscuit_get_col_length_ge(index, col, col_idx, pcl);
 
                     if (lf) { biscuit_roaring_and_inplace(cands, lf); biscuit_roaring_free(lf); }
-                    /* FIX 1 */
+                    /* restrict the sweep with the caller's mask */
                     if (mask) biscuit_roaring_and_inplace(cands, mask);
 
 #ifdef HAVE_ROARING
@@ -3426,7 +3422,7 @@ biscuit_query_column_pattern_masked(Relation index, BiscuitIndex *idx, int col_i
             RoaringBitmap *cands;
             result = biscuit_roaring_create();
             cands = biscuit_get_col_length_ge(index, col, col_idx, min_len);
-            /* FIX 1 */
+            /* restrict the sweep with the caller's mask */
             if (mask && cands) biscuit_roaring_and_inplace(cands, mask);
             if (cands && !biscuit_roaring_is_empty(cands)) {
                 if (!parsed->starts_percent) { RoaringBitmap *first = biscuit_match_col_part_at_pos(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0); if (first) { biscuit_roaring_and_inplace(first, cands); biscuit_roaring_free(cands); cands = first; } }
@@ -3436,7 +3432,7 @@ biscuit_query_column_pattern_masked(Relation index, BiscuitIndex *idx, int col_i
             } else if (cands) biscuit_roaring_free(cands);
         }
         biscuit_free_parsed_pattern(parsed);
-        parsed = NULL; /* FIX 5 */
+        parsed = NULL; /* guard against double-free in PG_CATCH */
     }
     PG_CATCH();
     {
@@ -3539,7 +3535,7 @@ biscuit_query_column_pattern_ilike_masked(Relation index, BiscuitIndex *idx, int
                                               BISCUIT_DIR_KIND_LEN_GE, -1, 0)
                 : NULL;
             result = lgb ? biscuit_roaring_copy(lgb) : biscuit_roaring_create();
-            biscuit_free_parsed_pattern(parsed); parsed = NULL; /* FIX 5 */ pfree(pl); return result;
+            biscuit_free_parsed_pattern(parsed); parsed = NULL; /* guard against double-free in PG_CATCH */ pfree(pl); return result;
         }
         min_len = 0;
         for (i = 0; i < parsed->part_count; i++) min_len += parsed->part_lens[i];
@@ -3597,7 +3593,7 @@ biscuit_query_column_pattern_ilike_masked(Relation index, BiscuitIndex *idx, int
                     RoaringBitmap *lf    = biscuit_get_col_length_ge_lower(index, col, col_idx, pcl);
 
                     if (lf) { biscuit_roaring_and_inplace(cands, lf); biscuit_roaring_free(lf); }
-                    /* FIX 1 */
+                    /* restrict the sweep with the caller's mask */
                     if (mask) biscuit_roaring_and_inplace(cands, mask);
 
 #ifdef HAVE_ROARING
@@ -3668,7 +3664,7 @@ biscuit_query_column_pattern_ilike_masked(Relation index, BiscuitIndex *idx, int
             RoaringBitmap *cands;
             result = biscuit_roaring_create();
             cands = biscuit_get_col_length_ge_lower(index, col, col_idx, min_len);
-            /* FIX 1 */
+            /* restrict the sweep with the caller's mask */
             if (mask && cands) biscuit_roaring_and_inplace(cands, mask);
             if (cands && !biscuit_roaring_is_empty(cands)) {
                 if (!parsed->starts_percent) { RoaringBitmap *first = biscuit_match_col_part_at_pos_ilike(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0); if (first) { biscuit_roaring_and_inplace(first, cands); biscuit_roaring_free(cands); cands = first; } }
@@ -3678,7 +3674,7 @@ biscuit_query_column_pattern_ilike_masked(Relation index, BiscuitIndex *idx, int
             } else if (cands) biscuit_roaring_free(cands);
         }
         biscuit_free_parsed_pattern(parsed);
-        parsed = NULL; /* FIX 5 */
+        parsed = NULL; /* guard against double-free in PG_CATCH */
     }
     PG_CATCH();
     {
@@ -3725,9 +3721,9 @@ calculate_anchor_strength(const char *pattern, bool is_prefix, bool is_suffix)
  * LIKE/NOT ILIKE scoring, see the comment at the end of this function) --
  * but that's a patch on this classifier, not a fix to the underlying
  * duplication. Consolidating the two into one shared classifier is still
- * recommended; now that biscuit_index.h and biscuit_pattern.h are both
- * available, the header-plumbing obstacle that used to block that is
- * gone, but the merge itself is a real design decision (the two
+ * recommended; with biscuit_index.h and biscuit_pattern.h both available
+ * there is no header-plumbing obstacle to it, but the merge itself is a
+ * real design decision (the two
  * classifiers compute different things -- BiscuitPatternShape is built
  * for cost-model math, QueryPredicate for ordering) that deserves its
  * own reviewed change rather than being folded in here unrequested.
@@ -3766,7 +3762,7 @@ analyze_pattern(QueryPredicate *pred)
     if (pred->selectivity_score > 1.0) pred->selectivity_score = 1.0;
 
     /*
-     * FIX 3b: this score measures how selective the *pattern* is, not
+     * This score measures how selective the *pattern* is, not
      * how selective the *predicate* is. For NOT LIKE / NOT ILIKE the
      * predicate returns the complement of the pattern match, so a
      * strongly-anchored pattern ('usr\_1234\_%', score ~0.0, "looks

@@ -20,14 +20,9 @@
  * Explicitly NOT here:
  *   - BiscuitDirEntry lookup/insert/update -- biscuit_dir.h.
  *   - The pending-delta log, its append path, its read-time snapshot and
- *     its drain -- biscuit_pendlog.h. Note that the per-structure pending
- *     chain primitives that used to live in this file
- *     (biscuit_pending_append(), biscuit_pending_append_with_dir(),
- *     biscuit_pending_drain(), and the BiscuitDrainStats they reported
- *     through) are GONE, along with the BISCUIT_PAGE_PENDING page format
- *     itself. They were superseded by the single index-wide shared log in
- *     biscuit_pendlog.c and were dead code by the time they were removed;
- *     see biscuit_pendlog.h's header for why the shared log replaced them.
+ *     its drain -- biscuit_pendlog.h. There is one index-wide shared log
+ *     rather than a per-structure pending chain; see biscuit_pendlog.h's
+ *     header for the rationale.
  *   - The in-place row-identity storage (TIDS/STRCACHE/HEADER) --
  *     biscuit_rowstore.h.
  *
@@ -36,8 +31,7 @@
  * coordination own that themselves. The one ordering rule imposed here is
  * biscuit_page_alloc()'s: it takes the metapage lock internally, so no
  * caller may hold the metapage lock across a call into it (see
- * biscuit_pendlog_append()'s locking comment, which cost a self-deadlock
- * to get right).
+ * biscuit_pendlog_append()'s locking comment).
  */
 
 #ifndef BISCUIT_BLOB_H
@@ -181,17 +175,16 @@ extern void biscuit_page_free_chain(Relation index, BlockNumber head);
  * onto (BiscuitMetaPageData.fsm_root), reusing it once its
  * opaque.recycle_xid clears the oldest-still-running-transaction
  * horizon; falls back to extending the relation (P_NEW) when the
- * freelist is empty or its head isn't old enough yet.
+ * freelist is empty or its head is not old enough yet.
  *
- * This is the counterpart to biscuit_page_free_blob()/_free_chain(): use
- * it at every allocation site that used to call
- * ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_NORMAL, NULL) for a
- * blob chunk, pendlog, or directory page, EXCEPT where the caller
- * already holds the metapage buffer lock itself (this function acquires
- * that lock internally to peek/pop the freelist, so calling it while
- * already holding that same lock will self-deadlock -- see
- * biscuit_dir_ensure_root() in biscuit_dir.c for the one such site,
- * which deliberately keeps plain P_NEW instead).
+ * This is the counterpart to biscuit_page_free_blob()/_free_chain(). Use
+ * it at every allocation site for a blob chunk, pendlog, or directory
+ * page in place of a bare ReadBufferExtended(index, MAIN_FORKNUM, P_NEW,
+ * RBM_NORMAL, NULL), EXCEPT where the caller already holds the metapage
+ * buffer lock itself: this function acquires that lock internally to
+ * peek/pop the freelist, so calling it while already holding that same
+ * lock self-deadlocks. biscuit_dir_ensure_root() in biscuit_dir.c is the
+ * one such site, and deliberately keeps plain P_NEW instead.
  *
  * Locking: only ever inspects the freelist head (LIFO), never walks
  * deeper; see biscuit_blob.c for the full target-then-metapage lock

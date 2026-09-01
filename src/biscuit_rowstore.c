@@ -167,20 +167,16 @@ biscuit_pagedir_lookup(Relation index, BlockNumber root, uint32 logical)
  * corruption would surface far away from its cause (as garbage TIDs or
  * strings, not as an error).
  *
- * The invariant used to hold only "because a new logical page is only ever
- * needed by the fresh-append insert path, where slot_idx == num_records++
- * is strictly increasing". That reasoning was single-backend reasoning and
- * it did not survive concurrency: two backends whose slots landed on the
- * same not-yet-existing logical page both arrived here with the same
- * expect_logical, and the loser got the error below instead of an insert.
- *
- * This function now has exactly one caller, biscuit_pagedir_ensure(),
- * which computes expect_logical from the chain's live length while holding
- * the per-index row-identity allocation lock. The two checks below are
+ * This function has exactly one caller, biscuit_pagedir_ensure(), which
+ * computes expect_logical from the chain's live length while holding the
+ * per-index row-identity allocation lock. The two checks below are
  * therefore unreachable by construction rather than merely unlikely, and
- * are retained as assertions against a future caller reintroducing the old
- * "caller supplies the number it thinks is next" contract. Do not call
- * this directly; call biscuit_pagedir_ensure().
+ * are retained as assertions against a future caller reintroducing a
+ * "caller supplies the number it thinks is next" contract, which does not
+ * survive concurrency: two backends whose slots land on the same
+ * not-yet-existing logical page arrive with the same expect_logical and
+ * one of them gets an error instead of an insert. Do not call this
+ * directly; call biscuit_pagedir_ensure().
  *
  * Unlike TIDSLOT/STRPTR writes, this always walks from the root to find
  * the true last page. Directory-chain growth is bounded by
@@ -375,27 +371,21 @@ biscuit_pagedir_count(Relation index, BlockNumber root)
  * biscuit_pagedir_ensure
  *
  * "Give me the physical block backing logical page `logical`, allocating
- * and linking a blank one of `page_kind` if it doesn't exist yet."
+ * and linking a blank one of `page_kind` if it does not exist yet."
  *
- * This replaces the old lookup-then-allocate-then-append sequence that
- * biscuit_rowstore_tid_write()/biscuit_strptr_write() each open-coded, and
- * it exists because that sequence was not atomic across backends. Two
- * backends whose freshly-claimed slots happened to land on the same
- * not-yet-existing logical page would BOTH see InvalidBlockNumber from the
- * lookup, BOTH allocate a physical page, and both then call
- * biscuit_pagedir_append() with the same expect_logical. The first won;
- * the second hit the dense-in-order check and raised
+ * Lookup and allocation happen together, under a lock, because doing them
+ * as separate steps is not atomic across backends. Two backends whose
+ * freshly-claimed slots land on the same not-yet-existing logical page
+ * would BOTH see InvalidBlockNumber from the lookup, BOTH allocate a
+ * physical page, and both call biscuit_pagedir_append() with the same
+ * expect_logical. The first wins; the second trips the dense-in-order
+ * check, aborting an otherwise valid INSERT and orphaning the slot page it
+ * had already allocated. Because the losing backends are consistently the
+ * same ones, that presents as writer starvation rather than ordinary
+ * contention -- retrying does not help, because the retry races the same
+ * way.
  *
- *     biscuit: row-identity page directory append out of order
- *     (next logical page is 38, caller supplied 37)
- *
- * aborting an otherwise valid INSERT, and orphaning the slot page it had
- * already allocated. Because the losing backends were consistently the
- * same ones, this presented as writer starvation rather than as ordinary
- * contention: retrying did not help, because the retry raced exactly the
- * same way.
- *
- * Two things fix that, and both are needed:
+ * Two things prevent it, and both are needed:
  *
  *   1. Callers hold the per-index row-identity allocation lock (see
  *      biscuit_persist.c's biscuit_rowstore_alloc_lock()), so only one
@@ -408,11 +398,10 @@ biscuit_pagedir_count(Relation index, BlockNumber root)
  *      it, use theirs" instead of an error plus a leaked page.
  *
  * The strict gap check is deliberately kept: `logical` beyond the end of
- * the chain by more than one is still a hard ERROR, because the directory
- * is a positional array and a gap really would silently mis-resolve every
- * later logical page. What is no longer treated as an error is `logical`
- * pointing at an entry that already exists -- that is now the expected
- * outcome of a benign race, not corruption.
+ * the chain by more than one is a hard ERROR, because the directory is a
+ * positional array and a gap really would silently mis-resolve every later
+ * logical page. `logical` pointing at an entry that already exists is not
+ * an error -- that is the expected outcome of a benign race.
  */
 static BlockNumber
 biscuit_pagedir_ensure(Relation index, BlockNumber *root,
@@ -429,21 +418,20 @@ biscuit_pagedir_ensure(Relation index, BlockNumber *root,
     /*
      * Fill forward from the chain's current length. Normally that means
      * allocating exactly one page, because slot numbers are handed out
-     * contiguously by biscuit_claim_new_slot() and so logical pages are
-     * needed in order.
+     * contiguously by biscuit_claim_new_slot() and so logical pages are needed
+     * in order.
      *
      * The loop is not decoration, though. A slot claim is deliberately
      * non-transactional -- the metapage counter advances at claim time and
      * never retreats -- so a transaction that claims a slot and then aborts
-     * leaves that slot number permanently spoken for and never written.
-     * Enough consecutive aborted claims (a full page's worth, ~1300 slots
-     * at the default BLCKSZ) would skip a logical page entirely, and the
-     * next successful insert would then be asking for a page one beyond the
-     * end of the chain. The old code raised a hard error there, which would
-     * have wedged every subsequent insert into that index permanently.
+     * leaves that slot number permanently spoken for and never written. Enough
+     * consecutive aborted claims (a full page's worth, ~1300 slots at the
+     * default BLCKSZ) skip a logical page entirely, and the next successful
+     * insert then asks for a page one beyond the end of the chain. Erroring
+     * there would wedge every subsequent insert into that index permanently.
      * Allocating the skipped pages blank costs one page each and is
-     * self-healing: a zeroed TIDSLOT page reads as entirely unoccupied,
-     * which is exactly what those abandoned slots are.
+     * self-healing: a zeroed TIDSLOT page reads as entirely unoccupied, which
+     * is exactly what those abandoned slots are.
      */
     have = biscuit_pagedir_count(index, *root);
 
@@ -468,13 +456,12 @@ biscuit_pagedir_ensure(Relation index, BlockNumber *root,
         BiscuitPageOpaque  opaque;
 
         /*
-         * Allocate the slot page blank. Both callers then perform exactly
-         * the same in-place slot write they would perform on a pre-existing
-         * page, which is why this returns a zeroed page rather than taking
-         * the payload: it collapses the old "new logical page" and
-         * "existing logical page" branches into one code path per caller. A
-         * zeroed TIDSLOT page also reads as entirely unoccupied, which is
-         * what the BISCUIT_SLOT_WRITE_FRESH guard in
+         * Allocate the slot page blank. Both callers then perform exactly the same
+         * in-place slot write they would perform on a pre-existing page, which is
+         * why this returns a zeroed page rather than taking the payload: it keeps
+         * "new logical page" and "existing logical page" on one code path per
+         * caller. A zeroed TIDSLOT page also reads as entirely unoccupied, which
+         * is what the BISCUIT_SLOT_WRITE_FRESH guard in
          * biscuit_rowstore_tid_write() expects.
          */
         buf   = biscuit_page_alloc(index, page_kind);
@@ -555,13 +542,12 @@ biscuit_rowstore_tid_write(Relation index, BlockNumber *pagedir_root,
     biscuit_ensure_synchronous_commit();
 
     /*
-     * Resolve (allocating and linking a blank page if this logical page
-     * doesn't exist yet) and then write the slot in place. There is no
-     * longer a separate "new logical page" branch here: allocation is a
-     * detail of biscuit_pagedir_ensure(), which is idempotent under a
-     * concurrent racer, whereas the old open-coded
-     * lookup-allocate-then-append could raise "page directory append out
-     * of order" and starve the losing backend. See that function.
+     * Resolve (allocating and linking a blank page if this logical page does
+     * not exist yet) and then write the slot in place. Allocation is a detail
+     * of biscuit_pagedir_ensure(), which is idempotent under a concurrent
+     * racer; an open-coded lookup-allocate-then-append here would raise "page
+     * directory append out of order" and starve the losing backend. See that
+     * function.
      */
     blkno = biscuit_pagedir_ensure(index, pagedir_root, logical,
                                     BISCUIT_PAGE_TIDSLOT);
@@ -577,26 +563,26 @@ biscuit_rowstore_tid_write(Relation index, BlockNumber *pagedir_root,
         /*
          * DEFENSE IN DEPTH against a slot-allocation regression.
          *
-         * The buffer lock we just took serializes concurrent writers to
-         * this page, but it cannot tell us whether two of them were handed
-         * the *same* slot number -- that decision was made further up, in
-         * biscuit_claim_new_slot(). Before this check existed, a duplicate
-         * claim reached exactly here and simply overwrote the previous
-         * occupant, losing a row with no error anywhere. The only guard in
-         * this file, biscuit_pagedir_append()'s dense-in-order check, fires
-         * only when a whole new logical page must be allocated, which is
-         * the rare case -- hence a loud failure in a minority of runs and
-         * silent loss in all of them.
+         * The buffer lock we just took serializes concurrent writers to this page,
+         * but it cannot tell us whether two of them were handed the *same* slot
+         * number -- that decision was made further up, in
+         * biscuit_claim_new_slot(). A duplicate claim reaches exactly here, and
+         * without this check simply overwrites the previous occupant, losing a row
+         * with no error anywhere. The only other guard in this file,
+         * biscuit_pagedir_append()'s dense-in-order check, fires only when a whole
+         * new logical page must be allocated, which is the rare case -- so a
+         * regression there would be loud in a minority of runs and silent in the
+         * rest.
          *
-         * A caller claiming a fresh slot asserts the slot has never been
-         * written. A freshly PageInit'd TIDSLOT page is all zeroes and
-         * ItemPointerIsValid() is false for a zeroed pointer, so "occupied"
-         * is exactly ItemPointerIsValid(). Deleted slots are also cleared
-         * to invalid (biscuit_bulkdelete() calls ItemPointerSetInvalid()
-         * then rewrites the slot), so a recycled slot reads as free too.
+         * A caller claiming a fresh slot asserts the slot has never been written.
+         * A freshly PageInit'd TIDSLOT page is all zeroes and ItemPointerIsValid()
+         * is false for a zeroed pointer, so "occupied" is exactly
+         * ItemPointerIsValid(). Deleted slots are also cleared to invalid
+         * (biscuit_bulkdelete() calls ItemPointerSetInvalid() then rewrites the
+         * slot), so a recycled slot reads as free too.
          *
-         * The read is done on the real buffer page before GenericXLogStart()
-         * so we never open a WAL transaction we are about to abort out of.
+         * The read is done on the real buffer page before GenericXLogStart() so we
+         * never open a WAL transaction we are about to abort out of.
          */
         if (mode == BISCUIT_SLOT_WRITE_FRESH)
         {
@@ -819,17 +805,16 @@ biscuit_rowstore_free_tid_chain(Relation index, BlockNumber pagedir_root)
  * is still held. So a batched row write takes STRHEAP-then-STRPTR.
  *
  * The read side (biscuit_rowstore_str_read_all() / _str_read_slots() in
- * this file) must never take STRPTR-then-STRHEAP as a result -- it used to,
- * via biscuit_strptr_materialize() being called while the caller's STRPTR
- * page was still locked, and that was an exact ABBA inversion of this
- * order: two ordinary buffer-content LWLocks, invisible to PostgreSQL's
- * deadlock detector, so a reader and a writer converging on the same
- * (STRPTR page, STRHEAP page) pair simply hung forever instead of one
- * being aborted. Both read functions now copy pointers out and release
- * their STRPTR page before calling biscuit_strptr_materialize(), so they
- * never hold both locks at once and there is nothing left to invert
- * against this order. Do not reintroduce a caller that holds a STRPTR
- * page locked across a call to biscuit_strptr_materialize().
+ * this file) must therefore never take STRPTR-then-STRHEAP. Calling
+ * biscuit_strptr_materialize() while the caller's STRPTR page is still
+ * locked is an exact ABBA inversion of this order, and because both are
+ * ordinary buffer-content LWLocks -- invisible to PostgreSQL's deadlock
+ * detector -- a reader and a writer converging on the same (STRPTR page,
+ * STRHEAP page) pair hang forever rather than one being aborted. Both read
+ * functions copy pointers out and release their STRPTR page before calling
+ * biscuit_strptr_materialize(), so they never hold both locks at once. Do
+ * not introduce a caller that holds a STRPTR page locked across a call to
+ * biscuit_strptr_materialize().
  */
 static void
 biscuit_strptr_write(Relation index, BlockNumber *pagedir_root,

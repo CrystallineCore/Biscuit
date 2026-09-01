@@ -1326,7 +1326,7 @@ biscuit_pendlog_snapshot(Relation index)
                  * inserts to reconcile, which is the far more common of the
                  * two and was left unprotected. Without this lock, an
                  * ordinary SELECT racing an ordinary INSERT can hang
-                 * exactly the same way a drain racing an INSERT used to.
+                 * exactly the same way a drain racing an INSERT would.
                  *
                  * Same ordering argument applies unchanged: this function
                  * never holds BISCUIT_METAPAGE_BLKNO, so there is no path
@@ -1760,10 +1760,11 @@ biscuit_pendlog_lookup(BiscuitPendLogSnapshot *snap,
  * Does this snapshot change ANY structure, whether or not it has an entry
  * for it?
  *
- * The kill set makes that a real question. Under the old derived-record
- * scheme a structure with no pending entry was untouched by definition,
- * so a hash miss meant "return the cached bitmap, borrowed, zero copies".
- * That is no longer true: a deleted row must vanish from every base
+ * The kill set makes that a real question. Were every record derived and
+ * per-structure, a structure with no pending entry would be untouched by
+ * definition, and a hash miss would mean "return the cached bitmap,
+ * borrowed, zero copies". That does not hold here: a deleted row must
+ * vanish from every base
  * bitmap it was in, and the log records the deletion once, against the
  * slot, not once per structure. So a structure with no entry may still
  * need the kill set subtracted from it.
@@ -1884,8 +1885,8 @@ pendlog_clear_draining(Relation index)
      * be re-read. This is the transition that loses information; the detach
      * at the other end does not.
      *
-     * pendlog_detach() and pendlog_detach_prefix() used to bump here as well.
-     * They no longer do: an invalidation issued at the start of a merge wakes
+     * pendlog_detach() and pendlog_detach_prefix() deliberately do NOT bump
+     * here: an invalidation issued at the start of a merge wakes
      * every backend into a cold load against a directory that is actively
      * being restructured, so the reload it demands cannot succeed until the
      * merge it announced has finished. See pendlog_detach()'s note for why
@@ -1957,12 +1958,12 @@ pendlog_detach(Relation index)
      * and freed it. pendlog_draining is a single BlockNumber, not a list:
      * it can only ever describe ONE outstanding chain at a time.
      *
-     * Bug this fixes: this function used to only check pendlog_draining
-     * when head == InvalidBlockNumber, and otherwise fell through and
-     * unconditionally overwrote it with the newly detached head a few
-     * lines down (meta->pendlog_draining = head). That is safe within a
+     * Why the check below is unconditional: checking pendlog_draining only
+     * when head == InvalidBlockNumber, and otherwise falling through to
+     * unconditionally overwrite it with the newly detached head a few
+     * lines down (meta->pendlog_draining = head), is safe within a
      * single successful drain call -- the caller (biscuit_pendlog_drain_all)
-     * already captured the old value in its own local `abandoned` before
+     * captures the old value in its own local `abandoned` before
      * calling this, and correctly ingests/frees both chains. But if a
      * *second* drain then also died before finishing its merge, the
      * on-disk marker by then pointed only at the second drain's chain --
@@ -2026,13 +2027,13 @@ pendlog_detach(Relation index)
      * the reload.
      *
      * BUMPED AT THE END OF THE DRAIN ONLY -- in pendlog_clear_draining() --
-     * NOT HERE. This bump used to fire at both ends, on the argument that
+     * NOT HERE. The tempting argument for firing at both ends is that
      * "both transitions change what a given set of blobs plus a given log
      * state add up to. Over-invalidation costs one reload; under-
      * invalidation is wrong answers."
      *
      * The second half of that is right. The first half is not, and it is
-     * what produced the "could not obtain a stable read of index" failures
+     * what produces the "could not obtain a stable read of index" failures
      * on ordinary INSERTs and UPDATEs under sustained write load.
      *
      * Over-invalidation here does not cost one reload. It schedules every
@@ -2242,7 +2243,7 @@ pendlog_detach_prefix(Relation index, uint32 max_pages)
      * notice. That is what the scan-lifetime guard and the snapshot slot
      * compare against, and it is unconditional.
      *
-     * meta->gen does NOT move here, and used to. See the long note in
+     * meta->gen deliberately does NOT move here. See the long note in
      * pendlog_detach(): bumping gen at the START of a merge schedules every
      * other backend's cold load at the one moment the directory is being
      * restructured underneath it, which is the convoy that failed ordinary
@@ -2275,13 +2276,13 @@ pendlog_detach_prefix(Relation index, uint32 max_pages)
  * records. It is worth being explicit about the trade rather than letting
  * it be discovered.
  *
- * Under the old scheme, deleting a row emitted an explicit REMOVE record
- * against every structure it belonged to -- biscuit_remove_from_all_indices()
- * literally walked the in-memory index and appended ~8N+4 records. That
- * made deletes enormously expensive in WAL, and made the drain cheap:
- * every structure needing an update was named in the log.
+ * Emitting an explicit REMOVE record against every structure a row belonged
+ * to -- walking the in-memory index and appending ~8N+4 records -- would
+ * make the drain cheap, since every structure needing an update would be
+ * named in the log. It would also make deletes enormously expensive in WAL,
+ * which is the cost this design exists to remove.
  *
- * Now a delete is eight bytes and names no structures at all, because the
+ * A delete is therefore eight bytes and names no structures at all, because the
  * set of structures it affects is a property of text that may already have
  * been overwritten. Reads handle this by subtracting the kill set from
  * every base bitmap they touch (biscuit_pendlog_apply()). But the drain

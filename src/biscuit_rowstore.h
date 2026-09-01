@@ -8,20 +8,17 @@
  *
  * Why this file exists
  * ---------------------
- * Before this module, all three of these were persisted the same way as
- * the bitmap structures' compacted blobs: biscuit_page_write_blob()
- * serializes the *entire* array/blob into a brand new chunk chain and
- * retires the old one. That is the right primitive for something that is
- * genuinely re-encoded as a whole (a RoaringBitmap after a drain merges
- * its pending deltas), but TIDS/STRCACHE are just flat per-record arrays
- * where a steady-state INSERT touches exactly one element -- rewriting
- * the whole array on every commit made per-commit cost O(num_records)
- * instead of O(1), which is the root cause the "Biscuit Row-Identity
- * In-Place Storage" implementation summary measured directly (300
- * single-row transactions cost 70x more WAL/row than the same 300 rows
- * batched into one transaction).
+ * The compacted-blob path (biscuit_page_write_blob()) serializes an
+ * entire array into a brand new chunk chain and retires the old one. That
+ * is the right primitive for something genuinely re-encoded as a whole --
+ * a RoaringBitmap after a drain merges its pending deltas -- but
+ * TIDS/STRCACHE are flat per-record arrays where a steady-state INSERT
+ * touches exactly one element. Persisting them that way makes per-commit
+ * cost O(num_records) instead of O(1); measured directly, 300 single-row
+ * transactions cost 70x more WAL per row than the same 300 rows batched
+ * into one transaction.
  *
- * This module fixes that by giving TIDS and STRCACHE genuine random-access
+ * This module therefore gives TIDS and STRCACHE genuine random-access
  * storage:
  *
  *   - TIDS: a directory of fixed-size BISCUIT_PAGE_TIDSLOT pages, each
@@ -47,11 +44,11 @@
  *
  *   - HEADER: small enough that its cost was never the problem, but once
  *     the single-page in-place write primitive exists for TIDS/STRCACHE
- *     it costs nothing extra to give HEADER the same treatment instead of
- *     leaving it on the chain-reallocate-every-commit path -- it becomes
+ *     it costs nothing extra to give HEADER the same treatment rather
+ *     than leaving it on a chain-reallocate-every-commit path -- it is
  *     one fixed page, overwritten in place, never re-chained.
  *
- * All three new logical-page-directory-based structures reuse
+ * All three logical-page-directory-based structures reuse
  * biscuit_blob.h's biscuit_page_alloc()/biscuit_ensure_synchronous_commit()
  * for page (de)allocation and durability, exactly like biscuit_dir.c does
  * for its own packed-entry chain -- no new allocation or WAL-durability
@@ -67,20 +64,16 @@
  * biscuit_persist_row_identity_write_record() for the entry point those
  * call sites actually use).
  *
- * Format cutover
- * ---------------
- * The on-disk layout of TIDS/STRCACHE/HEADER changes incompatibly here,
- * with no dual-format reader and no BISCUIT_VERSION bump. Both of those
- * are deliberate and have the same single justification: version 3
- * (BISCUIT_LIBRARY_VERSION "3.0.0 - Player") was never shipped. There is
- * no deployed index anywhere written by the old TIDS/STRCACHE blob layout,
+ * Format compatibility
+ * --------------------
+ * This layout for TIDS/STRCACHE/HEADER has no dual-format reader and
+ * carries no dedicated BISCUIT_VERSION bump, because version 3
+ * (BISCUIT_LIBRARY_VERSION "3.0.0 - Player") was never shipped: no
+ * deployed index anywhere was written by the earlier blob-based layout,
  * so there is nothing for a version bump to distinguish this format
- * *from*, and nothing for a compatibility path to read. The only readers
- * of the old layout that ever existed live in this same unreleased tree,
- * and this change replaces them rather than keeping them alongside. An
- * index built from an intermediate development checkout must be
- * REINDEXed -- the same expectation every prior format change in this
- * tree has carried.
+ * *from* and nothing for a compatibility path to read. An index built
+ * from an intermediate development checkout must be REINDEXed -- the same
+ * expectation every prior format change in this tree has carried.
  */
 
 #ifndef BISCUIT_ROWSTORE_H
@@ -218,15 +211,14 @@ extern char *biscuit_rowstore_str_read(Relation index,
  * direct counterpart to biscuit_rowstore_tid_read_all().
  *
  * Exists because calling biscuit_rowstore_str_read() in a loop is
- * measurably slower than the single-blob read it replaced (~1.8x on cold
- * load): per slot it re-walks the pointer-array page directory from its
- * root, re-reads that slot's STRPTR page, and then reads the value-heap
- * page -- three buffer acquisitions per record where the old concatenated
- * blob needed one sequential pass in total. This function amortizes all
- * three: it walks the directory chain once, reads each STRPTR page once,
- * and holds the most recently used value-heap buffer across slots, which
- * matters because the heap is bump-allocated in slot order, so runs of
- * consecutive slots almost always resolve to the same heap page.
+ * measurably slower (~1.8x on cold load): per slot it re-walks the
+ * pointer-array page directory from its root, re-reads that slot's STRPTR
+ * page, and then reads the value-heap page -- three buffer acquisitions
+ * per record. This function amortizes all three: it walks the directory
+ * chain once, reads each STRPTR page once, and holds the most recently
+ * used value-heap buffer across slots, which matters because the heap is
+ * bump-allocated in slot order, so runs of consecutive slots almost always
+ * resolve to the same heap page.
  *
  * Oversized values (BISCUIT_STRPTR_OVERSIZE_SENTINEL) still take their own
  * blob-chain read, as they must -- they are rare by construction.

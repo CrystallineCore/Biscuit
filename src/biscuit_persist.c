@@ -16,11 +16,11 @@
  * must be REINDEXed under this extension version -- that is an accepted,
  * expected requirement, not something this file tries to work around.
  *
- * What "save"/"load"/"drop" mean now
- * -----------------------------------
- * Every bitmap-shaped structure this file used to dump into one flat file
- * (a `pos_idx[ch]` entry's bitmap, a `char_cache[ch]`, a
- * `length_bitmaps[i]`, etc.) now gets its own BiscuitDirEntry, at exactly
+ * What "save"/"load"/"drop" mean
+ * ------------------------------
+ * Every bitmap-shaped structure (a `pos_idx[ch]` entry's bitmap, a
+ * `char_cache[ch]`, a `length_bitmaps[i]`, etc.) gets its own
+ * BiscuitDirEntry, at exactly
  * the granularity biscuit_common.h's design already addresses at:
  * `(col, is_lower, kind, ch, position)`. biscuit_persist_save() walks
  * every one of those structures and biscuit_dir_upsert()s its current
@@ -145,12 +145,11 @@ static void pbuf_put_i64(PBuf *b, int64 v)  { pbuf_put(b, &v, sizeof(v)); }
 static void pbuf_put_u32(PBuf *b, uint32 v) { pbuf_put(b, &v, sizeof(v)); }
 
 /*
- * The length-prefixed string put/get pair that used to live here
- * (pbuf_put_str/pcur_get_str) is gone: its only callers were the STRCACHE
- * whole-array save/load, which concatenated every record's string into one
- * blob. STRCACHE is now stored per-slot via biscuit_rowstore.c (pointer
- * array + value heap), so nothing length-prefixes strings into a PBuf
- * anymore. The remaining PBuf/PCur helpers still serve the HEADER blob.
+ * The PBuf/PCur helpers below serve the HEADER blob only. There is
+ * deliberately no length-prefixed string put/get pair: STRCACHE is stored
+ * per-slot via biscuit_rowstore.c (pointer array + value heap) rather than
+ * concatenated into one blob, so nothing length-prefixes strings into a
+ * PBuf.
  */
 
 typedef struct
@@ -940,10 +939,10 @@ biscuit_persist_save_row_identity(Relation index, BiscuitIndex *idx)
      * Keeping the clamp is still right -- without it the header regresses
      * and the next cold load truncates the index, which is the defect this
      * block was added for. What was wrong was a reader downstream inferring
-     * durability from it: biscuit_persist_load()'s hole-clamp used to treat
-     * [0, header_records) as known-populated and scan only above it, so a
-     * laundered hole sat permanently below its floor and was never seen.
-     * That inference is gone (see that function), and holes are now resolved
+     * durability from it. Treating [0, header_records) as known-populated
+     * and scanning only above it leaves a laundered hole permanently below
+     * that floor, where it is never seen. biscuit_persist_load() therefore
+     * draws no such inference (see that function), and holes are resolved
      * where they can actually be identified -- per slot, from the
      * unambiguous all-zero TID encoding, at read time in
      * biscuit_collect_sorted_tids_single().
@@ -952,7 +951,7 @@ biscuit_persist_save_row_identity(Relation index, BiscuitIndex *idx)
      * counter bumped only after biscuit_persist_row_identity_write_record()
      * succeeds -- this is the site that would consume it. It would be an
      * on-disk format change, and nothing currently needs it: every consumer
-     * that used to require the distinction now derives it per slot instead.
+     * that needs the distinction derives it per slot instead.
      *
      * The clamped value is written to the header ONLY -- idx->num_records
      * itself is deliberately left alone. The in-memory arrays (tids,
@@ -1187,7 +1186,7 @@ load_bucket_into_charindex(CharIndex *ci, const LoadBucket *b)
  * biscuit_index.c) grows tids / data_cache / data_cache_lower together and
  * only when `num_records >= capacity`, so it assumes all three arrays are
  * always exactly `capacity` long. Sizing this cache to `num_records`
- * instead (as this function used to) left the gap [num_records, capacity)
+ * instead would leave the gap [num_records, capacity)
  * unallocated: after a cold reload, the very next insert would write
  * data_cache[num_records] past the end of a too-small allocation, smashing
  * an adjacent palloc chunk header and later tripping repalloc()/pfree()
@@ -1230,22 +1229,22 @@ biscuit_persist_load_strcache(Relation index, int32 col, bool is_lower,
      * NULL encoding did -- so, unlike the old single-blob read, there is
      * no truncation condition to detect and no error to raise.
      *
-     * MEMORY CONTEXT -- this used to hard-code CacheMemoryContext, which
-     * PostgreSQL never resets. That bypassed the whole load_cxt/
+     * MEMORY CONTEXT -- this must not hard-code CacheMemoryContext, which
+     * PostgreSQL never resets. Doing so bypasses the whole load_cxt/
      * idx->reserved[0] ownership mechanism biscuit_persist_load() uses
      * (see its OWNED CONTEXT comment and biscuit_cache.c's eviction path):
      * every other part of a loaded index -- TIDs, bitmaps, CharIndex
      * structures -- lives in load_cxt and is freed as a unit when the
-     * index is evicted, but every row's raw and lowercased text was
+     * index is evicted, while every row's raw and lowercased text would be
      * orphaned in CacheMemoryContext on every single load, permanently.
      * Under a workload where biscuit_get_current_index() reloads on
      * essentially every statement (concurrent writers -- see that
      * function's comment), that leaked the full indexed text of the
      * table once per statement: unbounded, monotonic per-backend growth
-     * with no eviction ever able to reclaim it (BISCUIT-3.0.0-GA-Report.md
-     * §10.4/OOM). CurrentMemoryContext is load_cxt at every call site in
-     * this file (set by the MemoryContextSwitchTo(load_cxt) above), so
-     * this now shares idx's own lifetime like everything else it owns.
+     * with no eviction ever able to reclaim it, ending in OOM.
+     * CurrentMemoryContext is load_cxt at every call site in this file
+     * (set by the MemoryContextSwitchTo(load_cxt) above), so this shares
+     * idx's own lifetime like everything else it owns.
      */
     biscuit_rowstore_str_read_all(index, entry.blob_head, (uint32) num_records,
                                    CurrentMemoryContext, arr);
@@ -1463,18 +1462,17 @@ biscuit_persist_load(Relation index)
      * BiscuitIndexCacheEntry comment for the leak this closes.
      *
      * Every field a successful load allocates (TIDs, every bitmap, every
-     * STRCACHE column, all of it) used to go straight into
+     * STRCACHE column, all of it) must NOT go straight into
      * CacheMemoryContext, which PostgreSQL never resets for the life of
      * the backend. biscuit_get_current_index() evicts and reloads on
      * essentially every statement under concurrent writers (gen check),
-     * and biscuit_cache_remove() only ever unlinked the old cache entry --
-     * it never freed what it pointed at, because there was no
-     * self-contained unit to free. That is the mechanism behind the
-     * per-backend memory growth to hundreds of MB under concurrent load
-     * (BISCUIT-3.0.0-GA-Report.md §10.4): each reload leaked the entire
-     * previous copy of the index.
+     * and without a self-contained unit to free, biscuit_cache_remove()
+     * can only unlink the old cache entry rather than free what it points
+     * at. That is the mechanism behind
+     * per-backend memory growth to hundreds of MB under concurrent load:
+     * each reload leaks the entire previous copy of the index.
      *
-     * Fix: give this load its own child context under CacheMemoryContext,
+     * This load therefore gets its own child context under CacheMemoryContext,
      * and hand the winning idx ownership of it via idx->reserved[0] (see
      * biscuit_common.h -- explicitly reserved for future in-memory
      * bookkeeping, never read or written by the disk format). Eviction
@@ -1818,12 +1816,12 @@ retry_after_self_heal:
                  * comment. The old explicit "tlen != num_records * sizeof(...)"
                  * check is subsumed by biscuit_rowstore_tid_read_all(), which
                  * WARNs and leaves the tail zeroed if the directory doesn't
-                 * cover num_records slots (it used to ERROR; see the comment
-                 * there for why a shortfall became expected once num_records
-                 * started being reconciled against the metapage's
-                 * non-transactional slot high-water mark).
+                 * cover num_records slots (rather than ERRORing; see the comment
+                 * there for why a shortfall is expected once num_records is
+                 * reconciled against the metapage's non-transactional slot
+                 * high-water mark).
                  *
-                 * Note idx->tids is palloc0'd (was plain palloc): the read fills
+                 * Note idx->tids must be palloc0'd, not plain palloc: the read fills
                  * exactly [0, num_records), and the tail [num_records, capacity)
                  * must start zeroed the same way a freshly-built index's does,
                  * since the steady-state insert path writes into that tail
@@ -1852,10 +1850,10 @@ retry_after_self_heal:
                  * writes block 0xFFFFFFFF, never block 0, so (block 0,
                  * offset 0) can only be a slot that was never written.
                  *
-                 * WHAT WAS WRONG WITH TRIMMING. This block used to scan
-                 * forward from header_records and, on the first such hole,
-                 * set idx->num_records = i -- discarding every slot above it.
-                 * Two independent defects:
+                 * WHY THIS DOES NOT TRIM. Scanning forward from
+                 * header_records and, on the first such hole, setting
+                 * idx->num_records = i -- discarding every slot above it --
+                 * has two independent defects:
                  *
                  *   1. Holes are INTERIOR, not just trailing. An aborted
                  *      insert leaks its slot forever, so a hole at slot
@@ -2035,7 +2033,7 @@ retry_after_self_heal:
              * here. live_gen is the value captured by the SLOT-COUNT
              * RECONCILIATION read above, at the same point idx->num_records
              * was fixed -- see the GEN CONSISTENCY comment there for why a
-             * second, later read (which is what used to happen here) breaks
+             * second, later read at this point would break
              * the invariant biscuit_get_current_index() depends on to detect
              * staleness at all.
              */
@@ -2171,9 +2169,10 @@ retry_after_self_heal:
     /*
      * Every attempt raced a drain.
      *
-     * This used to warn and return NULL, which biscuit_load_index() turns
-     * into ERRCODE_DATA_CORRUPTED with a REINDEX hint. That verdict is
-     * exactly backwards for this path: the index is fine, this backend just
+     * Warning and returning NULL here is wrong: biscuit_load_index() turns
+     * that into ERRCODE_DATA_CORRUPTED with a REINDEX hint, and that
+     * verdict is backwards for this path -- the index is fine, this backend
+     * just
      * never got an uncontended look at it. Telling an operator to REINDEX a
      * healthy index because their write load is busy is worse than telling
      * them nothing.

@@ -1,21 +1,22 @@
 /*
  * biscuit_fanout.h
  *
- * ONE FAN-OUT, THREE CALLERS  (base/delta design §4.1)
+ * ONE FAN-OUT, EVERY CALLER  (base/delta design §4.1)
  *
- * "What structures does this string belong to?" used to be answered in
- * three places that had to agree by inspection:
+ * "What structures does this string belong to?" is answered here, once,
+ * for every caller that needs it:
  *
  *   - biscuit_index_single_record()   (legacy single-column write path)
  *   - biscuit_index_column_record()   (multi-column write path)
- *   - the LEN / LEN_GE blocks open-coded inside biscuit_insert()
+ *   - the LEN / LEN_GE emission on the insert path
+ *   - the delta builder
  *
- * The base/delta design adds a fourth consumer -- the delta builder, which
- * must reproduce the *identical* set of (col, is_lower, kind, ch, position)
- * identities from the same bytes, or reads silently disagree with what a
- * drain later writes into the base blobs. Four independent copies of that
- * rule is not a maintainable proposition, so it lives here once and every
- * caller drives it through a callback.
+ * The delta builder must reproduce the *identical* set of
+ * (col, is_lower, kind, ch, position) identities from the same bytes, or
+ * reads silently disagree with what a drain later writes into the base
+ * blobs. Keeping that rule in one place and driving every caller through
+ * a callback is what makes the agreement structural rather than a matter
+ * of inspection.
  *
  * The emitted identity tuple is deliberately the same one that
  * BiscuitDirEntry, BiscuitPendLogKey and the delta hash all key on, so an

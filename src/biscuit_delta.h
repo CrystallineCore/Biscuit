@@ -3,11 +3,11 @@
  *
  * SLOT -> IDENTITY EXPANSION  (base/delta design §4)
  *
- * The pending log no longer carries derived bitmap records. It carries
- * the fact of a row write: {slot, ADD|REMOVE}, eight bytes, no payload.
+ * The pending log carries the fact of a row write -- {slot, ADD|REMOVE},
+ * eight bytes, no payload -- rather than derived bitmap records.
  * Something has to turn that back into the (col, is_lower, kind, ch,
- * position) identities the read path and the drain both work in, and this
- * is it.
+ * position) identities the read path and the drain both work in, and
+ * this is it.
  *
  * The text is NOT in the log record and must not be put there (§3.1): it
  * is already durable. biscuit_persist_row_identity_write_record() writes,
@@ -16,10 +16,10 @@
  * bytes to WAL twice, which is the entire cost this design exists to
  * remove. So expansion reads text back out of STRCACHE.
  *
- * That has a second benefit that is worth as much as the WAL saving:
- * because the lowercased bytes are read rather than recomputed, expansion
- * never calls PostgreSQL's collation-dependent lower(). Two backends, or
- * a primary and a standby on different ICU/libc builds, cannot derive
+ * That has a second benefit worth as much as the WAL saving: because the
+ * lowercased bytes are read rather than recomputed, expansion never
+ * calls PostgreSQL's collation-dependent lower(). Two backends, or a
+ * primary and a standby on different ICU/libc builds, cannot derive
  * different structures from the same row. See biscuit_fanout.h §4.2.
  *
  * WHAT DRIVES THE COLUMN LIST
@@ -28,9 +28,9 @@
  * index available -- a cold backend building its first snapshot, and
  * VACUUM draining -- so the column set is read from durable state: the
  * directory's STRCACHE entries say which (col, is_lower) string arrays
- * exist, and biscuit_get_column_case_mode() re-derives the opclass gating
- * from the catalog. Both are the same sources the write path used, so the
- * two agree by construction rather than by convention.
+ * exist, and biscuit_get_column_case_mode() re-derives the opclass
+ * gating from the catalog. Both are the same sources the write path
+ * used, so the two agree by construction rather than by convention.
  */
 #ifndef BISCUIT_DELTA_H
 #define BISCUIT_DELTA_H

@@ -118,8 +118,8 @@ biscuit_retire_page_locked(Relation index, Buffer target_buf)
     opaque->next        = meta->fsm_root;     /* opaque.next repurposed as
                                                 * the freelist link -- this
                                                 * page is no longer part of
-                                                * whatever chain it used to
-                                                * belong to. */
+                                                * whatever chain it
+                                                * previously belonged to. */
 
     meta->fsm_root = target_blkno;
     meta->fsm_page_count++;
@@ -232,7 +232,7 @@ biscuit_page_alloc(Relation index, uint16 page_kind)
      * structure's new chunk before the entry that still owns it has had a
      * chance to read it. That is exactly the "chunk page recycled off the
      * freelist while a live chain still references it" pattern behind the
-     * intermittent "blob chunk chain inconsistency" corruption (D1):
+     * intermittent "blob chunk chain inconsistency" corruption:
      * silent within the drain that causes it, only surfacing later --
      * sometimes in that same VACUUM when a not-yet-processed entry is
      * finally read, sometimes only in a later reader -- as a chunk whose
@@ -310,22 +310,18 @@ extend:
      * Extending the relation needs the standard extension lock, the same
      * way every other in-core index AM's P_NEW path does (see e.g.
      * _bt_getbuf(), ginNewBuffer(), _hash_getnewbuf()). Without it, two
-     * backends racing to extend at the same moment -- a foreground
-     * inserter and autovacuum, or two concurrent sessions -- can both be
-     * handed the *same* new block number: nothing here was serializing
-     * that decision. Whoever writes second silently overwrites the
-     * first's chunk, which is indistinguishable, from a later reader's
-     * point of view, from the WAL-atomicity gap this file used to have
-     * in biscuit_page_write_blob() -- same "expected seq" mismatch,
-     * different cause. This one only fires when a second backend
-     * genuinely overlaps the extension instant, which is why it surfaces
-     * far less often than the bug that used to dominate here, but it's
-     * not zero.
+     * backends racing to extend at the same moment -- a foreground inserter
+     * and autovacuum, or two concurrent sessions -- can both be handed the
+     * *same* new block number, with nothing serializing that decision.
+     * Whoever writes second silently overwrites the first's chunk, which a
+     * later reader cannot distinguish from any other "expected seq"
+     * mismatch. It only fires when a second backend genuinely overlaps the
+     * extension instant, but the window is not zero.
      *
      * RBM_ZERO_AND_LOCK (rather than RBM_NORMAL + a separate LockBuffer()
-     * call) makes "zero-fill the new page" and "take the exclusive
-     * content lock" a single atomic step with respect to other backends,
-     * instead of two, closing the window between them.
+     * call) makes "zero-fill the new page" and "take the exclusive content
+     * lock" a single atomic step with respect to other backends, instead of
+     * two, closing the window between them.
      */
     LockRelationForExtension(index, ExclusiveLock);
     cbuf = ReadBufferExtended(index, MAIN_FORKNUM, P_NEW, RBM_ZERO_AND_LOCK, NULL);
@@ -565,11 +561,11 @@ biscuit_page_read_blob(Relation index, BlockNumber head, char **out_data, uint32
      * (total_len/total_chunks/chunk_seq) is untouched -- retirement never
      * touches it -- so it still looks like a perfectly good chunk 0. What's
      * broken is opaque.next: it no longer points at chunk 1 of this chain,
-     * it points at whatever used to be the freelist head. Walking it lands
-     * on an unrelated page whose header doesn't match, which previously
-     * surfaced several chunks later as a generic "chain inconsistency"
-     * DATA_CORRUPTED error, with a misleading REINDEX hint attached by
-     * whatever caller translated it.
+     * it points at whatever was the freelist head. Walking it lands on an
+     * unrelated page whose header does not match, which without the check
+     * below surfaces several chunks later as a generic "chain
+     * inconsistency" DATA_CORRUPTED error carrying a misleading REINDEX
+     * hint.
      *
      * Every other page in the chain is protected from this by the
      * lock-coupled walk below: retirement cannot advance past a page this

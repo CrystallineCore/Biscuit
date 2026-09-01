@@ -54,11 +54,11 @@ extern BiscuitIndex *biscuit_persist_load(Relation index);
  *
  * As of the in-place row-identity rewrite (biscuit_rowstore.c) this ONLY
  * re-persists the HEADER blob (num_records, capacity, counters, ...).
- * TIDS and STRCACHE used to be rewritten here too
- * (the whole ItemPointerData[]/string array, every call -- O(num_records)
- * per commit, the root cause fixed by biscuit_rowstore.c: 300 single-row
- * transactions cost 70x more WAL/row than the same 300 rows batched into
- * one transaction). They are now made durable incrementally, in place, at
+ * TIDS and STRCACHE are deliberately NOT rewritten here. Doing so means
+ * rewriting the whole ItemPointerData[]/string array on every call --
+ * O(num_records) per commit, which is what makes 300 single-row
+ * transactions cost 70x more WAL per row than the same 300 rows batched
+ * into one transaction. They are made durable incrementally, in place, at
  * the exact moment each row's slot is written -- see
  * biscuit_persist_row_identity_write_record() below -- so there is nothing
  * left for a once-per-statement batch pass to do for them.

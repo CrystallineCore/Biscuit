@@ -510,14 +510,13 @@ biscuit_columnindex_memory_usage(const ColumnIndex *col_idx)
     }
 
     /*
-     * NOTE: max_length / max_length_lower are the *allocated array sizes*
-     * for length_bitmaps[_lower] and length_ge_bitmaps[_lower] (see
-     * biscuit_index.c, e.g. "cidx->length_bitmaps = palloc0(cidx->max_length
-     * * sizeof(RoaringBitmap *))"), so valid indices are 0 .. max_length-1.
-     * These loops previously used "<=", reading one pointer past the end of
-     * the palloc'd array and passing whatever garbage bytes were found there
-     * to biscuit_roaring_memory_usage() as a RoaringBitmap*, which could
-     * crash with a #GP(0) if those bytes formed a non-canonical address.
+     * max_length / max_length_lower are the *allocated array sizes* for
+     * length_bitmaps[_lower] and length_ge_bitmaps[_lower] (allocated in
+     * biscuit_index.c as palloc0(cidx->max_length * sizeof(RoaringBitmap *))),
+     * so the valid indices are 0 .. max_length-1. These loops must use "<",
+     * not "<=": reading one pointer past the end of the palloc'd array feeds
+     * an arbitrary value to biscuit_roaring_memory_usage() as a
+     * RoaringBitmap *, which faults if it is not a canonical address.
      */
     if (col_idx->length_bitmaps)
     {

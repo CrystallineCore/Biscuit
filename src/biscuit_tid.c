@@ -11,11 +11,9 @@
  * amrescan independently.  Without explicit coordination every participant
  * would evaluate the full bitmap and return every matching TID, so Gather
  * would collect N copies of the result set (one per worker) and return N×
- * the expected row count. That is exactly the duplicate-result / slowdown
- * bug observed in the EXPLAIN ANALYZE output.
- *
- * Fix: range-partition the pre-sorted TID array across workers using the
- * atomic chunk counter already present in BiscuitParallelScanDesc.
+ * the expected row count. The scheme below avoids that by range-partitioning
+ * the pre-sorted TID array across workers using the atomic chunk counter in
+ * BiscuitParallelScanDesc.
  *
  * STATUS: DISABLED. amcanparallel is false (biscuit.c) and none of the
  * callbacks below are reachable from the planner. The partitioning assumes
@@ -31,7 +29,7 @@
  * a future shared-array design would reuse most of it.
  *
  *   Leader path  (biscuit_collect_sorted_tids_parallel)
- *   ────────────────────────────────────────────────────
+ *   ────────────────────────────────────────────
  *   1. Collect the full result set into a palloc'd array exactly once
  *      (same as the single-threaded path).
  *   2. Populate pdesc->total_tids, total_chunks, chunk_size.
@@ -45,7 +43,7 @@
  *      BiscuitScanOpaque) for the duration of the scan.
  *
  *   Worker path  (biscuit_parallel_collect_chunk)
- *   ──────────────────────────────────────────────
+ *   ────────────────────────────────────────
  *   Each background worker detects IsParallelWorker() in biscuit_rescan(),
  *   reads the all_tids pointer from pdesc->pad[], then calls
  *   biscuit_parallel_collect_chunk() which atomically claims a disjoint
@@ -53,13 +51,10 @@
  *   process-private buffer.  Workers never write shared state except through
  *   the atomic counter.
  *
- * Other changes from previous revision
- * ──────────────────────────────────────
- * 1. Roaring streaming iterator replaces biscuit_roaring_to_array():
- *    avoids the extra palloc + full-scan copy, halving peak memory for
- *    large result sets and improving cache utilisation.
- * 2. Hardware prefetch in the hot loop (__builtin_prefetch, L2, read-only).
- * 3. uint64_t → int truncation guarded by runtime Assert at every cast site.
+ * Collection uses the Roaring streaming iterator rather than materializing
+ * via biscuit_roaring_to_array(), which avoids an extra palloc and a
+ * full-scan copy; the hot loop issues read-only L2 hardware prefetches, and
+ * every uint64_t -> int narrowing cast is guarded by a runtime Assert.
  */
 
 #include "biscuit_common.h"
@@ -438,49 +433,40 @@ biscuit_collect_sorted_tids_single(BiscuitIndex *idx,
              skipped_not_durable, first_not_durable, idx_out, idx->num_records);
 
     /*
-     * OUT-OF-RANGE SLOTS: the one remaining silent undercount in this
-     * function, now reported.
+     * OUT-OF-RANGE SLOTS.
      *
      * The `rec_idx < idx->num_records` bound above is a real bound and must
      * stay: idx->tids[] is only idx->capacity long and idx->num_records is
      * this backend's view of how much of it is populated. But dropping a
-     * matched slot because it falls outside that view is exactly the
-     * failure shape the invalid-TID ereport() a few lines up exists to
-     * prevent -- a bitmap match that produces no row, no error and no log
-     * line, arriving at the caller as a plausible-looking undercount.
+     * matched slot because it falls outside that view is exactly the failure
+     * shape the invalid-TID ereport() a few lines up exists to prevent -- a
+     * bitmap match that produces no row, no error and no log line, arriving
+     * at the caller as a plausible-looking undercount. It must therefore be
+     * reported rather than silently skipped.
      *
      * This is deliberately NOT an ERROR, unlike the invalid-TID case. A
      * matched slot above num_records is *expected* under concurrency: a
-     * pending-log delta appended by another backend legitimately names a
-     * slot this backend has never loaded, which is the documented "cold
-     * reader must reload" contract on biscuit_claim_new_slot(). Erroring
-     * would turn ordinary concurrent DML into query failures. The correct
-     * repair is to notice staleness and reload before the scan, not to
-     * abort inside it -- but until that exists, the condition must at least
-     * be observable, because it is currently indistinguishable from a
-     * correct answer.
+     * pending-log delta appended by another backend legitimately names a slot
+     * this backend has never loaded, which is the documented "cold reader
+     * must reload" contract on biscuit_claim_new_slot(). Erroring would turn
+     * ordinary concurrent DML into query failures. The correct repair is to
+     * notice staleness and reload before the scan, not to abort inside it --
+     * but until that exists, the condition must at least be observable,
+     * because it is otherwise indistinguishable from a correct answer.
      *
-     * WARNING -> DEBUG1 by default (BISCUIT-3.0.0-GA-Report.md Section
-     * 10.1 / Risk 4): "expected under concurrency" (see above) and
-     * "reaches whoever is looking at the wrong row count" are in tension
-     * once this fires on essentially every statement of a concurrent
-     * write workload, which is exactly what was measured (up to ~250
-     * warnings/session, 1-127 slots each). At that frequency a
-     * client-visible WARNING stops being a signal an operator can act on
-     * and starts reading as ongoing data corruption -- worse than not
-     * reporting it at all, since it undermines confidence in an
-     * otherwise-correct index (verified 120/120 in-snapshot against a
-     * sequential scan while this was firing).
+     * DEBUG1 by default, WARNING under biscuit.diag_scan_trace. Because the
+     * condition is expected under concurrency, it fires on essentially every
+     * statement of a concurrent write workload; at that frequency a
+     * client-visible WARNING stops being a signal an operator can act on and
+     * starts reading as ongoing data corruption, which is worse than not
+     * reporting it, since results are in fact correct within the backend's
+     * own snapshot. The GUC is the same one every other per-scan diagnostic
+     * in this codebase is gated on; anyone correlating a drain or reload
+     * against row-count anomalies can instead raise log_min_messages.
      *
-     * The distinction this comment draws against skipped_not_durable
-     * above still holds and is exactly why this stays reachable rather
-     * than being silenced outright: it's still the one case where the
-     * answer can be short. What changes is the default channel it goes
-     * out on. biscuit.diag_scan_trace -- the GUC every other per-scan
-     * diagnostic in this codebase is gated on -- gets it at WARNING;
-     * everyone else gets DEBUG1, which any operator correlating a drain
-     * or reload against row-count anomalies can still raise log_min_
-     * messages to see.
+     * The distinction this comment draws against skipped_not_durable above
+     * still holds and is why this stays reachable rather than being silenced
+     * outright: it is the one case where the answer can be short.
      */
     if (dropped_out_of_range > 0)
         ereport(unlikely(biscuit_diag_scan_trace) ? WARNING : DEBUG1,
@@ -614,7 +600,7 @@ biscuit_collect_sorted_tids_parallel(BiscuitIndex            *idx,
             pg_memory_barrier();
             pg_atomic_write_u32(&pdesc->initialized, 2);
 
-            /* Free the full array — we'll re-evaluate per-process below. */
+            /* Free the full array; each process re-evaluates its own slice below. */
             if (all_tids)
                 pfree(all_tids);
         }
@@ -688,25 +674,24 @@ biscuit_collect_sorted_tids_parallel(BiscuitIndex            *idx,
             /*
              * CROSS-PARTICIPANT AGREEMENT CHECK.
              *
-             * This whole partitioning scheme rests on every participant
-             * computing a byte-identical sorted array, because the slices are
-             * OFFSET RANGES into it. If two participants disagree, Gather
-             * assembles a torn result -- some heap rows twice, others never.
+             * This whole partitioning scheme rests on every participant computing a
+             * byte-identical sorted array, because the slices are OFFSET RANGES into
+             * it. If two participants disagree, Gather assembles a torn result --
+             * some heap rows twice, others never.
              *
-             * This used to WARN and clamp. Clamping is not a repair: it
-             * bounds the read but leaves every offset in this participant's
-             * slice pointing at a different row than the initializer intended,
-             * so the query still returns wrong data, now with a log line
-             * nobody reads. Turn it into a hard failure the client can retry.
+             * A length mismatch is therefore a hard failure the client can retry, not
+             * a warn-and-clamp. Clamping is not a repair: it bounds the read but
+             * leaves every offset in this participant's slice pointing at a different
+             * row than the initializer intended, so the query still returns wrong
+             * data, now with a log line nobody reads.
              *
-             * NOTE this only detects a LENGTH difference. Two arrays of equal
-             * length with different contents -- one row deleted and one
-             * inserted between evaluations, which is exactly what an UPDATE
-             * looks like here -- pass silently, and there is no cheap
-             * fingerprint available without a shared-memory field the
-             * descriptor does not have. That gap is why amcanparallel is
-             * currently false (see biscuit.c); this check is the backstop for
-             * whoever re-enables it, not a licence to.
+             * NOTE this only detects a LENGTH difference. Two arrays of equal length
+             * with different contents -- one row deleted and one inserted between
+             * evaluations, which is exactly what an UPDATE looks like here -- pass
+             * silently, and there is no cheap fingerprint available without a
+             * shared-memory field the descriptor does not have. That gap is why
+             * amcanparallel is currently false (see biscuit.c); this check is the
+             * backstop for whoever re-enables it, not a licence to.
              */
             if ((uint64_t) all_count != pdesc->total_tids)
             {
@@ -871,7 +856,6 @@ biscuit_initparallelscan(void *target)
      */
     elog(DEBUG1, "Default pdesc->num_participants value: %d", pdesc->num_participants);
     pdesc->num_participants = biscuit_planned_nworkers + 1;
-    // biscuit_planned_nworkers = 0;   /* reset defensively */
     elog(DEBUG1, "Initiated parallel scan. Parallel workers: %d",pdesc->num_participants);
 }
 

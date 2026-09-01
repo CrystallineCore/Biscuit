@@ -18,16 +18,16 @@
  * One case-mode pass over a string: POS / NEG / CACHE per byte per
  * character, then LEN and the LEN_GE ladder.
  *
- * The per-BYTE inner loop is not a bug and must not be "fixed" into a
- * per-character loop. The matcher (biscuit_pattern.c) probes these
- * structures a byte at a time, so a 3-byte UTF-8 character is indexed as
- * three separate (ch = byte) entries that all share the same char_pos.
+ * The inner loop iterates per BYTE, and must not be changed to iterate
+ * per character. The matcher (biscuit_pattern.c) probes these structures
+ * a byte at a time, so a 3-byte UTF-8 character is indexed as three
+ * separate (ch = byte) entries that all share the same char_pos.
  * Changing the granularity here changes what every existing compacted
  * blob means.
  *
- * Likewise `neg_offset` is recomputed per byte from the *character* count
- * remaining, which for a multi-byte character yields the same offset for
- * each of its bytes -- again matching the write path exactly.
+ * Likewise `neg_offset` is recomputed per byte from the *character*
+ * count remaining, which for a multi-byte character yields the same
+ * offset for each of its bytes -- again matching the write path exactly.
  */
 static void
 fanout_pass(const char *str, int byte_len,
@@ -72,18 +72,16 @@ fanout_pass(const char *str, int byte_len,
     /*
      * LEN / LEN_GE.
      *
-     * biscuit_insert() emitted these inline, gated on the same case mode
-     * as the character pass above (case-sensitive under BISCUIT_MODE_LIKE,
-     * lowercase under a non-NULL data_cache_lower[slot], which is only
-     * populated under BISCUIT_MODE_ILIKE). Folding them in here is what
-     * makes this function the whole answer for one (string, case mode)
-     * rather than most of it.
+     * These are gated on the same case mode as the character pass above:
+     * case-sensitive under BISCUIT_MODE_LIKE, lowercase under a non-NULL
+     * data_cache_lower[slot], which is only populated under
+     * BISCUIT_MODE_ILIKE. Handling them here is what makes this function the
+     * complete answer for one (string, case mode) pair.
      *
-     * The LEN_GE ladder is inclusive of char_count: a string of length L
-     * is a member of length_ge[i] for every i <= L. The write path also
-     * clamped i to the live allocated capacity of length_ge_bitmaps[],
-     * which is what len_ge_bound reproduces; a caller with no such array
-     * passes -1.
+     * The LEN_GE ladder is inclusive of char_count: a string of length L is
+     * a member of length_ge[i] for every i <= L. Callers that maintain a
+     * length_ge_bitmaps[] array pass its allocated capacity as len_ge_bound
+     * so the ladder is clamped to it; callers with no such array pass -1.
      */
     char_count = biscuit_utf8_char_count(str, byte_len);
 

@@ -79,12 +79,11 @@ biscuit_cache_insert(Oid indexoid, BiscuitIndex *idx)
              * Defensive: every current call site (biscuit_build(),
              * biscuit_persist_load() via biscuit_load_index(), and
              * biscuit_insert()/biscuit_bulkdelete() re-inserting their own
-             * already-cached idx unchanged) either targets an oid with no
-             * existing entry, or passes back the SAME idx pointer already
-             * stored here. If a future caller ever replaces this entry's
-             * idx with a genuinely different object without going through
-             * biscuit_cache_remove() first, don't silently orphan the old
-             * one's context the way the pre-context-ownership code did.
+             * already-cached idx unchanged) either targets an oid with no existing
+             * entry, or passes back the SAME idx pointer already stored here. If a
+             * future caller ever replaces this entry's idx with a genuinely
+             * different object without going through biscuit_cache_remove() first,
+             * the old one's context must not be silently orphaned.
              */
             if (entry->index && entry->index != idx && entry->index->reserved[0] != 0)
             {
@@ -217,25 +216,18 @@ biscuit_column_index_free_bitmaps(ColumnIndex *col)
  * object it pointed at dangling in CRoaring's own heap, unreachable and
  * therefore unfreeable for the rest of the backend's life.
  *
- * biscuit_pendlog.c's pendlog_snapshot_free() already documents and
- * handles this exact hazard for its own RoaringBitmap-holding structure
- * (see its comment: "a RoaringBitmap is allocated by CRoaring's own
- * allocator, not by palloc, so deleting the context reclaims the hash
- * entries while leaking every bitmap they point at"). This function is
- * the equivalent fix for BiscuitIndex, which never got it: every eviction
- * -- and biscuit_get_current_index() evicts and reloads on essentially
- * every statement under concurrent writers -- was leaking the complete
- * bitmap set of the previous copy, permanently, on top of whatever the
- * v58/strcache-ownership fixes already closed. That is the dominant
- * contributor to the unbounded, no-plateau, no-reclaim per-backend RSS
- * growth in BISCUIT-3.0.0-GA-Report.md's §10 series (v58 through v62):
- * bitmaps -- thousands of small per-(character, position) structures per
- * column -- are the bulk of a LIKE/ILIKE index's in-memory footprint, far
- * more of it than the row text or the on-disk size alone would suggest,
- * which is exactly why the leak rate measured so far in excess of the
- * index's on-disk size. SAFE_BITMAP_FREE() (biscuit_common.h) already
- * existed for this purpose and was unused anywhere in the tree before
- * this function.
+ * Skipping this leaks the complete bitmap set on every eviction, and
+ * biscuit_get_current_index() evicts and reloads on essentially every
+ * statement under concurrent writers. Bitmaps -- thousands of small
+ * per-(character, position) structures per column -- are the bulk of a
+ * LIKE/ILIKE index's in-memory footprint, well beyond what the row text
+ * or the on-disk size alone would suggest, so the resulting per-backend
+ * RSS growth is unbounded and never plateaus.
+ *
+ * biscuit_pendlog.c's pendlog_snapshot_free() documents and handles the
+ * same hazard for its own RoaringBitmap-holding structure; this is the
+ * BiscuitIndex equivalent, built on SAFE_BITMAP_FREE()
+ * (biscuit_common.h).
  *
  * Must be called BEFORE MemoryContextDelete() on idx's own context --
  * once that call runs, every pointer this function would walk is gone.
@@ -282,18 +274,16 @@ biscuit_index_free_bitmaps(BiscuitIndex *idx)
 /*
  * Unlink a cache entry AND free the BiscuitIndex it points at.
  *
- * Every BiscuitIndex now lives in its own child context of
+ * Every BiscuitIndex lives in its own child context of
  * CacheMemoryContext (idx->reserved[0] holds the MemoryContext handle --
  * see biscuit_persist_load()'s and biscuit_build()'s comments in
- * biscuit_persist.c/biscuit_index.c for why). This used to only unlink the
- * list node and leave the BiscuitIndex itself sitting in
- * CacheMemoryContext with nothing pointing at it -- CacheMemoryContext is
- * never reset by PostgreSQL, so that was a permanent per-eviction leak,
- * and biscuit_get_current_index() evicts+reloads on essentially every
- * statement under concurrent writers (BISCUIT-3.0.0-GA-Report.md §10.4,
- * the 737 MB per-backend growth / cluster OOM finding). Deleting the
- * context here frees the whole BiscuitIndex -- TIDs, every cached string,
- * every bitmap's palloc'd scaffolding -- in one call.
+ * biscuit_persist.c/biscuit_index.c for why). Deleting that context here
+ * frees the whole BiscuitIndex -- TIDs, every cached string, every
+ * bitmap's palloc'd scaffolding -- in one call. Merely unlinking the
+ * list node would strand the BiscuitIndex in CacheMemoryContext with
+ * nothing pointing at it, and CacheMemoryContext is never reset by
+ * PostgreSQL, so that is a permanent per-eviction leak on a path taken
+ * on essentially every statement under concurrent writers.
  *
  * That deletion does NOT reach the bitmaps' own CRoaring-allocated
  * memory (see biscuit_index_free_bitmaps()'s comment for why), so this
@@ -304,7 +294,7 @@ biscuit_index_free_bitmaps(BiscuitIndex *idx)
  *
  * The BiscuitIndexCacheEntry list node itself is a separate, tiny
  * allocation directly in CacheMemoryContext (see biscuit_cache_insert()),
- * not inside idx's context, so it's pfree'd here too rather than left
+ * not inside idx's context, so it is pfree'd here too rather than left
  * behind.
  */
 static void
@@ -327,16 +317,16 @@ biscuit_cache_remove(Oid indexoid)
     BiscuitIndexCacheEntry  *entry;
 
     /*
-     * relid == InvalidOid means "everything" -- PostgreSQL invokes
-     * relcache callbacks that way on a sinval queue overflow, when it can
-     * no longer say which relations changed. biscuit_pendlog_invalidate()
-     * already interprets it that way; this function used to not, so an
-     * overflow dropped every cached pending-log snapshot while keeping
-     * every cached BiscuitIndex. That combination is worse than either
-     * half alone: the in-memory index survives as authoritative while the
-     * deltas that were supposed to be reconciled against it are gone,
-     * which yields silently stale reads instead of a clean cache miss.
-     * Dropping everything just costs a reload from durable state.
+     * relid == InvalidOid means "everything" -- PostgreSQL invokes relcache
+     * callbacks that way on a sinval queue overflow, when it can no longer
+     * say which relations changed. It must be interpreted that way here to
+     * match biscuit_pendlog_invalidate(). Dropping only the cached
+     * pending-log snapshots while keeping every cached BiscuitIndex is worse
+     * than dropping either alone: the in-memory index survives as
+     * authoritative while the deltas that were supposed to be reconciled
+     * against it are gone, which yields silently stale reads instead of a
+     * clean cache miss. Dropping everything just costs a reload from durable
+     * state.
      */
     if (!OidIsValid(indexoid))
     {
@@ -399,7 +389,6 @@ biscuit_relcache_callback(Datum arg, Oid relid)
      * biscuit_pendlog_invalidate() already interprets the same way.
      */
     biscuit_pendlog_invalidate(relid);
-    //elog(DEBUG1, "Biscuit: Invalidated cache for relation %u", relid);
 }
 
 static void
@@ -409,19 +398,18 @@ biscuit_module_unload_callback(int code, unsigned long datum)
     (void) datum;
 
     /*
-     * Nothing to flush here: every insert/delete already durably appends
-     * to its structures' pending lists (biscuit_pending_mutate_structure())
-     * the moment it happens, and VACUUM's biscuit_vacuumcleanup() drains
-     * those pending lists into compacted blobs directly against the
-     * on-disk directory, with no in-memory BiscuitIndex involved. There is
-     * no "unsaved snapshot" concept left to reconcile at proc-exit: the
-     * old flush that used to live here compared idx->gen against
-     * idx->gen_at_last_snapshot and called biscuit_persist_save() to catch
-     * up, but biscuit_persist_save() now requires relation_open() (a real
+     * Nothing to flush here: every insert/delete already durably appends to
+     * its structures' pending lists (biscuit_pending_mutate_structure()) the
+     * moment it happens, and VACUUM's biscuit_vacuumcleanup() drains those
+     * pending lists into compacted blobs directly against the on-disk
+     * directory, with no in-memory BiscuitIndex involved. There is no
+     * "unsaved snapshot" concept to reconcile at proc-exit.
+     *
+     * A gen-comparison flush through biscuit_persist_save() is not an option
+     * here: biscuit_persist_save() requires relation_open() (a real
      * Relation, not just an Oid) to reach the buffer manager, and
-     * relation_open() is not safe to call this late in backend shutdown --
-     * see biscuit_persist.c's file header for the full history. This
-     * callback now exists solely to drop the process-local cache.
+     * relation_open() is not safe to call this late in backend shutdown.
+     * This callback therefore exists solely to drop the process-local cache.
      */
     /*
      * COMPACTION ON CLEAN SHUTDOWN (design §7.3) IS NOT IMPLEMENTED HERE,
@@ -429,33 +417,30 @@ biscuit_module_unload_callback(int code, unsigned long datum)
      *
      * The design proposes compacting at clean shutdown so that a *planned*
      * restart discards nothing, leaving crash restart -- which is already
-     * replaying WAL -- as the only case that rebuilds a delta from
-     * scratch. The benefit is real: a 100k-row delta costs an estimated
-     * ~3 s to rebuild, and throwing that away on every ordinary restart is
-     * pure waste. It is also described as "one hook", which is what makes
-     * it look cheap.
+     * replaying WAL -- as the only case that rebuilds a delta from scratch.
+     * The benefit is real: a 100k-row delta costs an estimated ~3 s to
+     * rebuild, and throwing that away on every ordinary restart is pure
+     * waste. It is also described as "one hook", which is what makes it look
+     * cheap.
      *
-     * It is not one hook, because this is the wrong place for it, for
-     * exactly the reason recorded above and in biscuit_persist.c's file
-     * header. Compaction needs a real Relation: biscuit_pendlog_compact()
-     * reaches the buffer manager and takes a heavyweight page lock, so it
-     * needs relation_open(), and relation_open() is not safe this late in
-     * backend shutdown. That is precisely why the old
-     * biscuit_persist_save() flush was removed from this callback rather
-     * than fixed. Reintroducing the same call under a different name would
-     * reintroduce the same crash.
+     * It is not one hook, because this is the wrong place for it, for the
+     * reason recorded above and in biscuit_persist.c's file header.
+     * Compaction needs a real Relation: biscuit_pendlog_compact() reaches
+     * the buffer manager and takes a heavyweight page lock, so it needs
+     * relation_open(), which is not safe this late in backend shutdown. Any
+     * call with those requirements crashes here regardless of what it is
+     * named.
      *
      * Nor does before_shmem_exit() help -- it is later still, not earlier.
      *
      * A working version needs a context that legitimately holds relations
-     * open: a background worker with a shutdown callback, or piggybacking
-     * on the checkpointer. Both are more than a hook, and neither is
-     * required for correctness -- an un-compacted delta is rebuilt on
-     * demand, just slowly. Until one exists, the compaction threshold
+     * open: a background worker with a shutdown callback, or piggybacking on
+     * the checkpointer. Both are more than a hook, and neither is required
+     * for correctness -- an un-compacted delta is rebuilt on demand, just
+     * slowly. Until one exists, the compaction threshold
      * (biscuit.delta_compaction_slots) is what bounds the loss: at 20,000
-     * rows the most a restart can cost is roughly 0.6 s of rebuild, which
-     * is the same bound §7.5 relies on when it rejects a persisted delta
-     * layer.
+     * rows the most a restart can cost is roughly 0.6 s of rebuild, the same
+     * bound §7.5 relies on when it rejects a persisted delta layer.
      */
     elog(DEBUG1, "Biscuit: Module unload - clearing all cache entries");
     biscuit_cache_head          = NULL;
