@@ -10,6 +10,7 @@
 #include "biscuit_utf8.h"
 #include "biscuit_cache.h"
 #include "biscuit_index.h"
+#include "biscuit_regex.h"
 #include "utils/spccache.h"   /* get_tablespace_page_costs() -- cost model */
 #include "biscuit_blob.h"   /* biscuit_page_write_blob() */
 #include "biscuit_dir.h"    /* biscuit_dir_find/_insert/_update, BiscuitDirEntry */
@@ -1946,20 +1947,149 @@ biscuit_index_column_record(Relation      index,
  * Build a brand-new index from the heap.  Returns an IndexBuildResult.
  * Handles both single-column and multi-column cases.
  */
+/* ================================================================
+ * Index build callbacks
+ * ================================================================
+ *
+ * These are driven by table_index_build_scan() rather than by a heap
+ * scan this file opens itself. That distinction is load-bearing; see the
+ * BUILD SCAN comment in biscuit_build() below for what core does on our
+ * behalf and what indexing the heap directly got wrong.
+ *
+ * Both callbacks run with CurrentMemoryContext still set to the build
+ * context biscuit_build() switched into -- heapam_index_build_range_scan()
+ * does not switch contexts around the callback -- so everything allocated
+ * here lands in the right place. The Datums in values[] may point into the
+ * scan's per-tuple context, which is reset on the next iteration, so each
+ * one is converted to a private string via biscuit_datum_to_text() before
+ * the callback returns rather than being retained.
+ */
+typedef struct BiscuitBuildState
+{
+    BiscuitIndex *idx;
+    int           natts;
+    Oid           single_typid;         /* single-column path only */
+    FmgrInfo     *single_output_func;   /* single-column path only */
+} BiscuitBuildState;
+
+static void
+biscuit_build_callback_single(Relation index, ItemPointer tid,
+                              Datum *values, bool *isnull,
+                              bool tupleIsAlive, void *state)
+{
+    BiscuitBuildState *bs  = (BiscuitBuildState *) state;
+    BiscuitIndex      *idx = bs->idx;
+    char              *str;
+    int                out_len;
+
+    (void) index;
+
+    /*
+     * tupleIsAlive is deliberately ignored, as it is by every non-unique
+     * AM. It distinguishes live from recently-dead tuples for uniqueness
+     * checking only (amcanunique is false here). Which tuples are eligible
+     * to be indexed at all, and which TID each one is indexed under, has
+     * already been decided by core before we are called.
+     */
+    (void) tupleIsAlive;
+
+    if (isnull[0])
+        return;
+
+    str = biscuit_datum_to_text(values[0], bs->single_typid,
+                                bs->single_output_func, &out_len);
+
+    if (idx->num_records >= idx->capacity)
+    {
+        idx->capacity *= 2;
+        idx->tids = (ItemPointerData *) repalloc(
+            idx->tids, idx->capacity * sizeof(ItemPointerData));
+        idx->data_cache = (char **) repalloc(
+            idx->data_cache, idx->capacity * sizeof(char *));
+        idx->data_cache_lower = (char **) repalloc(
+            idx->data_cache_lower, idx->capacity * sizeof(char *));
+    }
+
+    ItemPointerCopy(tid, &idx->tids[idx->num_records]);
+    idx->data_cache[idx->num_records] = str;
+
+    biscuit_index_single_record(NULL, idx, str, out_len, idx->num_records, 0);
+
+    idx->num_records++;
+}
+
+static void
+biscuit_build_callback_multi(Relation index, ItemPointer tid,
+                             Datum *values, bool *isnull,
+                             bool tupleIsAlive, void *state)
+{
+    BiscuitBuildState *bs  = (BiscuitBuildState *) state;
+    BiscuitIndex      *idx = bs->idx;
+    int                col;
+
+    (void) index;
+    (void) tupleIsAlive;
+
+    if (idx->num_records >= idx->capacity)
+    {
+        idx->capacity *= 2;
+        idx->tids = (ItemPointerData *) repalloc(
+            idx->tids, idx->capacity * sizeof(ItemPointerData));
+        for (col = 0; col < bs->natts; col++)
+        {
+            idx->column_data_cache[col] = (char **) repalloc(
+                idx->column_data_cache[col], idx->capacity * sizeof(char *));
+            idx->column_data_cache_lower[col] = (char **) repalloc(
+                idx->column_data_cache_lower[col], idx->capacity * sizeof(char *));
+        }
+    }
+
+    ItemPointerCopy(tid, &idx->tids[idx->num_records]);
+
+    for (col = 0; col < bs->natts; col++)
+    {
+        int   out_len;
+        char *str;
+
+        /*
+         * Per-column NULL handling, not an all-or-nothing row skip: a row
+         * with one NULL key column must still occupy a slot so its other,
+         * non-NULL columns remain queryable. This mirrors biscuit_insert().
+         */
+        if (isnull[col])
+        {
+            idx->column_data_cache[col][idx->num_records]       = NULL;
+            idx->column_data_cache_lower[col][idx->num_records] = NULL;
+            continue;
+        }
+
+        str = biscuit_datum_to_text(values[col], idx->column_types[col],
+                                    &idx->output_funcs[col], &out_len);
+        idx->column_data_cache[col][idx->num_records] = str;
+
+        /* Only precompute the lowercased copy when the opclass needs it. */
+        idx->column_data_cache_lower[col][idx->num_records] =
+            (idx->column_case_mode[col] & BISCUIT_MODE_ILIKE)
+                ? biscuit_str_tolower(str, out_len)
+                : NULL;
+
+        biscuit_index_column_record(NULL, idx, col, str, out_len,
+                                    idx->num_records, 0);
+    }
+
+    idx->num_records++;
+}
+
 IndexBuildResult *
 biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
 {
     IndexBuildResult *result;
     BiscuitIndex     * volatile idx = NULL;
-    TupleTableSlot   *slot;
-    TableScanDesc     scan;
     MemoryContext     oldcontext;
     MemoryContext     build_cxt;
     int               ch, natts, col, rec_idx;
-    EState           *estate;
-    ExprContext      *econtext;
-    Datum             index_values[INDEX_MAX_KEYS];
-    bool              index_isnull[INDEX_MAX_KEYS];
+    BiscuitBuildState bstate;
+    double            reltuples = 0;
 
     /*
      * FIX #10 — expression index columns (e.g. USING biscuit((col::text))
@@ -1985,14 +2115,13 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
      * (RelationGetDescr(index)) instead of the heap's -- this is correct
      * for both plain columns and expressions, since PostgreSQL always
      * populates the index tuple descriptor with the actual result type of
-     * each key. Get the value via FormIndexDatum(), which evaluates
-     * whatever the key actually is (plain Var or arbitrary expression)
-     * against the current heap tuple slot, exactly like every built-in AM
-     * (btree, gin, gist, ...) does. This requires a per-tuple ExprContext,
-     * set up once via CreateExecutorState() below and reset per row.
+     * each key. The values themselves now arrive already evaluated in the
+     * build callbacks' values[]/isnull[] arrays: table_index_build_scan()
+     * runs FormIndexDatum() against each heap tuple internally, which
+     * handles plain Vars and arbitrary expressions alike. The local EState
+     * and per-tuple ExprContext this function used to create for its own
+     * FormIndexDatum() calls are therefore gone -- core owns that now.
      */
-    estate   = CreateExecutorState();
-    econtext = GetPerTupleExprContext(estate);
 
     /*
      * All BiscuitIndex data must live in its own child of
@@ -2085,48 +2214,50 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
 
             biscuit_init_crud_structures(idx);
 
-            slot = table_slot_create(heap, NULL);
-            #if PG_VERSION_NUM >= 190000
-                scan = table_beginscan(heap, SnapshotAny, 0, NULL, 0);
-            #else
-                scan = table_beginscan(heap, SnapshotAny, 0, NULL);
-            #endif
-            while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
-            {
-                char  *str;
-                int    out_len;
+            /*
+             * BUILD SCAN -- see the header comment on the build callbacks.
+             *
+             * This used to be a hand-rolled
+             *     table_beginscan(heap, SnapshotAny, ...)
+             * loop over every tuple in the heap. That produced silent wrong
+             * answers, because a raw SnapshotAny scan skips four things
+             * core does for an access method here:
+             *
+             *  1. HOT-root mapping. heapam_index_build_range_scan() maps a
+             *     heap-only tuple to its chain's root TID via
+             *     heap_get_root_tuples(). The raw scan indexed each version
+             *     under its OWN TID, so a scan for a superseded value
+             *     returned a TID whose HOT chain resolves to the LIVE
+             *     tuple -- the index reported rows that do not match. It
+             *     needed only an UPDATE performed while the column was not
+             *     yet indexed (i.e. any "CREATE INDEX on an existing,
+             *     updated table"), and REINDEX did not repair it because it
+             *     re-ran the same scan.
+             *  2. Tuple eligibility. Core decides which versions in a chain
+             *     may be indexed and sets ii_BrokenHotChain (hence
+             *     pg_index.indcheckxmin) when a chain cannot be represented.
+             *     The raw scan indexed dead, recently-dead and aborted
+             *     tuples indiscriminately and never set that flag.
+             *  3. ii_Predicate. Partial indexes were built over EVERY row,
+             *     so a partial Biscuit index returned rows failing its own
+             *     WHERE clause -- the planner had already dropped that qual
+             *     as implied by the predicate, so nothing filtered them.
+             *  4. FormIndexDatum, including expression keys.
+             *
+             * allow_sync is false so the scan always starts at block 0.
+             * Correctness does not depend on it (slots are numbered in
+             * arrival order, whatever that order is), but it keeps a build
+             * reproducible rather than varying with concurrent seq scans.
+             */
+            bstate.idx                = idx;
+            bstate.natts              = natts;
+            bstate.single_typid       = coltypid;
+            bstate.single_output_func = &single_output_func;
 
-                ResetExprContext(econtext);
-                econtext->ecxt_scantuple = slot;
-                FormIndexDatum(indexInfo, slot, estate, index_values, index_isnull);
-
-                if (!index_isnull[0])
-                {
-                    str = biscuit_datum_to_text(index_values[0], coltypid,
-                                                 &single_output_func, &out_len);
-
-                    if (idx->num_records >= idx->capacity)
-                    {
-                        idx->capacity *= 2;
-                        idx->tids = (ItemPointerData *) repalloc(
-                            idx->tids, idx->capacity * sizeof(ItemPointerData));
-                        idx->data_cache = (char **) repalloc(
-                            idx->data_cache, idx->capacity * sizeof(char *));
-                        idx->data_cache_lower = (char **) repalloc(
-                            idx->data_cache_lower, idx->capacity * sizeof(char *));
-                    }
-
-                    ItemPointerCopy(&slot->tts_tid, &idx->tids[idx->num_records]);
-                    idx->data_cache[idx->num_records] = str;
-
-                    biscuit_index_single_record(NULL, idx, str, out_len, idx->num_records, 0);
-
-                    idx->num_records++;
-                }
-            }
-
-            table_endscan(scan);
-            ExecDropSingleTupleTableSlot(slot);
+            reltuples = table_index_build_scan(heap, index, indexInfo,
+                                               false, true,
+                                               biscuit_build_callback_single,
+                                               (void *) &bstate, NULL);
 
             /* Build length bitmaps */
             idx->max_length_legacy = idx->max_len + 1;
@@ -2285,98 +2416,23 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
 
             biscuit_init_crud_structures(idx);
 
-            slot = table_slot_create(heap, NULL);
-            #if PG_VERSION_NUM >= 190000
-                scan = table_beginscan(heap, SnapshotAny, 0, NULL, 0);
-            #else
-                scan = table_beginscan(heap, SnapshotAny, 0, NULL);
-            #endif
-            while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
-            {
-                /*
-                 * FIX #10 (multi-column case): previously called
-                 * slot_getattr(slot, index->rd_index->indkey.values[col], ...)
-                 * to fetch each column's value, which is only valid for plain
-                 * attribute references -- indkey.values[col] is 0 for an
-                 * expression column, and slot_getattr() has no way to
-                 * evaluate an expression in the first place. FormIndexDatum()
-                 * evaluates every index key (Var or arbitrary expression)
-                 * against the current heap tuple slot and fills
-                 * index_values[]/index_isnull[], exactly like every built-in
-                 * AM does for expression-index support.
-                 */
-                ResetExprContext(econtext);
-                econtext->ecxt_scantuple = slot;
-                FormIndexDatum(indexInfo, slot, estate, index_values, index_isnull);
+            /*
+             * BUILD SCAN (multi-column) -- identical reasoning to the
+             * single-column path above: core owns HOT-root mapping, tuple
+             * eligibility / ii_BrokenHotChain, ii_Predicate for partial
+             * indexes, and FormIndexDatum for expression keys. See the
+             * long comment there for what the previous hand-rolled
+             * SnapshotAny heap scan got wrong.
+             */
+            bstate.idx                = idx;
+            bstate.natts              = natts;
+            bstate.single_typid       = InvalidOid;
+            bstate.single_output_func = NULL;
 
-                /*
-                 * FIX #11: previously skipped the ENTIRE row (continue) if
-                 * any single indexed column was NULL, via an all_non_null
-                 * flag computed here from index_isnull[]. That dropped rows
-                 * from idx->tids entirely -- including their other,
-                 * non-NULL columns -- making them invisible to every
-                 * subsequent query regardless of which column it filtered
-                 * on. The per-column NULL handling below (storing NULL into
-                 * column_data_cache[col] and skipping only that column's
-                 * indexing) already exists and is sufficient; there is no
-                 * need for an all-or-nothing skip. This mirrors what
-                 * biscuit_insert() already does correctly per-row.
-                 */
-
-                if (idx->num_records >= idx->capacity)
-                {
-                    idx->capacity *= 2;
-                    idx->tids = (ItemPointerData *) repalloc(idx->tids, idx->capacity * sizeof(ItemPointerData));
-                    for (col = 0; col < natts; col++)
-                    {
-                        idx->column_data_cache[col] = (char **) repalloc(
-                            idx->column_data_cache[col], idx->capacity * sizeof(char *));
-                        idx->column_data_cache_lower[col] = (char **) repalloc(
-                            idx->column_data_cache_lower[col], idx->capacity * sizeof(char *));
-                    }
-                }
-
-                ItemPointerCopy(&slot->tts_tid, &idx->tids[idx->num_records]);
-
-                for (col = 0; col < natts; col++)
-                {
-                    int        out_len;
-                    char      *str;
-
-                    if (index_isnull[col])
-                    {
-                        idx->column_data_cache[col][idx->num_records]       = NULL;
-                        idx->column_data_cache_lower[col][idx->num_records] = NULL;
-                        continue;
-                    }
-
-                    str = biscuit_datum_to_text(index_values[col], idx->column_types[col], &idx->output_funcs[col], &out_len);
-                    idx->column_data_cache[col][idx->num_records] = str;
-
-                    /*
-                     * Only precompute the lowercased copy when this
-                     * column's opclass actually needs ILIKE support;
-                     * biscuit_like_ops columns leave this NULL.
-                     */
-                    idx->column_data_cache_lower[col][idx->num_records] =
-                        (idx->column_case_mode[col] & BISCUIT_MODE_ILIKE)
-                            ? biscuit_str_tolower(str, out_len)
-                            : NULL;
-
-                    /*
-                     * Populate all character-level and case-insensitive bitmaps
-                     * for this column.  Previously this was a stub comment; the
-                     * missing call was the root cause of multi-column indexes
-                     * returning 0 rows for every query.
-                     */
-                    biscuit_index_column_record(NULL, idx, col, str, out_len, idx->num_records, 0);
-                }
-
-                idx->num_records++;
-            }
-
-            table_endscan(scan);
-            ExecDropSingleTupleTableSlot(slot);
+            reltuples = table_index_build_scan(heap, index, indexInfo,
+                                               false, true,
+                                               biscuit_build_callback_multi,
+                                               (void *) &bstate, NULL);
 
             /* Build per-column length bitmaps */
             for (col = 0; col < natts; col++)
@@ -2519,10 +2575,18 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
         biscuit_cache_insert(RelationGetRelid(index), idx);
 
         MemoryContextSwitchTo(oldcontext);
-        FreeExecutorState(estate);
 
         result = (IndexBuildResult *) palloc(sizeof(IndexBuildResult));
-        result->heap_tuples  = idx->num_records;
+
+        /*
+         * heap_tuples is the live-tuple count table_index_build_scan()
+         * returns, which is what feeds pg_class.reltuples for the heap.
+         * It is not interchangeable with num_records: the single-column
+         * path does not allocate a slot for a row whose key is NULL, so
+         * reusing num_records here understated reltuples on any nullable
+         * column and skewed every subsequent plan on the table.
+         */
+        result->heap_tuples  = reltuples;
         result->index_tuples = idx->num_records;
 
         return result;
@@ -3894,13 +3958,43 @@ biscuit_cost_for_shape(const BiscuitPatternShape *sh,
 /*
  * Pull the pattern constant out of an index qual, if it is a constant at
  * plan time.  Returns a palloc'd C string, or NULL.
+ *
+ * REGEX QUALS
+ * -----------
+ * For the ~ / !~ / ~* / !~* operators the constant is a regular
+ * expression, not a glob, and handing it to biscuit_classify_pattern()
+ * raw would badly misprice the path: that classifier reads '%' and '_'
+ * as wildcards and everything else as literal, so '^abc.*' would score
+ * as a six-character literal-only pattern (an exact match, the cheapest
+ * class there is) when it is really a prefix scan, and '.*x.*' would
+ * score as a five-character exact match when it is the most expensive
+ * class there is.
+ *
+ * So translate first, and price the glob that will actually be
+ * evaluated.  This uses exactly the same biscuit_regex_to_glob() call
+ * that biscuit_build_query_plan() will make at execution time, so the
+ * cost model and the executor can never disagree about what a given
+ * regex key costs.
+ *
+ * *is_lossy is set when the regex is outside the decomposable subset.
+ * The caller disables the whole path in that case: such a key is skipped
+ * at execution time and contributes no filtering at all, so the scan
+ * degenerates to reading every row and rechecking it -- strictly worse
+ * than the sequential scan the planner would otherwise choose.  Costing
+ * it out is what keeps the recheck fallback a correctness backstop
+ * rather than a performance trap.
  */
 static char *
-biscuit_pattern_from_clause(Expr *clause)
+biscuit_pattern_from_clause(Expr *clause, Oid opfamily, bool *is_lossy)
 {
     OpExpr *op;
     Node   *rightop;
     Const  *con;
+    char   *raw;
+    int     strategy;
+
+    if (is_lossy)
+        *is_lossy = false;
 
     if (!IsA(clause, OpExpr))
         return NULL;
@@ -3918,7 +4012,106 @@ biscuit_pattern_from_clause(Expr *clause)
     if (con->consttype != TEXTOID)
         return NULL;
 
-    return TextDatumGetCString(con->constvalue);
+    raw = TextDatumGetCString(con->constvalue);
+
+    /*
+     * Which operator this is decides whether `raw` is a glob or a regex.
+     * The strategy number is not available here (costestimate works from
+     * the clause tree, not from ScanKeys), so recover it from the
+     * opfamily this index column was built with.
+     */
+    strategy = biscuit_strategy_for_operator(op->opno, opfamily);
+
+    if (biscuit_strategy_is_regex(strategy))
+    {
+        char       *glob   = NULL;
+        const char *reason = NULL;
+        bool        ci     = biscuit_strategy_is_case_insensitive(strategy);
+
+        /*
+         * Mirror biscuit_build_query_plan()'s case-insensitive rules
+         * exactly, or the planner would price a path the executor then
+         * refuses to use: !~* is never decomposed, and ~* only for ASCII
+         * patterns. Keeping the two in step is why both sides call the
+         * same biscuit_regex_to_glob() and the same ASCII gate.
+         */
+        if (ci && biscuit_strategy_is_negated(strategy))
+        {
+            reason = "negated case-insensitive regex";
+        }
+        else if (biscuit_regex_to_glob(raw, &glob, &reason) == BISCUIT_REGEX_EXACT)
+        {
+            if (!ci || biscuit_regex_glob_is_ascii(glob))
+            {
+                pfree(raw);
+                return glob;
+            }
+            pfree(glob);
+            glob   = NULL;
+            reason = "non-ASCII case-insensitive regex";
+        }
+
+        elog(DEBUG1,
+             "biscuit: costestimate disabling path for non-decomposable "
+             "regex \"%s\" (%s)",
+             raw, reason ? reason : "unsupported construct");
+        pfree(raw);
+        if (is_lossy)
+            *is_lossy = true;
+        return NULL;
+    }
+
+    return raw;
+}
+
+/*
+ * biscuit_disable_path
+ *
+ * Mark an index path as unusable.
+ *
+ * Setting the cost to BISCUIT_COST_DISABLED is necessary but, from
+ * PostgreSQL 18 on, no longer sufficient.
+ *
+ * Up to PG17 a GUC-disabled path (enable_seqscan = off and friends) simply
+ * had disable_cost = 1e10 folded into its startup cost, so path choice was
+ * a pure cost comparison and our 1e18 always lost. Commit e22253467
+ * ("Treat number of disabled nodes in a path as a separate cost metric",
+ * PG18) replaced that with a disabled_nodes counter which is compared
+ * BEFORE total_cost. A path with disabled_nodes = 0 therefore beats one
+ * with disabled_nodes = 1 no matter how the costs compare.
+ *
+ * The consequence for us is precise: with enable_seqscan = off the
+ * sequential path carries disabled_nodes = 1, while our index path -- 1e18
+ * cost and all -- carries 0, and wins. Pricing a path out is simply not
+ * expressible in cost terms any more, which is why every non-decomposable
+ * regex in the plan-priced-out suite came back as an Index Scan on PG18
+ * while behaving correctly on PG16/17.
+ *
+ * So say it in the terms the planner now uses. cost_index() assigns
+ * path->path.disabled_nodes (from enable_indexscan) immediately BEFORE
+ * calling amcostestimate and never touches it afterwards, so incrementing
+ * it here is well defined and composes with the GUC rather than
+ * overwriting it: enable_indexscan = off plus a disabled pattern gives 2,
+ * and the path stays disabled if either reason applies on its own.
+ *
+ * The cost assignment is kept on every branch. It is what PG16/17 rely on
+ * entirely, it is what breaks the tie on PG18 once the disabled_nodes
+ * counts are equal (1e18 against a real seqscan cost), and it is what
+ * propagates into cost_bitmap_tree_node() for the bitmap variant of this
+ * path, which reads indextotalcost rather than disabled_nodes.
+ */
+static inline void
+biscuit_disable_path(IndexPath *path, Cost *startup, Cost *total)
+{
+    *startup = BISCUIT_COST_DISABLED;
+    *total   = BISCUIT_COST_DISABLED;
+
+#if PG_VERSION_NUM >= 180000
+    if (path != NULL)
+        path->path.disabled_nodes++;
+#else
+    (void) path;
+#endif
 }
 
 void
@@ -3964,8 +4157,7 @@ biscuit_costestimate(PlannerInfo *root, IndexPath *path,
          * path unattractive so the planner falls back to a seqscan instead
          * of using Biscuit with zero scan keys, which would return 0 rows.
          */
-        *indexStartupCost = BISCUIT_COST_DISABLED;
-        *indexTotalCost   = BISCUIT_COST_DISABLED;
+        biscuit_disable_path(path, indexStartupCost, indexTotalCost);
         *indexSelectivity = 1.0;
         return;
     }
@@ -4145,6 +4337,16 @@ biscuit_costestimate(PlannerInfo *root, IndexPath *path,
         {
             IndexClause *iclause = lfirst_node(IndexClause, lc);
             ListCell    *lc2;
+            /*
+             * The opfamily of the index column this clause was matched
+             * to, which is what tells us the strategy number of the
+             * clause's operator. Guarded because indexcol is only
+             * meaningful within the index's own column count.
+             */
+            Oid          qual_opfamily =
+                (iclause->indexcol >= 0 && iclause->indexcol < index->nkeycolumns)
+                    ? index->opfamily[iclause->indexcol]
+                    : InvalidOid;
 
             foreach(lc2, iclause->indexquals)
             {
@@ -4152,8 +4354,25 @@ biscuit_costestimate(PlannerInfo *root, IndexPath *path,
                 char                *pat;
                 BiscuitPatternShape  sh;
                 double               c;
+                bool                 lossy = false;
 
-                pat = biscuit_pattern_from_clause(rinfo->clause);
+                pat = biscuit_pattern_from_clause(rinfo->clause,
+                                                  qual_opfamily, &lossy);
+                if (lossy)
+                {
+                    /*
+                     * A regex outside the glob-decomposable subset. At
+                     * execution time this key is skipped and the scan
+                     * falls back to recheck over every row, which is a
+                     * sequential scan plus index overhead -- never the
+                     * right plan. Disable the path outright, exactly as
+                     * an unusable glob shape does below.
+                     */
+                    cost = BISCUIT_COST_DISABLED;
+                    disabled = true;
+                    sawPattern = true;
+                    break;
+                }
                 if (pat == NULL)
                     continue;           /* not a plan-time constant */
 
@@ -4248,7 +4467,7 @@ biscuit_costestimate(PlannerInfo *root, IndexPath *path,
      * latency does not.
      */
     if (cost >= BISCUIT_COST_DISABLED)
-        *indexStartupCost = BISCUIT_COST_DISABLED;
+        biscuit_disable_path(path, indexStartupCost, indexTotalCost);
     else
         *indexStartupCost = cost * 0.10;
 }

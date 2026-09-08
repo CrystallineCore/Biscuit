@@ -54,6 +54,7 @@
 #include "biscuit_bitmap.h"
 #include "biscuit_cache.h"
 #include "biscuit_pattern.h"
+#include "biscuit_regex.h"
 #include "biscuit_tid.h"
 #include "biscuit_index.h"
 #include "biscuit_pendlog.h"   /* biscuit_pendlog_scan_begin()/_moved()/_end()
@@ -166,6 +167,15 @@ biscuit_beginscan(Relation index, int nkeys, int norderbys)
     so->limit_remaining    = -1;
 
     /*
+     * Exact results until a rescan proves otherwise. biscuit_rescan()
+     * recomputes this per invocation; initialising it here covers the
+     * (executor-illegal, but cheap to be safe about) case of a gettuple
+     * before any rescan, which would otherwise read uninitialised memory
+     * and could report a spurious recheck.
+     */
+    so->needs_recheck      = false;
+
+    /*
      * See BiscuitScanOpaque.scratch_cxt's field comment. Parented under
      * CurrentMemoryContext purely as a starting point -- what matters is
      * that WE explicitly MemoryContextReset()/Delete() it ourselves
@@ -209,6 +219,15 @@ biscuit_build_candidates_multicolumn(IndexScanDesc scan,
     RoaringBitmap     *candidates;
     QueryPlan         *plan;
     int                i;
+    /*
+     * Whether any predicate actually narrowed `candidates`. If every one
+     * was skipped as a non-decomposable regex, the initial all-slots set
+     * survives untouched and has to be replaced -- see the block after
+     * the loop.
+     */
+    bool               evaluated_any    = false;
+    int                lossy_only_col   = 0;
+    bool               lossy_only_ilike = false;
 
     /* Start with all records as candidates */
     candidates = biscuit_roaring_create();
@@ -232,15 +251,41 @@ biscuit_build_candidates_multicolumn(IndexScanDesc scan,
     for (i = 0; i < plan->count; i++)
     {
         QueryPredicate *pred            = &plan->predicates[i];
-        int             pred_strategy   = pred->scan_key->sk_strategy;
-        bool            pred_is_not_like = (pred_strategy == BISCUIT_NOT_LIKE_STRATEGY ||
-                                            pred_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
-        bool            pred_is_ilike   = (pred_strategy == BISCUIT_ILIKE_STRATEGY ||
-                                           pred_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
+        /*
+         * effective_strategy, not sk_strategy: a '~'/'!~'/'~*'/'!~*' key
+         * has already been rewritten into the equivalent glob and
+         * LIKE/ILIKE strategy by biscuit_build_query_plan(), so this loop
+         * needs no regex-specific branches.
+         */
+        int             pred_strategy   = pred->effective_strategy;
+        bool            pred_is_not_like = biscuit_strategy_is_negated(pred_strategy);
+        bool            pred_is_ilike   = biscuit_strategy_is_case_insensitive(pred_strategy);
         RoaringBitmap  *col_result;
 
         if (pred->column_index < 0 || pred->column_index >= so->index->num_columns)
             continue;
+
+        /*
+         * A regex the decomposer could not turn into an exact glob. Skip
+         * it entirely -- leaving `candidates` unnarrowed keeps the result
+         * a superset -- and record that the executor must recheck. See
+         * QueryPredicate.is_lossy for why approximating here instead
+         * would be unsafe.
+         */
+        if (pred->is_lossy)
+        {
+            so->needs_recheck = true;
+            lossy_only_col   = pred->column_index;
+            lossy_only_ilike =
+                biscuit_strategy_is_case_insensitive(pred->scan_key->sk_strategy);
+            continue;
+        }
+
+        evaluated_any = true;
+
+        /* See the matching comment in the single-column path. */
+        if (pred->needs_recheck)
+            so->needs_recheck = true;
 
         /*
          * Pass the running row-candidate set as a mask. Row
@@ -307,6 +352,33 @@ biscuit_build_candidates_multicolumn(IndexScanDesc scan,
             break;
     }
 
+    /*
+     * No predicate was evaluable -- every key was a non-decomposable
+     * regex -- so `candidates` is still the raw [0, num_records) range
+     * seeded at the top of this function, minus tombstones.
+     *
+     * That range is not a safe candidate set to hand to TID collection:
+     * it includes free slots that were never populated and recycled slots
+     * whose membership is still undrained, which is what produces the
+     * "slot N with no valid TID" ereport in biscuit_tid.c. Narrow it to
+     * the reconciled live non-null set for the column instead, exactly as
+     * the single-column path does. Rows with a NULL value in that column
+     * are dropped in the process, which is also what we want: NULL ~ 'x'
+     * is NULL, so they can never qualify.
+     */
+    if (!evaluated_any && so->needs_recheck &&
+        lossy_only_col >= 0 && lossy_only_col < so->index->num_columns)
+    {
+        ColumnIndex   *lc = &so->index->column_indices[lossy_only_col];
+        RoaringBitmap *live;
+
+        live = biscuit_get_negation_base_set(scan->indexRelation, lc,
+                                             lossy_only_col, lossy_only_ilike,
+                                             so->index->num_records);
+        biscuit_roaring_and_inplace(candidates, live);
+        biscuit_roaring_free(live);
+    }
+
     biscuit_free_query_plan(plan);
     return candidates;
 
@@ -355,6 +427,7 @@ biscuit_build_candidates_singlecolumn(IndexScanDesc scan,
     QueryPlan     *plan;
     RoaringBitmap *mask = NULL;   /* running candidate set; NULL == unrestricted */
     int            i;
+    bool           lossy_is_ilike = false;  /* see the is_lossy skip below */
 
     plan = biscuit_build_query_plan(so->index, keys, nkeys);
     if (!plan || plan->count == 0)
@@ -370,7 +443,40 @@ biscuit_build_candidates_singlecolumn(IndexScanDesc scan,
         RoaringBitmap  *key_result;
         bool            is_not;
 
-        switch (key->sk_strategy)
+        /*
+         * A regex outside the glob-decomposable subset. Contributing
+         * nothing to the mask leaves the candidate set a superset, which
+         * the recheck below can safely narrow; see QueryPredicate.is_lossy.
+         *
+         * Remember the ORIGINAL (pre-rewrite) strategy's case mode: if
+         * every key turns out to be lossy we have to synthesise an
+         * all-rows set below, and which structure set to source it from
+         * depends on how this index was built. effective_strategy is no
+         * use for that -- it was deliberately flattened to a positive
+         * case-sensitive LIKE by biscuit_build_query_plan().
+         */
+        if (pred->is_lossy)
+        {
+            so->needs_recheck = true;
+            lossy_is_ilike =
+                biscuit_strategy_is_case_insensitive(key->sk_strategy);
+            continue;
+        }
+
+        /*
+         * Evaluated, but only a superset -- a case-insensitive regex whose
+         * ILIKE rewrite over-matches. Unlike is_lossy the predicate still
+         * runs and still narrows; it just cannot be reported as exact.
+         */
+        if (pred->needs_recheck)
+            so->needs_recheck = true;
+
+        /*
+         * effective_strategy, not key->sk_strategy: regex keys reach here
+         * already rewritten into their LIKE/ILIKE equivalents by
+         * biscuit_build_query_plan(), so strategies 5..8 never appear.
+         */
+        switch (pred->effective_strategy)
         {
             case BISCUIT_LIKE_STRATEGY:
             case BISCUIT_NOT_LIKE_STRATEGY:
@@ -384,8 +490,18 @@ biscuit_build_candidates_singlecolumn(IndexScanDesc scan,
                 break;
 
             default:
-                elog(ERROR, "Biscuit: unsupported scan strategy %d",
-                     key->sk_strategy);
+                /*
+                 * Report both numbers: they differ for a regex key, and
+                 * which one is out of range says where the bug is -- an
+                 * unexpected sk_strategy means the opclass registered an
+                 * operator the AM does not implement, whereas an
+                 * unexpected effective_strategy means the rewrite in
+                 * biscuit_build_query_plan() produced something the
+                 * evaluation loop does not handle.
+                 */
+                elog(ERROR,
+                     "Biscuit: unsupported scan strategy %d (effective %d)",
+                     key->sk_strategy, pred->effective_strategy);
                 continue;
         }
 
@@ -396,8 +512,7 @@ biscuit_build_candidates_singlecolumn(IndexScanDesc scan,
             return NULL;
         }
 
-        is_not = (key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY ||
-                  key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
+        is_not = biscuit_strategy_is_negated(pred->effective_strategy);
 
         if (is_not)
         {
@@ -429,7 +544,8 @@ biscuit_build_candidates_singlecolumn(IndexScanDesc scan,
              * set is restricted to `mask` too before subtracting,
              * keeping the two sides consistent.
              */
-            bool           is_ilike_strategy = (key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY);
+            bool           is_ilike_strategy =
+                biscuit_strategy_is_case_insensitive(pred->effective_strategy);
             RoaringBitmap *all;
 
             /* Reconciled -- see biscuit_get_negation_base_set(). */
@@ -476,9 +592,12 @@ biscuit_build_candidates_singlecolumn(IndexScanDesc scan,
                     (errmsg("biscuit: diag key %d strategy %d -> " UINT64_FORMAT " candidate slot(s)",
                             i, (int) key->sk_strategy,
                             biscuit_roaring_count(mask)),
-                     errdetail("num_records %d; tombstone_count %d.",
+                     errdetail("num_records %d; tombstone_count %d; "
+                               "effective strategy %d; pattern \"%s\".",
                                so->index->num_records,
-                               so->index->tombstone_count)));
+                               so->index->tombstone_count,
+                               pred->effective_strategy,
+                               pred->pattern)));
 
         if (biscuit_roaring_is_empty(mask))
         {
@@ -490,14 +609,53 @@ biscuit_build_candidates_singlecolumn(IndexScanDesc scan,
 
     biscuit_free_query_plan(plan);
 
+    /*
+     * Every predicate was skipped as lossy, so nothing ever narrowed the
+     * mask and it is still NULL -- the query is one or more regexes, all
+     * of them outside the decomposable subset.
+     *
+     * "Unrestricted" has to become an explicit all-rows set here rather
+     * than staying NULL, because NULL means "no candidates" to the caller
+     * and would return zero rows for a predicate we have deliberately
+     * chosen not to evaluate. Materialising every slot and letting the
+     * recheck do the filtering is slow -- effectively a sequential scan
+     * with extra steps -- but it is correct, and biscuit_costestimate()
+     * prices this case out (see the lossy-regex branch there) so the
+     * planner picks a real seqscan instead except when it has no choice.
+     */
+    if (mask == NULL)
+    {
+        Assert(so->needs_recheck);
+
+        /*
+         * Source this from the same reconciled "all live non-null indexed
+         * rows" set that NOT LIKE inverts against, NOT from a raw
+         * [0, num_records) range. The two differ in ways that matter
+         * here: the raw range includes free slots that were never
+         * populated (and recycled slots whose membership is still
+         * undrained in the pending log), and handing those to TID
+         * collection is what produces the "slot N with no valid TID"
+         * ereport documented in biscuit_tid.c.
+         *
+         * It also drops rows whose column value is NULL, which is
+         * separately correct: NULL ~ 'x' is NULL, never true, so those
+         * rows could not qualify anyway and there is no point paying to
+         * recheck them.
+         */
+        mask = biscuit_get_negation_base_set_legacy(scan->indexRelation,
+                                                     so->index,
+                                                     lossy_is_ilike);
+    }
+
     {
     RoaringBitmap *result = mask;
 
     /*
      * result is never NULL here: plan->count > 0 is guaranteed
      * above, every loop iteration either assigns mask (this
-     * variable) or returns early, and the unsupported-strategy
-     * default case elog(ERROR)s rather than falling through.
+     * variable) or returns early, the unsupported-strategy
+     * default case elog(ERROR)s rather than falling through, and
+     * the all-predicates-skipped case is materialised just above.
      */
 
     /*
@@ -622,6 +780,16 @@ biscuit_rescan(IndexScanDesc scan,
      * since that's the only place reconciliation is reached from.
      */
     biscuit_reconcile_scratch_cxt = so->scratch_cxt;
+
+    /*
+     * Recomputed from scratch every rescan, alongside the scratch-context
+     * reset above. A previous rescan of this same scan object may have had
+     * a non-decomposable regex key while this one does not (a prepared
+     * statement re-planned with different constants, say), and leaving the
+     * flag latched would silently impose a recheck on every subsequent
+     * execution.
+     */
+    so->needs_recheck = false;
 
     (void) orderbys;
     (void) norderbys;
@@ -919,7 +1087,14 @@ biscuit_gettuple(IndexScanDesc scan, ScanDirection dir)
         return false;
 
     scan->xs_heaptid = so->results[so->current];
-    scan->xs_recheck = false;
+    /*
+     * False for every LIKE/ILIKE scan and for regex scans whose pattern
+     * decomposed exactly -- Biscuit's results are exact and the executor
+     * need not re-test the qual. True only when a regex key fell outside
+     * the decomposable subset and was skipped, making these results a
+     * superset; see BiscuitScanOpaque.needs_recheck.
+     */
+    scan->xs_recheck = so->needs_recheck;
     so->current++;
 
     if (so->limit_remaining > 0)
@@ -942,7 +1117,8 @@ biscuit_getbitmap(IndexScanDesc scan, TIDBitmap *tbm)
 
     if (so->num_results > 0)
     {
-        bool recheck = false;
+        /* See biscuit_gettuple() above and BiscuitScanOpaque.needs_recheck. */
+        bool recheck = so->needs_recheck;
 
         if (so->num_results > chunk_size)
         {

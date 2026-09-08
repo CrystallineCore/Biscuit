@@ -1619,6 +1619,7 @@ pendlog_expand_touched(Relation index, BiscuitPendLogSnapshot *snap)
     int           nslots = 0;
     int           i;
     uint32        max_slot = 0;
+    MemoryContext old;
 
     if (snap->ntouched == 0)
         return;
@@ -1682,8 +1683,38 @@ pendlog_expand_touched(Relation index, BiscuitPendLogSnapshot *snap)
                                 BISCUIT_PENDING_OP_ADD,
                                 pendlog_delta_emit, &ectx);
 
+    /*
+     * snap->expanded is snapshot-owned and outlives this call, so its
+     * growth must land in snap->cxt -- exactly as pendlog_delta_emit()
+     * above switches before touching snap->htab and e->adds.
+     *
+     * biscuit_roaring_add() grows by palloc0'ing a NEW blocks array in
+     * CurrentMemoryContext, pfree'ing the old one, and storing the new
+     * pointer back into the bitmap. Without this switch that array is
+     * allocated in whatever context the caller happened to be in -- on
+     * the read path (biscuit_pendlog_snapshot() <- biscuit_reconcile_
+     * pending() <- biscuit_rescan()) that is the executor's per-query
+     * context. ExecutorEnd() deletes it, while the snapshot itself lives
+     * on under CacheMemoryContext in the process-wide slot cache, so
+     * snap->expanded->blocks is left dangling into freed memory.
+     *
+     * The next query reads it (biscuit_roaring_contains() on the
+     * already-expanded check below), and the eventual
+     * pendlog_snapshot_free() pfree's it a second time -- surfacing as a
+     * glibc "double free or corruption" abort in whichever statement
+     * happens to invalidate the slot, typically VACUUM's
+     * biscuit_vacuumcleanup() -> biscuit_pendlog_drain_all().
+     *
+     * Only the bitmap mutation is wrapped: `slots` above and the
+     * `unexpanded` scratch below are genuine per-call temporaries that
+     * are freed before return and must stay in the caller's context, and
+     * biscuit_delta_expand_slots()'s own scratch likewise -- its emit
+     * callback does its own narrow switch for the parts it keeps.
+     */
+    old = MemoryContextSwitchTo(snap->cxt);
     for (i = 0; i < nslots; i++)
         biscuit_roaring_add(snap->expanded, slots[i]);
+    MemoryContextSwitchTo(old);
 
     pfree(slots);
 

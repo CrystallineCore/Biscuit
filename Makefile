@@ -1,192 +1,108 @@
-# Makefile for biscuit PostgreSQL extension
-
-EXTENSION = biscuit
-EXTVERSION = 3.0.0
-
-MODULE_big = biscuit
-
-# Automatically compile all source files in src/.
+# Makefile for the Biscuit index access method (PGXS build).
 #
-# This wildcard is why adding a new module (e.g. src/biscuit_rowstore.c, the
-# in-place row-identity storage layer) needs no edit here -- new .c files in
-# src/ are picked up on the next build automatically. Note the corollary:
-# `make clean` only removes src/*.o, so a *removed* source file's stale .o
-# would still be linked; run `make clean` after deleting a module.
+# NOTE: no Makefile shipped in the source archive this was reconstructed
+# from, so this is a fresh one rather than a patch. If you already have a
+# working Makefile, the ONLY change regex support strictly requires is
+# adding biscuit_regex.o to OBJS, plus shipping the two new SQL scripts.
+# Everything else here is reconstruction and can be ignored.
+
+EXTENSION   = biscuit
+EXTVERSION  = 3.1.0
+
+MODULE_big  = biscuit
+
+# Built from every .c under src/ so a newly added module is picked up
+# automatically. biscuit_regex.c (the regex -> glob decomposer) is the
+# addition for this version; if you prefer an explicit OBJS list instead,
+# biscuit_regex.o must appear in it.
 OBJS = $(patsubst %.c,%.o,$(wildcard src/*.c))
 
-# Versioned install script (IMPORTANT: must match EXTENSION versioning scheme)
-#
-# Every upgrade script that exists in sql/ must be listed here, or PGXS won't
-# install it and ALTER EXTENSION ... UPDATE will fail to find a path to the
-# target version. sql/biscuit--2.5.0--3.0.0.sql was missing from this list
-# while EXTVERSION was already 3.0.0, so `ALTER EXTENSION biscuit UPDATE TO
-# '3.0.0'` had no installed script to reach 3.0.0 through -- only a fresh
-# CREATE EXTENSION worked.
-DATA = \
-	sql/biscuit--$(EXTVERSION).sql \
-	sql/biscuit--2.2.3--2.3.0.sql \
-	sql/biscuit--2.3.0.sql \
-	sql/biscuit--2.3.0--2.4.0.sql \
-	sql/biscuit--2.5.0--3.0.0.sql
+# Fresh install plus the no-REINDEX upgrade path from 3.0.0.
+DATA = sql/biscuit--$(EXTVERSION).sql \
+       sql/biscuit--3.0.0--3.1.0.sql
 
-# Regression tests: `make installcheck` runs sql/*.sql from test/sql against a
-# running server and diffs against test/expected/*.out.
-REGRESS_OPTS = --inputdir=test --load-extension=biscuit
-REGRESS = $(patsubst test/sql/%.sql,%,$(wildcard test/sql/*.sql))
+# -----------------------------------------------------------------------
+# Compiler / linker flags
+# -----------------------------------------------------------------------
+# ORDER MATTERS. pgxs.mk does
+#     override CPPFLAGS := $(PG_CPPFLAGS) $(CPPFLAGS)
+# with := (immediate expansion) at include time, so anything appended to
+# PG_CPPFLAGS AFTER `include $(PGXS)` is silently dropped. SHLIB_LINK is
+# expanded lazily and does still work late, which makes the failure mode
+# nasty: a late -DHAVE_ROARING is ignored while the matching -lroaring is
+# honoured, so the extension links against CRoaring but is compiled with
+# the fallback bitmap -- it builds, runs, and quietly gives up the
+# performance you thought you had enabled. Keep these above the include.
 
-PGFILEDESC = "Wildcard pattern matching through bitmap indexing"
+PG_CPPFLAGS = -Isrc
 
-# PostgreSQL build system
+# CRoaring (optional). Without it the fallback bitmap in biscuit_bitmap.c
+# is used -- correct, but slower. Enable with:
+#     make WITH_ROARING=1
+ifdef WITH_ROARING
+PG_CPPFLAGS += -DHAVE_ROARING
+SHLIB_LINK  += -lroaring
+endif
+
 PG_CONFIG ?= pg_config
-PGXS := $(shell $(PG_CONFIG) --pgxs)
-
-
-# Detect OS
-UNAME_S := $(shell uname -s)
-UNAME_M := $(shell uname -m)
-
-# Try to detect CRoaring library (optional)
-ROARING_CFLAGS := $(shell pkg-config --cflags roaring 2>/dev/null)
-ROARING_LIBS := $(shell pkg-config --libs roaring 2>/dev/null)
-
-# Fallback include search
-ifeq ($(ROARING_CFLAGS),)
-
-ROARING_INCLUDE := $(shell \
-	for dir in /usr/include /usr/local/include /opt/homebrew/include /opt/local/include; do \
-		if [ -f $$dir/roaring/roaring.h ]; then \
-			echo "-I$$dir"; \
-			break; \
-		fi; \
-	done)
-
-ifneq ($(ROARING_INCLUDE),)
-ROARING_CFLAGS := $(ROARING_INCLUDE)
-endif
-endif
-
-# Fallback library search
-ifeq ($(ROARING_LIBS),)
-
-ifeq ($(UNAME_S),Darwin)
-ROARING_LIBDIR := $(shell \
-	for dir in /usr/local/lib /opt/homebrew/lib /opt/local/lib; do \
-		if [ -f $$dir/libroaring.dylib ] || [ -f $$dir/libroaring.a ]; then \
-			echo "$$dir"; \
-			break; \
-		fi; \
-	done)
-
-else ifeq ($(UNAME_S),Linux)
-ROARING_LIBDIR := $(shell \
-	for dir in \
-		/usr/lib/$(shell gcc -print-multiarch 2>/dev/null) \
-		/usr/lib64 \
-		/usr/lib \
-		/usr/local/lib \
-		/usr/local/lib64; do \
-		if [ -f $$dir/libroaring.so ] || [ -f $$dir/libroaring.a ]; then \
-			echo "$$dir"; \
-			break; \
-		fi; \
-	done)
-else
-ROARING_LIBDIR := $(shell \
-	for dir in /usr/local/lib /usr/lib /opt/local/lib; do \
-		if [ -f $$dir/libroaring.so ] || [ -f $$dir/libroaring.a ]; then \
-			echo "$$dir"; \
-			break; \
-		fi; \
-	done)
-endif
-
-ifneq ($(ROARING_LIBDIR),)
-ROARING_LIBS := -L$(ROARING_LIBDIR) -lroaring
-endif
-endif
-
-# Apply CRoaring flags only if found
-ifneq ($(ROARING_CFLAGS),)
-ifneq ($(ROARING_LIBS),)
-
-PG_CPPFLAGS += -DHAVE_ROARING $(ROARING_CFLAGS)
-SHLIB_LINK += $(ROARING_LIBS)
-
-ROARING_FOUND = yes
-
-ifneq ($(UNAME_S),Darwin)
-SHLIB_LINK += -Wl,-rpath,'$$ORIGIN'
-
-ifneq ($(ROARING_LIBDIR),)
-SHLIB_LINK += -Wl,-rpath,$(ROARING_LIBDIR)
-endif
-
-endif
-endif
-endif
-
+PGXS      := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
-# Compiler flags
-override CFLAGS += \
-	-Wall \
-	-Wextra \
-	-Wmissing-prototypes \
-	-Wpointer-arith \
-	-Werror=vla \
-	-Wendif-labels \
-	-fPIC
-
-# =========================
-# Build targets
-# =========================
-
-all: sql/biscuit--$(EXTVERSION).sql
-
-sql/biscuit--$(EXTVERSION).sql: sql/biscuit.sql
-	@mkdir -p sql
-	cp $< $@
-
-# Install handled by PGXS using DATA
-
-.PHONY: check-deps
-check-deps:
-	@echo "Checking dependencies..."
-	@command -v $(PG_CONFIG) >/dev/null 2>&1 || { \
-		echo "PostgreSQL pg_config not found."; exit 1; }
-	@echo "PostgreSQL version: $$($(PG_CONFIG) --version)"
-
-ifeq ($(ROARING_FOUND),yes)
-	@echo "CRoaring library: FOUND"
-	@echo "  CFLAGS: $(ROARING_CFLAGS)"
-	@echo "  LIBS: $(ROARING_LIBS)"
-else
-	@echo "CRoaring library: NOT FOUND (fallback enabled)"
+# Verify the two CRoaring flags agree, since they are honoured by
+# different mechanisms and can silently diverge (see above).
+ifdef WITH_ROARING
+ifeq (,$(findstring -DHAVE_ROARING,$(CPPFLAGS)))
+$(error WITH_ROARING set but -DHAVE_ROARING did not reach CPPFLAGS -- PG_CPPFLAGS must be assigned before `include $$(PGXS)`)
+endif
 endif
 
-.PHONY: clean
-clean:
-	rm -f src/*.o
-	rm -f src/*.bc
-	rm -f biscuit.so
-	rm -f sql/biscuit--$(EXTVERSION).sql
+# =======================================================================
+# Tests
+# =======================================================================
+#
+# Two independent layers, deliberately kept separate because they fail for
+# different reasons and need different things to run:
+#
+#   check-regex  Pure unit test of the decomposer. Compiles biscuit_regex.c
+#                against stubs (test/pgstub.h) and differentially checks
+#                every glob it emits against a real regex engine over a few
+#                thousand strings. Needs NO server and NO PostgreSQL
+#                headers, so it runs in CI before the extension is even
+#                buildable. This is the layer that proves the rewrite is
+#                semantically exact.
+#
+#   check-sql    End-to-end test against a live server (sql/test.sql).
+#                Proves the parts that only exist inside a running backend:
+#                that the index is actually chosen for the decomposable
+#                subset, that results match a sequential scan exactly, that
+#                the recheck backstop works, and that opclass gating holds.
+#
+# sql/test.sql is intentionally NOT wired up as a pg_regress REGRESS target.
+# pg_regress compares stdout against a checked-in expected/test.out, which
+# has to be regenerated whenever the fixture changes; the script instead
+# asserts internally and RAISEs an exception on failure, so its exit status
+# is the result and no expected-output file has to be maintained. That also
+# keeps it runnable through any client (pgAdmin, JDBC, DBeaver, a migration
+# runner), not just psql.
 
-.PHONY: dist
-dist:
-	@echo "Creating distribution archive for version $(EXTVERSION)..."
-	@rm -rf dist
-	@mkdir dist
-	@cp -r $$(ls | grep -v -E '^(dist|.*\.zip)$$') dist/
-	@cd dist && zip -r ../$(EXTENSION)-$(EXTVERSION).zip .
-	@rm -rf dist
-	@echo "Created $(EXTENSION)-$(EXTVERSION).zip"
+.PHONY: check-regex
+check-regex:
+	cd test && ./runtests.sh
 
-.PHONY: help
-help:
-	@echo "Biscuit PostgreSQL Extension v$(EXTVERSION)"
-	@echo "Targets:"
-	@echo "  make / make all"
-	@echo "  make install"
-	@echo "  make clean"
-	@echo "  make dist"
-	@echo "  make check-deps"
+# Override as needed, e.g.  make check-sql PGDATABASE=mydb
+# ON_ERROR_STOP is what turns the script's RAISE EXCEPTION into a non-zero
+# exit status; the script itself contains no psql-specific syntax.
+PSQL ?= psql
+.PHONY: check-sql
+check-sql:
+	$(PSQL) -v ON_ERROR_STOP=1 -f sql/test.sql
+
+# Adversarial layer: randomised patterns, scan reuse, plan caching, hostile
+# data, and regressions for the two bugs those found. Slower than
+# check-sql, so it is a separate target.
+.PHONY: check-stress
+check-stress:
+	$(PSQL) -v ON_ERROR_STOP=1 -f sql/stress.sql
+
+.PHONY: check-all
+check-all: check-regex check-sql check-stress

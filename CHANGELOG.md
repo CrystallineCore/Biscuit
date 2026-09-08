@@ -1,5 +1,151 @@
 # Biscuit Index Extension – Changelog
 
+## Version 3.1.0
+
+Adds regular-expression support for the subset of patterns that can be
+rewritten exactly as a `LIKE` glob, and fixes a correctness bug in anchored
+matching that predates this release.
+
+**No `REINDEX` is required.** There is no on-disk format change: the rewrite
+happens entirely at plan time and the existing structures answer the resulting
+glob unchanged. Existing 3.0.0 indexes gain regex support as soon as the
+extension is updated.
+
+### New Features
+
+* **Regular-expression operators `~`, `!~`, `~*` and `!~*`** (strategies 5–8).
+  Biscuit does not gain a regex engine. A regex qual is decomposed at plan time
+  into an equivalent `LIKE` glob and then evaluated by the same positional
+  bitmaps that already serve `LIKE`, so anchored regexes inherit Biscuit's
+  existing strengths rather than introducing a second matching path.
+
+  The decomposition is required to be *exact* — the emitted glob must match
+  precisely the same strings as the regex, no more and no less. Anything that
+  cannot be proven exact is refused rather than approximated. The supported
+  subset is:
+
+  | Construct | Rewritten as |
+  |---|---|
+  | `^` / `$` anchors | Whole-string anchoring; a missing anchor becomes `%` |
+  | Literal characters, `\X` escapes for non-alphanumeric `X` | Literal, with `%`, `_` and `\` escaped |
+  | `.` | `_` |
+  | `.*` / `.+` | `%` / `_%` |
+  | `.{n}`, `.{n,}`, `X{n}` | `n` repetitions, with `%` for the open-ended form |
+  | Trailing `?` (non-greedy marker) | Ignored; it never changes the match set |
+
+  Because `~` is unanchored while `LIKE` is whole-string, `~ 'abc'` becomes
+  `LIKE '%abc%'` and `~ '^abc$'` becomes `LIKE 'abc'`.
+
+* **Safe handling of regexes outside the subset.** Alternation, bracket
+  expressions, groups, unbounded or optional repetition of a literal, bounded
+  `{n,m}` ranges, `\d`/`\w`/`\b` class shorthands, backreferences and
+  embedded-option directives are not decomposable. Such quals remain correct:
+  the key is skipped, the scan reports `xs_recheck` so the executor
+  re-evaluates the original regex, and `biscuit_costestimate()` prices the path
+  out so the planner chooses a sequential scan instead. An unsupported regex
+  therefore costs nothing but the missed optimisation.
+
+* **Operator-class gating for regex, matching `LIKE`/`ILIKE`.** `~` and `!~`
+  require the case-sensitive structures and are registered only for
+  `biscuit_ops` and `biscuit_like_ops`; `~*` and `!~*` require the
+  case-insensitive structures and are registered only for `biscuit_ops` and
+  `biscuit_ilike_ops`. An index built with the narrower class is not considered
+  by the planner for the operators it cannot answer.
+
+### Bug Fixes
+
+* **Fixed anchored `LIKE`/`ILIKE` silently dropping its length constraint.**
+  A fully-anchored pattern (one with no `%`) is evaluated as a positional match
+  intersected with the exact-length bitmap. When the table contained no value
+  of the pattern's length, that bitmap was absent, and the absent case fell
+  through both branches of the surrounding condition — so the length constraint
+  was skipped entirely and the anchored pattern degraded into a bare prefix
+  match, returning rows that do not match the predicate:
+
+  ```sql
+  CREATE TABLE t (v text);
+  INSERT INTO t VALUES ('abc'), ('abcd');
+  CREATE INDEX ON t USING biscuit (v);
+  SELECT count(*) FROM t WHERE v LIKE 'a';   -- returned 2, correct answer is 0
+  ```
+
+  An absent length bitmap means no row has that length, so the correct result
+  is empty. This affects `LIKE` and `ILIKE` directly and predates regex
+  support; it is listed here because it was found while testing the new path,
+  which reaches the same code through any `^...$` pattern. It only manifests
+  when the table happens to contain no value of the pattern's exact length,
+  which is why it survived earlier testing. The two multi-column code paths
+  already handled the absent case correctly and were unaffected.
+
+* **Fixed `-DHAVE_ROARING` being silently dropped from the build.** `PG_CPPFLAGS`
+  was appended to after `include $(PGXS)`, but PGXS folds it into `CPPFLAGS`
+  with immediate expansion at include time, so the definition never reached the
+  compiler. `SHLIB_LINK` is expanded lazily and was still honoured, so
+  `make WITH_ROARING=1` produced an extension that linked against CRoaring
+  while being compiled with the fallback bitmap — it built and ran correctly,
+  but silently without the performance CRoaring was meant to provide. The flags
+  are now set before the include, and the build fails loudly if the two ever
+  disagree again.
+
+### Internal Changes
+
+* New `biscuit_regex.c` / `biscuit_regex.h` module holding the decomposer and
+  the strategy-number helpers. The decomposition is a single left-to-right pass
+  with one atom of lookahead and no backtracking, structured so that every
+  construct outside the subset reaches one rejection point.
+* `QueryPredicate` gained `effective_strategy`, `is_lossy` and `needs_recheck`.
+  Evaluation sites now switch on `effective_strategy` rather than
+  `ScanKey.sk_strategy`, so the rewrite happens once per key in
+  `biscuit_build_query_plan()` and no downstream code is regex-aware.
+* `BiscuitScanOpaque.needs_recheck` threads through to `scan->xs_recheck` and
+  the bitmap-scan recheck flag. It is recomputed on every `biscuit_rescan()`,
+  so a scan node reused across many outer rows cannot latch the flag on or off.
+* Regex operators are recognised by looking up the operator in the index
+  column's opfamily via `get_op_opfamily_strategy()`, rather than by comparing
+  against `OID_TEXT_*` macros. The catalog is the same data the SQL script
+  populates, so there is no second operator list to drift out of step.
+
+### Known Limitations
+
+* **Only the decomposable subset is accelerated.** Alternation, character
+  classes and the other constructs listed above fall back to a sequential scan.
+  Where regular-expression matching is central to a workload, `pg_trgm`
+  extracts trigrams from an arbitrary regex and remains the better choice; the
+  two indexes are complementary and can be used together.
+
+* **`~*` requires a recheck, and `!~*` is not accelerated.** PostgreSQL's regex
+  case folding and `ILIKE`'s `lower()`-based folding are not the same relation,
+  and they disagree in both directions on characters such as `İ`, `ß` and the
+  `ǅ`/`ǈ`/`ǋ` titlecase family. `~*` is therefore decomposed only for
+  pure-ASCII patterns, which confines the disagreement to the direction where
+  `ILIKE` over-matches, and those scans set `xs_recheck` so the executor
+  removes the surplus. `!~*` is never decomposed, because the complement of an
+  over-matching set omits rows and no recheck can restore them. `~` and `!~`
+  are unaffected and remain exact.
+
+* **Unanchored regexes inherit the unanchored `LIKE` cost model.** `~ 'abc'`
+  decomposes to `LIKE '%abc%'` and is priced as an infix pattern, which the
+  planner will often decline in favour of a sequential scan. This is existing
+  cost-model behaviour rather than anything specific to regex.
+
+### Upgrade Notes
+
+From 3.0.0, no rebuild is needed:
+
+```sql
+ALTER EXTENSION biscuit UPDATE TO '3.1.0';
+```
+
+Install the new shared library first, since strategies 5–8 begin dispatching to
+it as soon as the operators are registered. The upgrade script adds the regex
+operators to the existing operator families with `ALTER OPERATOR FAMILY`, so
+indexes built under 3.0.0 pick up regex support immediately and without being
+rebuilt.
+
+Upgrading from 2.x still requires a `REINDEX`; see the 3.0.0 notes below.
+
+---
+
 ## Version 3.0.0
 
 First release integrated with WAL logging. This is a breaking on-disk 

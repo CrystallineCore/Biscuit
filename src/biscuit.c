@@ -416,7 +416,15 @@ biscuit_handler(PG_FUNCTION_ARGS)
 
     (void) fcinfo;
 
-    amroutine->amstrategies          = 4;
+    /*
+     * 8, not 4: strategies 5..8 are the regex operators (~ !~ ~* !~*).
+     * They are served by rewriting the regex into an equivalent LIKE glob
+     * at plan time (biscuit_regex.c), not by a separate matcher, but they
+     * still need their own amop strategy numbers so the planner can match
+     * a regex qual to this AM. See BISCUIT_MAX_STRATEGY in
+     * biscuit_common.h and the OPERATOR entries in biscuit.sql.
+     */
+    amroutine->amstrategies          = BISCUIT_MAX_STRATEGY;
     amroutine->amsupport             = 2;
     amroutine->amoptsprocnum         = 0;
     amroutine->amcanorder            = false;

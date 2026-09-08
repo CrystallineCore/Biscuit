@@ -5,10 +5,13 @@
 [![Read the Docs](https://img.shields.io/badge/Read%20the%20Docs-8CA1AF?logo=readthedocs&logoColor=fff)](https://biscuit.readthedocs.io/)
 
 **Biscuit** is a PostgreSQL index access method for `LIKE` and `ILIKE` pattern
-matching, with native multi-column support. It evaluates patterns by
-intersecting bitmaps that record which character occurs at which position in
-each indexed string. Matches are therefore exact, and PostgreSQL does not need
-to recheck candidates against the heap (`xs_recheck = false`).
+matching, with native multi-column support and regular-expression support for
+patterns that reduce exactly to a glob. It evaluates patterns by intersecting
+bitmaps that record which character occurs at which position in each indexed
+string. For `LIKE`, `ILIKE`, `~` and `!~`, matches are exact and PostgreSQL does
+not need to recheck candidates against the heap (`xs_recheck = false`); `~*` is
+the one case that sets a recheck, for the reason given under
+[Regular expressions](#regular-expressions).
 
 The name stands for _**B**itmap **I**ndexed **S**earching with
 **C**omprehensive **U**nion and **I**ntersection **T**echniques_.
@@ -58,6 +61,44 @@ Considerations](#operational-considerations). In summary:
 Biscuit is not currently recommended for OLTP tables, tables under continuous
 write load, or deployments with large connection pools.
 
+Regular-expression support covers the subset of patterns that decompose exactly
+to a glob — chiefly anchored patterns, `.`, `.*` and repetition counts. Regexes
+outside that subset remain correct but are not accelerated. Where regular
+expressions are central to a workload, `pg_trgm` handles arbitrary patterns and
+is the better choice; the two are complementary.
+
+---
+
+## What's new in 3.1.0
+
+Regular-expression support, and a correctness fix for anchored matching. **No
+`REINDEX` is required** — there is no on-disk format change, so existing 3.0.0
+indexes gain regex support as soon as the extension is updated:
+
+```sql
+ALTER EXTENSION biscuit UPDATE TO '3.1.0';
+```
+
+* **Regular-expression operators `~`, `!~`, `~*`, `!~*`.** Biscuit gains no
+  regex engine. A regex is rewritten at plan time into an equivalent `LIKE`
+  glob and evaluated by the existing positional bitmaps, so anchored regexes
+  inherit the same performance profile as the anchored `LIKE` patterns Biscuit
+  is already strongest at. The rewrite must be exact; anything that cannot be
+  proven exact is refused rather than approximated. See
+  [Regular expressions](#regular-expressions).
+* **Regexes outside the subset stay correct.** They are not accelerated: the
+  key is skipped, the executor rechecks the original regex, and the cost model
+  prices the path out so the planner picks a sequential scan. An unsupported
+  regex costs nothing but the missed optimisation.
+* **Fixed anchored `LIKE`/`ILIKE` dropping its length constraint** when the
+  table contained no value of the pattern's exact length, which caused an
+  anchored pattern to behave as a bare prefix match and return non-matching
+  rows. This predates regex support and affects `LIKE` directly. See the
+  [changelog](CHANGELOG.md#version-310) for the reproduction.
+* **Fixed `-DHAVE_ROARING` being silently dropped from the build**, which
+  produced an extension linked against CRoaring but compiled with the fallback
+  bitmap.
+
 ---
 
 ## What's new in 3.0.0
@@ -90,7 +131,6 @@ built under 2.x must be `REINDEX`ed. See
   bitmaps.
 * **`biscuit_like_ops` / `biscuit_ilike_ops` operator classes**, to avoid
   building the case-mode structures a column will never use.
-.
 
 ---
 
@@ -141,6 +181,21 @@ SELECT * FROM users WHERE name LIKE 'j_hn%';     -- wildcard position
 SELECT * FROM users WHERE name LIKE '________';  -- length predicate
 ```
 
+Regular expressions are supported where they reduce exactly to one of the
+above:
+
+```sql
+SELECT * FROM users WHERE name ~ '^john';        -- prefix     -> 'john%'
+SELECT * FROM users WHERE name ~ 'son$';         -- suffix     -> '%son'
+SELECT * FROM users WHERE name ~ '^j.hn';        -- wildcard   -> 'j_hn%'
+SELECT * FROM users WHERE name ~ '^.{8}$';       -- length     -> '________'
+SELECT * FROM users WHERE name ~ '^j.*n$';       -- both ends  -> 'j%n'
+```
+
+Patterns outside the subset — `~ '^(john|jane)'`, `~ '[0-9]+'` — still return
+the right rows, but are answered by a sequential scan. `EXPLAIN` shows which
+you got.
+
 ### Multi-column indexes
 
 ```sql
@@ -168,6 +223,12 @@ CREATE INDEX idx_name       ON users USING biscuit (name);                   -- 
 CREATE INDEX idx_name_like  ON users USING biscuit (name biscuit_like_ops);  -- LIKE only
 CREATE INDEX idx_name_ilike ON users USING biscuit (name biscuit_ilike_ops); -- ILIKE only
 ```
+
+The regex operators follow the same split, because they are answered from the
+same structures: `~` and `!~` are available on `biscuit_ops` and
+`biscuit_like_ops`, and `~*` and `!~*` on `biscuit_ops` and
+`biscuit_ilike_ops`. An index built with the narrower class is simply not
+considered by the planner for the operators it cannot answer.
 
 Querying an index with an operator it was not built for raises an error rather
 than silently falling back to a full scan.
@@ -198,7 +259,8 @@ query mix.
 | Wildcard position `a_c` | Typically fastest | Limited | Not applicable |
 | Length only `______` | Supported | Not applicable | Not applicable |
 | `ILIKE` | Effective | Applicable | Requires a `lower()` expression index |
-| Regular expressions | Not supported | Supported | Not applicable |
+| Anchored regex `^abc`, `^a.{3}z$` | Typically fastest | Applicable | Not applicable |
+| Regex with alternation or classes | Not accelerated | Supported | Not applicable |
 | Similarity / fuzzy search | Not supported | Supported | Not applicable |
 
 **Biscuit is a good fit for** anchored patterns, patterns containing `_`
@@ -212,8 +274,17 @@ equivalent `LIKE`. Case-insensitive anchored search therefore needs no
 
 **Other options are often preferable for** selective prefix lookups, where a
 B-tree is smaller and quicker to build; unanchored substring search, for which
-`pg_trgm` is purpose-built; and regular-expression or similarity matching,
-which Biscuit does not support.
+`pg_trgm` is purpose-built; and general regular-expression or similarity
+matching, which Biscuit does not accelerate.
+
+The regex split follows the same logic as the `LIKE` one, because it is the
+same machinery underneath: an anchored regex reduces to a fixed number of
+bitmap intersections, whereas `pg_trgm` extracts trigrams from an arbitrary
+regex and is not restricted to a decomposable subset. On a 200,000-row test
+table the two were close to complementary — Biscuit far ahead on anchored and
+wildcard-position patterns, `pg_trgm` far ahead on unanchored and
+character-class ones. Neither ordering is a property of the indexes alone;
+benchmark against your own data.
 
 Running Biscuit alongside a `pg_trgm` GIN index and letting the planner select
 between them is a practical arrangement, and the cost model is written with it
@@ -269,6 +340,60 @@ Biscuit's behaviour.
 * `%` divides the pattern into parts. Additional parts act as further
   constraints and generally reduce rather than increase evaluation cost.
 
+### Regular expressions
+
+Biscuit has no regex engine. A regex qual is rewritten at plan time into an
+equivalent `LIKE` glob and handed to the machinery above, so everything from
+selectivity scoring to the bitmap intersections is unchanged.
+
+The rewrite has to be *exact* — the glob must match precisely the same strings
+as the regex — because Biscuit does not recheck candidates against the heap. An
+approximate rewrite would not be slower, it would be wrong. Anything that
+cannot be proven exact is refused.
+
+Since `~` is unanchored while `LIKE` matches the whole string, a missing anchor
+becomes `%`:
+
+```
+^abc$      ->  abc          exact match
+^abc       ->  abc%         prefix
+abc$       ->  %abc         suffix
+abc        ->  %abc%        infix (~ is unanchored)
+^a.c$      ->  a_c          wildcard position
+^a.{3}z$   ->  a___z        repetition count
+^a.*z$     ->  a%z          both-anchored
+^usr_1     ->  usr\_1%      '_' is a regex literal, escaped for LIKE
+```
+
+What is **not** decomposable: alternation `(a|b)`, bracket expressions `[abc]`,
+groups, unbounded or optional repetition of a specific character (`a*`, `a+`,
+`a?` — note that `a*` is not `a%`, which would require the `a`), bounded ranges
+`{n,m}`, the `\d`/`\w`/`\b` shorthands, backreferences, and embedded-option
+directives. These are answered by a sequential scan.
+
+Two asymmetries are worth knowing:
+
+* **`~*` sets a recheck, and `!~*` is not accelerated.** `~*` is rewritten onto
+  `ILIKE`, but PostgreSQL's regex case folding and `ILIKE`'s `lower()`-based
+  folding are different relations. They disagree in both directions on
+  characters such as `İ`, `ß` and the `ǅ`/`ǈ`/`ǋ` titlecase family — `ILIKE`
+  matching where the regex does not, and vice versa. `~*` is therefore
+  decomposed only for pure-ASCII patterns, which confines the disagreement to
+  the direction where `ILIKE` over-matches, and the executor rechecks to remove
+  the surplus. `!~*` is never decomposed: the complement of an over-matching
+  set is missing rows, and no recheck can add rows back. `~` and `!~` are
+  unaffected and remain exact.
+
+* **Unanchored regexes inherit the unanchored `LIKE` cost.** `~ 'abc'` becomes
+  `LIKE '%abc%'` and is priced as an infix pattern, which the planner will
+  often decline. Check with `EXPLAIN` if it matters.
+
+Note that a `Bitmap Heap Scan` prints `Recheck Cond:` for every plan, whatever
+the index reported, so it is not a signal of which of the above applies. What
+`EXPLAIN` does tell you reliably is whether the index was used at all: a regex
+outside the subset shows a `Seq Scan` even with `enable_seqscan = off`, because
+the path is priced as unusable rather than merely expensive.
+
 ### Query planning
 
 `biscuit_costestimate()` prices a pattern by its shape:
@@ -280,6 +405,12 @@ Biscuit's behaviour.
 | Unanchored infix | Scales with row count and the square of average string length |
 | Multi-part infix | Discounted relative to a single part |
 | All-wildcard (`%`) | No index path offered |
+
+A regex is priced by the shape of the glob it decomposes to, using the same
+rewrite the executor will perform, so the cost model and the executor cannot
+disagree about what a given regex costs. A regex outside the subset is priced
+as unusable, which keeps the recheck fallback a correctness backstop rather
+than a plan the planner would actually choose.
 
 Average string length is taken from `pg_statistic`, so plans for unanchored
 patterns may change after the first `ANALYZE` on a newly loaded table.
@@ -396,7 +527,8 @@ Where practical, consider limiting or bucketing indexed length.
 | Index-only scans | No | |
 | Unique constraints | No | |
 | `CLUSTER` on a Biscuit index | No | |
-| Regular expressions | No | `LIKE` / `ILIKE` only |
+| Regular expressions | Partial | Decomposable subset accelerated; the rest is correct but not accelerated |
+| Exact results without recheck | Yes | Except `~*`, which rechecks |
 | Similarity / fuzzy search | No | |
 | Locale-aware collation | No | Comparisons are byte-based |
 
@@ -409,7 +541,18 @@ sequential scan still work as usual.
 
 ### Build options
 
-Enabling CRoaring is recommended for better bitmap performance.
+Enabling CRoaring is recommended for better bitmap performance:
+
+```bash
+make WITH_ROARING=1 && sudo make install
+```
+
+Confirm it is actually active rather than assuming — the flag has to reach the
+compiler, not just the linker:
+
+```sql
+SELECT biscuit_has_roaring();   -- t when CRoaring is compiled in
+```
 
 ### Index options
 
@@ -451,6 +594,23 @@ test: one session queries the index, a second session commits a change, and the
 first session must then observe it. Single-session tests do not exercise cache
 invalidation.
 
+The test suites are:
+
+```bash
+make check-regex    # regex decomposer, no server needed
+make check-sql      # end-to-end regex behaviour against a live server
+make check-stress   # randomised patterns, scan reuse, plan caching, regressions
+make check-all      # all three
+```
+
+`check-regex` compiles the decomposer against stubs and differentially checks
+every glob it emits against a real regex engine over a few thousand strings, so
+it runs before the extension is buildable. `check-sql` and `check-stress` are
+plain SQL and PL/pgSQL with no psql-specific syntax, so they can also be run
+through any client; each compares index results against sequential-scan results
+for the same predicate and raises an exception on any divergence, so no
+expected-output file has to be maintained.
+
 Two further checks are worth running when touching these paths. Compare the
 index and sequential-scan results for the same predicate *within a single
 snapshot* while another session writes concurrently, so that any divergence is
@@ -466,7 +626,12 @@ client session driving the test.
 - [ ] Reduced write amplification
 - [ ] Index-only scan support (`amcanreturn`)
 - [ ] Runtime-configurable cost-model parameters
-- [ ] Regular-expression support via glob decomposition
+- [x] Regular-expression support via glob decomposition *(3.1.0, for the
+      exactly-decomposable subset)*
+- [ ] Wider regex coverage — alternation and character classes, which need
+      more than a single glob to express
+- [ ] Recalibrate the unanchored cost model, which currently declines infix
+      patterns the index can serve
 - [ ] `amcanorder` for native sorted scans
 - [ ] Parallel index build
 - [ ] Length bucketing to bound unanchored query cost

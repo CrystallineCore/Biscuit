@@ -10,6 +10,7 @@
 #include "biscuit_bitmap.h"
 #include "biscuit_utf8.h"
 #include "biscuit_pattern.h"
+#include "biscuit_regex.h"
 #include "biscuit_pendlog.h"
 #include "biscuit_dir.h"    /* biscuit_dir_find, BiscuitDirEntry */
 
@@ -2832,7 +2833,32 @@ biscuit_query_pattern_masked(Relation index, BiscuitIndex *idx, const char *patt
                                                                     -1, false, BISCUIT_DIR_KIND_LEN, -1, min_len);
                     biscuit_roaring_and_inplace(result, lb);
                 }
-                else if (!result || min_len >= idx->max_length_legacy) { if (result) biscuit_roaring_free(result); result = biscuit_roaring_create(); }
+                /*
+                 * No exact-length bitmap for min_len means NO ROW has that
+                 * length, so a fully-anchored pattern of that length can
+                 * match nothing -- the result is empty.
+                 *
+                 * The previous condition here was
+                 *     else if (!result || min_len >= max_length_legacy)
+                 * which left a hole: with result non-NULL, min_len in
+                 * range, but length_bitmaps_legacy[min_len] == NULL,
+                 * NEITHER branch ran and `result` was returned with the
+                 * length constraint silently dropped. That turns an
+                 * anchored pattern into a bare prefix match:
+                 *
+                 *     CREATE TABLE t(v text);
+                 *     INSERT INTO t VALUES ('abc'),('abcd');
+                 *     CREATE INDEX ON t USING biscuit (v);
+                 *     SELECT count(*) FROM t WHERE v LIKE 'a';  -- gave 2, not 0
+                 *
+                 * It only bites when the table happens to contain no value
+                 * of the pattern's exact length, which is why fixtures that
+                 * include short values never show it. The two multi-column
+                 * equivalents below already had the correct shape; this
+                 * brings the single-column LIKE and ILIKE paths into line.
+                 */
+                else if (result) { biscuit_roaring_free(result); result = biscuit_roaring_create(); }
+                else result = biscuit_roaring_create();
             } else if (!parsed->starts_percent) {
                 result = biscuit_match_part_at_pos(index, idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
                 if (!result) result = biscuit_roaring_create();
@@ -3103,7 +3129,9 @@ biscuit_query_pattern_ilike_masked(Relation index, BiscuitIndex *idx, const char
                                                                     -1, true, BISCUIT_DIR_KIND_LEN, -1, min_len);
                     biscuit_roaring_and_inplace(result, lb);
                 }
-                else if (!result || min_len >= idx->max_length_lower) { if (result) biscuit_roaring_free(result); result = biscuit_roaring_create(); }
+                /* Same missing-length-bitmap fix as the LIKE path above. */
+                else if (result) { biscuit_roaring_free(result); result = biscuit_roaring_create(); }
+                else result = biscuit_roaring_create();
             } else if (!parsed->starts_percent) {
                 result = biscuit_match_part_at_pos_ilike(index, idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
                 if (!result) result = biscuit_roaring_create();
@@ -3778,11 +3806,26 @@ analyze_pattern(QueryPredicate *pred)
      * biscuit_index.c -- consolidating the two would fix this as a
      * side effect, but until then this predicate-level correction is
      * applied here directly.
+     *
+     * Reads effective_strategy, not sk_strategy: a '!~' key that was
+     * decomposed into a glob arrives here as BISCUIT_NOT_LIKE_STRATEGY and
+     * needs the same inversion, while a '!~' key that could NOT be
+     * decomposed was deliberately flipped to a positive strategy (see
+     * biscuit_build_query_plan()) and must NOT be inverted -- it is a
+     * skipped, match-everything predicate whose score should reflect that.
      */
-    if (pred->scan_key &&
-        (pred->scan_key->sk_strategy == BISCUIT_NOT_LIKE_STRATEGY ||
-         pred->scan_key->sk_strategy == BISCUIT_NOT_ILIKE_STRATEGY))
+    if (biscuit_strategy_is_negated(pred->effective_strategy))
         pred->selectivity_score = 1.0 - pred->selectivity_score;
+
+    /*
+     * A lossy predicate contributes no filtering at all, so it is the
+     * least selective thing in the plan by definition. Score it as such so
+     * the qsort puts it last -- not that it will be evaluated, but so it
+     * never displaces a real predicate from the cheapest slot and seeds
+     * the running mask with the whole table.
+     */
+    if (pred->is_lossy)
+        pred->selectivity_score = 1.0;
 }
 
 static int
@@ -3816,12 +3859,151 @@ biscuit_build_query_plan(BiscuitIndex *idx, ScanKey keys, int nkeys)
         if (key->sk_flags & SK_ISNULL)
             continue;
 
-        pred->column_index = key->sk_attno - 1;
-        pred->scan_key     = key;
+        pred->column_index      = key->sk_attno - 1;
+        pred->scan_key          = key;
+        pred->effective_strategy = key->sk_strategy;
+        pred->is_lossy          = false;
+        pred->needs_recheck     = false;
 
         {
             text *pt = DatumGetTextPP(key->sk_argument);
             pred->pattern = pstrdup(text_to_cstring(pt));
+        }
+
+        /*
+         * REGEX -> GLOB REWRITE
+         *
+         * This is the single point where regex support enters the engine.
+         * Everything downstream -- selectivity scoring, predicate
+         * ordering, the single- and multi-column evaluation loops, the
+         * bitmap matchers -- sees only a LIKE/ILIKE pattern and a
+         * LIKE/ILIKE strategy, and needed no changes beyond reading
+         * effective_strategy instead of sk_strategy.
+         *
+         * Doing the rewrite here rather than at each evaluation site also
+         * means it happens exactly once per key per rescan, before the
+         * qsort that orders predicates by cost -- so the ordering is
+         * computed from the rewritten glob, which is the thing that will
+         * actually be evaluated, rather than from regex syntax that
+         * analyze_pattern() would have badly mis-scored (it would read
+         * '.*' as two literal characters and '^' as an anchor-strength
+         * contribution).
+         */
+        if (biscuit_strategy_is_regex(key->sk_strategy))
+        {
+            char       *glob   = NULL;
+            const char *reason = NULL;
+            bool        decomposed = false;
+
+            bool ci = biscuit_strategy_is_case_insensitive(key->sk_strategy);
+
+            /*
+             * CASE-INSENSITIVE ASYMMETRY
+             *
+             * ~* is rewritten onto ILIKE, but the two do not implement the
+             * same case-folding relation (see QueryPredicate.needs_recheck
+             * and biscuit_regex_glob_is_ascii()). Two consequences:
+             *
+             *   ~*  with an ASCII pattern -- ILIKE over-matches at worst,
+             *       so the glob is a usable superset: evaluate it AND
+             *       recheck.
+             *   !~* -- the complement of a superset is a SUBSET, which
+             *       recheck cannot repair, so it is never decomposed. It
+             *       falls through to the lossy branch below.
+             *
+             * A non-ASCII ~* pattern is refused for the same reason the
+             * negated form is: 'I' ~* 'ı' is true while the ILIKE form is
+             * false, i.e. the index would drop a qualifying row.
+             */
+            if (ci && biscuit_strategy_is_negated(key->sk_strategy))
+            {
+                elog(DEBUG1,
+                     "biscuit: regex \"%s\" is negated case-insensitive; "
+                     "not decomposable (ILIKE complement is a subset)",
+                     pred->pattern);
+                glob = NULL;
+                reason = "negated case-insensitive regex";
+            }
+            else if (biscuit_regex_to_glob(pred->pattern, &glob, &reason) ==
+                     BISCUIT_REGEX_EXACT &&
+                     (!ci || biscuit_regex_glob_is_ascii(glob)))
+            {
+                elog(DEBUG1,
+                     "biscuit: regex \"%s\" decomposed to glob \"%s\"%s",
+                     pred->pattern, glob,
+                     ci ? " (case-insensitive: recheck required)" : "");
+                pfree(pred->pattern);
+                pred->pattern           = glob;
+                pred->effective_strategy =
+                    biscuit_regex_effective_strategy(key->sk_strategy);
+                pred->needs_recheck     = ci;
+                decomposed              = true;
+            }
+
+            /*
+             * NOT an `else`. The negated-case-insensitive branch above
+             * rejects the pattern but does not handle it, and when this
+             * was written as the third arm of an if / else if / else chain
+             * that first arm silently consumed the else: a !~* key kept
+             * effective_strategy = BISCUIT_NOT_IREGEX_STRATEGY (8),
+             * is_lossy = false, and its raw regex as the "glob".
+             *
+             * biscuit_build_candidates_singlecolumn() dispatches on
+             * effective_strategy and has arms only for the four LIKE/ILIKE
+             * strategies, so such a key fell to the default and raised
+             * "unsupported scan strategy 8 (effective 8)" -- an ERROR out
+             * of an ordinary query, not a wrong answer, whenever the
+             * planner handed the scan a !~* clause.
+             *
+             * That it was reachable at all is the other half of the story:
+             * biscuit_pattern_from_clause() correctly marks this same case
+             * lossy and prices the path out, so the planner normally never
+             * chooses it. Force the index (enable_seqscan = off, as the
+             * stress fixture does) and the path is taken anyway, and the
+             * two halves disagreed -- the planner had disabled a path the
+             * executor could not run.
+             *
+             * Testing `decomposed` rather than chaining keeps rejection
+             * and success as the only two outcomes, so any future reason
+             * to refuse a rewrite lands in the lossy handler by default
+             * instead of leaking an un-rewritten regex strategy.
+             */
+            if (!decomposed)
+            {
+                /*
+                 * Outside the subset. Mark it lossy and give it a
+                 * match-everything pattern under a POSITIVE strategy.
+                 *
+                 * The polarity change is the important part and is not an
+                 * optimisation: for '!~' the honest superset of "rows NOT
+                 * matching R" is still "all rows", not the complement of
+                 * anything we could compute. Keeping the negated strategy
+                 * here and inverting a match-everything set would produce
+                 * the EMPTY set -- silently dropping every qualifying row,
+                 * with recheck powerless to restore them.
+                 *
+                 * The evaluation loops skip lossy predicates outright, so
+                 * the '%' pattern below is never actually matched against
+                 * anything; it is set so that any future caller that does
+                 * evaluate this predicate still gets a superset rather
+                 * than a stale regex string interpreted as a glob.
+                 */
+                elog(DEBUG1,
+                     "biscuit: regex \"%s\" not decomposable to a glob (%s); "
+                     "falling back to recheck",
+                     pred->pattern, reason ? reason : "unsupported construct");
+                /*
+                 * A decomposition that SUCCEEDED but was then refused by
+                 * the ASCII gate still allocated a glob; free it here so
+                 * the rejection path leaks nothing.
+                 */
+                if (glob != NULL)
+                    pfree(glob);
+                pfree(pred->pattern);
+                pred->pattern            = pstrdup("%");
+                pred->effective_strategy = BISCUIT_LIKE_STRATEGY;
+                pred->is_lossy           = true;
+            }
         }
 
         analyze_pattern(pred);

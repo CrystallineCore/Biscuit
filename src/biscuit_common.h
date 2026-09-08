@@ -85,6 +85,29 @@ typedef struct {
 #define BISCUIT_ILIKE_STRATEGY          3
 #define BISCUIT_NOT_ILIKE_STRATEGY      4
 
+/*
+ * Regex strategies (~ !~ ~* !~*).
+ *
+ * These are NOT a second matching engine. A regex key is rewritten into an
+ * equivalent LIKE/ILIKE glob by biscuit_regex_to_glob() (biscuit_regex.c)
+ * during query planning, and from that point on it is indistinguishable
+ * from a LIKE key -- QueryPredicate.effective_strategy carries the
+ * rewritten strategy and every evaluation site switches on that rather
+ * than on ScanKey.sk_strategy. Only the decomposable subset is rewritten;
+ * see biscuit_regex.h for what that subset is and
+ * biscuit_build_query_plan() for what happens to the rest.
+ *
+ * The ordering deliberately mirrors 1..4 (positive, negated, insensitive,
+ * negated-insensitive) so biscuit_regex_effective_strategy() is a
+ * straight-line mapping.
+ */
+#define BISCUIT_REGEX_STRATEGY          5
+#define BISCUIT_NOT_REGEX_STRATEGY      6
+#define BISCUIT_IREGEX_STRATEGY         7
+#define BISCUIT_NOT_IREGEX_STRATEGY     8
+
+#define BISCUIT_MAX_STRATEGY            8
+
 /* ==================== OPCLASS CASE-MODE GATING ==================== */
 /*
  * Per-column bit flags recording which structure set(s) a given index
@@ -174,7 +197,7 @@ typedef struct {
 #define CHAR_RANGE                      256
 #define TOMBSTONE_CLEANUP_THRESHOLD     1000
 #define RADIX_SORT_THRESHOLD            5000
-#define BISCUIT_LIBRARY_VERSION         "3.0.0"
+#define BISCUIT_LIBRARY_VERSION         "3.1.0"
 
 /* ==================== MEMORY MANAGEMENT MACROS ==================== */
 
@@ -1423,6 +1446,23 @@ typedef struct {
      * signature in between.
      */
     MemoryContext scratch_cxt;
+
+    /*
+     * Set when this scan's candidate set is a SUPERSET of the true result
+     * rather than exactly it -- currently only when a regex key fell
+     * outside the glob-decomposable subset and was skipped (see
+     * QueryPredicate.is_lossy). Reported to the executor via
+     * scan->xs_recheck / the tbm_add_tuples() recheck flag, which makes it
+     * re-evaluate the original qual and discard the extra rows.
+     *
+     * Biscuit is otherwise an exact-match AM and hard-codes recheck to
+     * false; several invariants elsewhere in the tree are stated in terms
+     * of that (biscuit_index.c, biscuit_pendlog.c, biscuit_pattern.c).
+     * Those remain true -- this flag can only ever turn recheck ON for a
+     * scan that has already given up exactness, and is recomputed from
+     * scratch on every biscuit_rescan().
+     */
+    bool needs_recheck;
 } BiscuitScanOpaque;
 
 /* Parsed LIKE pattern */
@@ -1440,6 +1480,56 @@ typedef struct {
     int column_index;
     char *pattern;
     ScanKey scan_key;
+
+    /*
+     * The strategy this predicate should actually be EVALUATED as, which
+     * is not always scan_key->sk_strategy.
+     *
+     * For LIKE/ILIKE keys the two are identical. For the regex strategies
+     * (5..8) biscuit_build_query_plan() rewrites `pattern` from a regex
+     * into the equivalent glob and sets this to the matching LIKE/ILIKE
+     * strategy, so that every downstream switch -- in biscuit_rescan(),
+     * biscuit_build_candidates_multicolumn(), and analyze_pattern() --
+     * needs no regex awareness at all. Read this, never sk_strategy, when
+     * deciding how to evaluate a predicate; read sk_strategy only when you
+     * genuinely mean "what did the user write".
+     */
+    int effective_strategy;
+
+    /*
+     * True when this predicate could NOT be rewritten exactly -- a regex
+     * outside the decomposable subset.
+     *
+     * Such a predicate contributes NOTHING to the candidate set: it is
+     * skipped rather than approximated, and the scan sets xs_recheck so
+     * the executor re-evaluates the original qual against the heap tuple.
+     * Skipping is what keeps the result a superset, which is the only
+     * thing recheck can repair -- recheck removes rows, it cannot add
+     * back a row an over-tight glob wrongly excluded.
+     *
+     * This is also why a lossy predicate must never be evaluated as a
+     * negated strategy. Inverting a superset yields a SUBSET, and a
+     * subset is exactly the shape recheck cannot fix.
+     */
+    bool is_lossy;
+
+    /*
+     * True when this predicate IS evaluated (unlike is_lossy) but its
+     * result is only a superset, so the executor must still recheck.
+     *
+     * Currently set only for case-insensitive regex (~*). That rewrite
+     * targets the ILIKE machinery, whose lower()-based folding is not the
+     * same relation as the regex engine's case folding: ILIKE over-matches
+     * on characters like 'İ' and the ǅ/ǈ/ǋ titlecase family. The glob
+     * still does almost all the filtering, so this is much better than
+     * is_lossy -- it just cannot be trusted as exact.
+     *
+     * The opposite direction ('I' ~* 'ı' is true where ILIKE is false)
+     * would be unfixable by recheck, and is excluded by only decomposing
+     * case-insensitive patterns that are pure ASCII. See
+     * biscuit_regex_glob_is_ascii().
+     */
+    bool needs_recheck;
 
     bool has_percent;
     bool starts_percent;

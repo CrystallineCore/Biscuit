@@ -832,12 +832,42 @@ WHERE vc_col LIKE 'abc%' OR tx_col LIKE 'vwx%';
 -- §16 PARALLEL SCAN TESTS
 -- =============================================================================
 
+-- Capture a CONTEMPORANEOUS serial baseline first.
+--
+-- The §6 'SEQ' baseline is stale by this point: §10 rewrote every
+-- vc_col = 'abcde' row to 'updated_biscuit_vc', and §11/§12 inserted and
+-- deleted further rows. Comparing these parallel counts against §6 would
+-- report a -3 delta on VC_LIKE_PREFIX and AND_BOTH_LIKE that is a real
+-- change in the data, not a disagreement between the two scan strategies.
+--
+-- So §16 does what §10, §17 and §18 already do: take its own baseline at
+-- its own point in the script, and compare against that. Parallelism is
+-- explicitly OFF here so the baseline is a plain serial sequential scan --
+-- the thing the parallel run is supposed to agree with.
+SET max_parallel_workers_per_gather = 0;
+SET enable_seqscan                  = on;
+SET enable_indexscan                = off;
+SET enable_bitmapscan               = off;
+SET enable_indexonlyscan            = off;
+
+INSERT INTO biscuit_test_results (query_code, execution_mode, row_count)
+SELECT 'VC_LIKE_PREFIX', 'SEQ_PRE_PAR', COUNT(*) FROM biscuit_data WHERE vc_col LIKE 'abc%';
+
+INSERT INTO biscuit_test_results (query_code, execution_mode, row_count)
+SELECT 'TX_LIKE_INFIX', 'SEQ_PRE_PAR', COUNT(*) FROM biscuit_data WHERE tx_col LIKE '%biscuit_mid%';
+
+INSERT INTO biscuit_test_results (query_code, execution_mode, row_count)
+SELECT 'AND_BOTH_LIKE', 'SEQ_PRE_PAR', COUNT(*) FROM biscuit_data
+WHERE vc_col LIKE 'abc%' AND tx_col LIKE 'vwx%';
+
 SET max_parallel_workers_per_gather = 4;
 SET parallel_tuple_cost             = 0;
 SET parallel_setup_cost             = 0;
 SET min_parallel_table_scan_size    = 0;
 SET enable_seqscan                  = on;
 SET enable_indexscan                = on;
+SET enable_bitmapscan               = on;
+SET enable_indexonlyscan            = on;
 
 INSERT INTO biscuit_test_results (query_code, execution_mode, row_count)
 SELECT 'VC_LIKE_PREFIX', 'PARALLEL', COUNT(*) FROM biscuit_data WHERE vc_col LIKE 'abc%';
@@ -928,7 +958,7 @@ WITH seq_base AS (
 bisc_rows AS (
     SELECT query_code, execution_mode, row_count AS bisc_count
     FROM   biscuit_test_results
-    WHERE  execution_mode IN ('BISC_VC','BISC_TX','BISC_MULTI','EXPR','PARALLEL')
+    WHERE  execution_mode IN ('BISC_VC','BISC_TX','BISC_MULTI','EXPR')
 ),
 detail AS (
     SELECT
@@ -1013,6 +1043,20 @@ WITH maint AS (
     FROM biscuit_test_results r1
     JOIN biscuit_test_results r2 ON r2.query_code = r1.query_code
     WHERE r1.execution_mode = 'SEQ_POST_REINDEX' AND r2.execution_mode = 'BISC_POST_REINDEX'
+
+    UNION ALL
+
+    -- PARALLEL checks (against §16's own baseline, not the stale §6 one)
+    SELECT
+        r1.query_code,
+        r1.execution_mode,
+        r1.row_count,
+        r2.execution_mode,
+        r2.row_count,
+        (r2.row_count - r1.row_count)
+    FROM biscuit_test_results r1
+    JOIN biscuit_test_results r2 ON r2.query_code = r1.query_code
+    WHERE r1.execution_mode = 'SEQ_PRE_PAR' AND r2.execution_mode = 'PARALLEL'
 )
 SELECT
     query_code,
@@ -1034,7 +1078,7 @@ WITH all_pairs AS (
     FROM biscuit_test_results b
     JOIN biscuit_test_results s
         ON  s.query_code = b.query_code AND s.execution_mode = 'SEQ'
-    WHERE b.execution_mode IN ('BISC_VC','BISC_TX','BISC_MULTI','EXPR','PARALLEL')
+    WHERE b.execution_mode IN ('BISC_VC','BISC_TX','BISC_MULTI','EXPR')
 
     UNION ALL
 
@@ -1068,6 +1112,14 @@ WITH all_pairs AS (
     FROM biscuit_test_results r1
     JOIN biscuit_test_results r2 ON r2.query_code = r1.query_code
     WHERE r1.execution_mode = 'SEQ_POST_REINDEX' AND r2.execution_mode = 'BISC_POST_REINDEX'
+
+    UNION ALL
+
+    -- PARALLEL vs its own contemporaneous serial baseline
+    SELECT ABS(r2.row_count - r1.row_count)
+    FROM biscuit_test_results r1
+    JOIN biscuit_test_results r2 ON r2.query_code = r1.query_code
+    WHERE r1.execution_mode = 'SEQ_PRE_PAR' AND r2.execution_mode = 'PARALLEL'
 )
 SELECT
     COUNT(*)                                     AS tests_executed,
@@ -1084,7 +1136,7 @@ WITH all_pairs AS (
     FROM biscuit_test_results b
     JOIN biscuit_test_results s
         ON s.query_code = b.query_code AND s.execution_mode = 'SEQ'
-    WHERE b.execution_mode IN ('BISC_VC','BISC_TX','BISC_MULTI','EXPR','PARALLEL')
+    WHERE b.execution_mode IN ('BISC_VC','BISC_TX','BISC_MULTI','EXPR')
 
     UNION ALL
 
@@ -1094,6 +1146,7 @@ WITH all_pairs AS (
     WHERE (r1.execution_mode = 'SEQ_POST_UPD'     AND r2.execution_mode = 'BISC_POST_UPD')
        OR (r1.execution_mode = 'SEQ_POST_VAC'     AND r2.execution_mode = 'BISC_POST_VAC')
        OR (r1.execution_mode = 'SEQ_POST_REINDEX' AND r2.execution_mode = 'BISC_POST_REINDEX')
+       OR (r1.execution_mode = 'SEQ_PRE_PAR'      AND r2.execution_mode = 'PARALLEL')
        OR (r1.execution_mode = 'SEQ'              AND r2.execution_mode = 'BISC_VC'
            AND r1.query_code IN ('MAINT_INS_NEW','MAINT_DEL_GONE'))
 ),
@@ -1128,7 +1181,7 @@ WITH all_pairs AS (
     JOIN biscuit_test_results s
         ON  s.query_code = b.query_code AND s.execution_mode = 'SEQ'
     JOIN biscuit_query_catalog c ON c.query_code = b.query_code
-    WHERE b.execution_mode IN ('BISC_VC','BISC_TX','BISC_MULTI','EXPR','PARALLEL')
+    WHERE b.execution_mode IN ('BISC_VC','BISC_TX','BISC_MULTI','EXPR')
 
     UNION ALL
 
@@ -1145,6 +1198,7 @@ WITH all_pairs AS (
     WHERE (r1.execution_mode = 'SEQ_POST_UPD'     AND r2.execution_mode = 'BISC_POST_UPD')
        OR (r1.execution_mode = 'SEQ_POST_VAC'     AND r2.execution_mode = 'BISC_POST_VAC')
        OR (r1.execution_mode = 'SEQ_POST_REINDEX' AND r2.execution_mode = 'BISC_POST_REINDEX')
+       OR (r1.execution_mode = 'SEQ_PRE_PAR'      AND r2.execution_mode = 'PARALLEL')
        OR (r1.execution_mode = 'SEQ'              AND r2.execution_mode = 'BISC_VC'
            AND r1.query_code IN ('MAINT_INS_NEW','MAINT_DEL_GONE'))
 )
