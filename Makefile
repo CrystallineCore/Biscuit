@@ -1,10 +1,8 @@
 # Makefile for the Biscuit index access method (PGXS build).
 #
-# NOTE: no Makefile shipped in the source archive this was reconstructed
-# from, so this is a fresh one rather than a patch. If you already have a
-# working Makefile, the ONLY change regex support strictly requires is
-# adding biscuit_regex.o to OBJS, plus shipping the two new SQL scripts.
-# Everything else here is reconstruction and can be ignored.
+# Matches the tree layout: sources under src/*.c, versioned install/upgrade
+# scripts under sql/, and the SQL test suite under tests/ (run_all.sh plus
+# the numbered category files).
 
 EXTENSION   = biscuit
 EXTVERSION  = 3.1.0
@@ -60,49 +58,115 @@ endif
 # Tests
 # =======================================================================
 #
-# Two independent layers, deliberately kept separate because they fail for
-# different reasons and need different things to run:
+# One layer: the canonical suite (tests/), run against a live server.
+# Categories, one file each (numeric prefix is the category name used by
+# CATEGORIES=... below):
 #
-#   check-regex  Pure unit test of the decomposer. Compiles biscuit_regex.c
-#                against stubs (test/pgstub.h) and differentially checks
-#                every glob it emits against a real regex engine over a few
-#                thousand strings. Needs NO server and NO PostgreSQL
-#                headers, so it runs in CI before the extension is even
-#                buildable. This is the layer that proves the rewrite is
-#                semantically exact.
+#   00_harness      shared setup/assertion helpers, sourced by the rest
+#   01_like         LIKE
+#   02_ilike        ILIKE
+#   03_regex        regex operators (~, ~*, etc.), backed by biscuit_regex.c
+#   04_composition  compound/boolean predicates
+#   05_multicolumn  multi-column indexes
+#   06_opclass      operator class behaviour
+#   07_dml_mvcc     DML + MVCC visibility
+#   08_unicode      UTF-8 / multibyte handling
+#   09_wal_setup,
+#   09_wal_verify   crash-recovery pair: setup writes+checkpoints, then the
+#                   server is restarted (see check-wal) and verify checks
+#                   the data survived. Matched together by the "09_wal"
+#                   prefix.
+#   10_stress       larger data volumes / performance sanity
 #
-#   check-sql    End-to-end test against a live server (sql/test.sql).
-#                Proves the parts that only exist inside a running backend:
-#                that the index is actually chosen for the decomposable
-#                subset, that results match a sequential scan exactly, that
-#                the recheck backstop works, and that opclass gating holds.
+# Every case is differential: the same predicate is evaluated once with
+# index paths disabled -- PostgreSQL's own matching over a sequential
+# scan, used as the oracle -- and once with sequential scans disabled,
+# and the two must agree on the row count AND on a fingerprint of WHICH
+# rows came back. Counting alone is not enough; two scans can agree on
+# COUNT(*) and return different rows.
 #
-# sql/test.sql is intentionally NOT wired up as a pg_regress REGRESS target.
-# pg_regress compares stdout against a checked-in expected/test.out, which
-# has to be regenerated whenever the fixture changes; the script instead
-# asserts internally and RAISEs an exception on failure, so its exit status
-# is the result and no expected-output file has to be maintained. That also
-# keeps it runnable through any client (pgAdmin, JDBC, DBeaver, a migration
-# runner), not just psql.
+# Each case also declares whether the access method must serve it, must
+# not, or either, so both failure directions are caught: refusing a
+# supported pattern is a silent performance regression, accepting an
+# unsupported one is a silent wrong answer.
+#
+# This is not wired up as a pg_regress REGRESS target. pg_regress
+# compares stdout against a checked-in expected/*.out that has to be
+# regenerated whenever a fixture changes; these scripts assert internally
+# and RAISE on failure, so exit status is the result and there is no
+# expected-output file to maintain. It also keeps every .sql file runnable
+# through any client -- pgAdmin, DBeaver, JDBC, a migration runner -- since
+# none of them contain psql-specific syntax.
 
-.PHONY: check-regex
-check-regex:
-	cd test && ./runtests.sh
+SUITE_DIR ?= tests
 
-# Override as needed, e.g.  make check-sql PGDATABASE=mydb
-# ON_ERROR_STOP is what turns the script's RAISE EXCEPTION into a non-zero
-# exit status; the script itself contains no psql-specific syntax.
-PSQL ?= psql
-.PHONY: check-sql
-check-sql:
-	$(PSQL) -v ON_ERROR_STOP=1 -f sql/test.sql
+# Use the psql and pg_ctl belonging to the SAME installation this extension
+# was built against. Picking them off PATH is how you end up testing a
+# freshly installed .so against a different major version's server.
+PG_BINDIR := $(shell $(PG_CONFIG) --bindir)
+PSQL      ?= $(PG_BINDIR)/psql
 
-# Adversarial layer: randomised patterns, scan reuse, plan caching, hostile
-# data, and regressions for the two bugs those found. Slower than
-# check-sql, so it is a separate target.
-.PHONY: check-stress
-check-stress:
-	$(PSQL) -v ON_ERROR_STOP=1 -f sql/stress.sql
+# The canonical suite. Standard libpq environment variables apply
+# (PGHOST, PGPORT, PGUSER, PGDATABASE), e.g.
+#     make check-suite PGDATABASE=scratch
+#     make check-suite CATEGORIES="03_regex 05_multicolumn"
+#
+# PGDATA is needed ONLY by the crash-recovery category, and is discovered
+# from the server itself rather than guessed -- which also means it is
+# correct for packaged clusters, whose data directory is nowhere near
+# their configuration. If the server cannot be reached the variable comes
+# back empty and the runner skips that category with an explanation
+# instead of failing.
+.PHONY: check-suite
+check-suite:
+	@PGDATA="$${PGDATA:-$$($(PSQL) -tAX -c 'SHOW data_directory' 2>/dev/null)}" \
+	 PGBIN="$(PG_BINDIR)" \
+	 $(SUITE_DIR)/run_all.sh $(CATEGORIES)
 
-.PHONY: check-all
-check-all: check-regex check-sql check-stress
+# Everything except the crash test: no PGDATA needed, nothing is restarted,
+# safe against a server you do not own (a managed instance, or a colleague's).
+.PHONY: check-suite-nowal
+check-suite-nowal:
+	@SKIP_WAL=1 PGBIN="$(PG_BINDIR)" $(SUITE_DIR)/run_all.sh
+
+# The crash-recovery category on its own. This one STOPS AND RESTARTS THE
+# SERVER -- `pg_ctl -m immediate stop`, i.e. no clean shutdown and no
+# shutdown checkpoint, so recovery has to replay from WAL. That is the
+# whole point of the test and a graceful restart would prove nothing, but
+# it means: do not run this against anything you care about.
+.PHONY: check-wal
+check-wal:
+	@PGDATA="$${PGDATA:-$$($(PSQL) -tAX -c 'SHOW data_directory' 2>/dev/null)}" \
+	 PGBIN="$(PG_BINDIR)" \
+	 $(SUITE_DIR)/run_all.sh 09_wal
+
+# `make test` is the friendly entry point: the full suite minus the crash
+# category. Nothing under it restarts a server.
+#
+# Deliberately NOT named `check`. pgxs.mk already defines `check` (as a stub
+# that prints "make check is not supported", steering you to installcheck),
+# and because it is included ABOVE these rules, a second `check:` here does
+# not override it -- make merges the prerequisites and runs BOTH recipes, so
+# the suite passes and the run still ends with PGXS's refusal message. Same
+# applies to `installcheck`. Use names pgxs.mk does not own.
+.PHONY: test
+test: check-suite-nowal
+
+.PHONY: test-all check-all
+test-all check-all: check-suite
+
+.PHONY: help
+help:
+	@echo "Build:"
+	@echo "  make [WITH_ROARING=1]      build (WITH_ROARING links CRoaring)"
+	@echo "  make install"
+	@echo ""
+	@echo "Test:"
+	@echo "  make test                  full suite, no server restart"
+	@echo "  make test-all              full suite INCLUDING the crash test"
+	@echo "  make check-suite           canonical suite, all categories"
+	@echo "  make check-suite-nowal     canonical suite minus crash recovery"
+	@echo "  make check-wal             crash recovery ONLY (restarts the server)"
+	@echo ""
+	@echo "  CATEGORIES=\"03_regex 05_multicolumn\"   run selected categories"
+	@echo "  PGHOST= PGPORT= PGUSER= PGDATABASE=       standard libpq variables"
