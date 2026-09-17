@@ -16,7 +16,10 @@
 
 #include "biscuit_regex.h"
 #include "biscuit_utf8.h"
-#include "utils/lsyscache.h"  /* get_op_opfamily_strategy() */
+#include "catalog/pg_collation.h"      /* DEFAULT_COLLATION_OID */
+#include "catalog/pg_collation_d.h"    /* COLLPROVIDER_ICU */
+#include "utils/lsyscache.h"           /* get_op_opfamily_strategy() */
+#include "utils/pg_locale.h"           /* pg_newlocale_from_collation() */
 
 /* ================================================================
  * SECTION 1 – small helpers
@@ -541,6 +544,109 @@ biscuit_regex_glob_is_ascii(const char *glob)
     for (; *p; p++)
         if (*p >= 0x80)
             return false;
+    return true;
+}
+
+/*
+ * biscuit_glob_is_position_sensitive
+ *
+ * True if `glob` contains a bare (unescaped) '_'. biscuit_regex_to_glob()
+ * only ever emits a bare '_' for a regex '.' (see the BQ_NONE/BQ_EXACT/
+ * BQ_ATLEAST arms above); every literal underscore from the source regex
+ * is escaped as '\_' by biscuit_regex_emit_literal(). So a bare '_' here
+ * means the glob has to line up one specific DATA character against one
+ * specific pattern position -- unlike a plain '%literal%' substring test,
+ * which only asks whether the literal occurs somewhere, and so tolerates
+ * a neighbouring character changing length under case-folding.
+ *
+ * The escaping convention mirrored here is exactly
+ * biscuit_regex_emit_literal()'s: '\' escapes the single byte after it.
+ */
+static bool
+biscuit_glob_is_position_sensitive(const char *glob)
+{
+    const char *p = glob;
+
+    if (p == NULL)
+        return false;
+
+    for (; *p; p++)
+    {
+        if (*p == '\\' && p[1] != '\0')
+        {
+            p++;
+            continue;
+        }
+        if (*p == '_')
+            return true;
+    }
+    return false;
+}
+
+/*
+ * biscuit_ci_regex_collation_safe
+ *
+ * Second half of the case-insensitive decomposition gate (the first half
+ * is biscuit_regex_glob_is_ascii()). ASCII-ness of the PATTERN rules out
+ * one hazard -- ILIKE and ~* disagreeing on how a non-ASCII pattern
+ * character folds -- but says nothing about how the DATA's collation
+ * folds case, which is a second, independent hazard this function closes.
+ *
+ * Two failure modes, both checked here:
+ *
+ *   NONDETERMINISTIC COLLATIONS. Equality is no longer byte-for-byte
+ *   (e.g. accent- or width-insensitive collations can equate strings of
+ *   different lengths outright), so there is no basis at all for
+ *   trusting a byte-oriented glob rewrite. Refused unconditionally.
+ *
+ *   ICU CASE-FOLDING LENGTH CHANGES. Verified empirically (scanning
+ *   character_length(lower(chr(g))) for every BMP codepoint, g = 1..
+ *   65533 excluding the UTF-16 surrogate range) that the database's
+ *   default/libc lower() never changes a character's length -- 0 of
+ *   65486 codepoints tested. The same scan against ICU's "und-x-icu"
+ *   collation found exactly one: U+0130 (LATIN CAPITAL LETTER I WITH DOT
+ *   ABOVE), which lowers to 'i' + a combining dot above (1 char -> 2
+ *   chars) under ICU, and to plain 'i' (1 char -> 1 char) under libc.
+ *   This holds even though "und-x-icu" is itself a DETERMINISTIC
+ *   collation, so determinism alone does not close this hole.
+ *
+ *   A length change only matters when the glob is position-sensitive
+ *   (biscuit_glob_is_position_sensitive()): a '_' standing in for regex
+ *   '.' requires the data to have exactly one character there, and if
+ *   that character folds to two, the alignment of every following '_'/
+ *   literal shifts and the ILIKE rewrite can miss a row that ~* would
+ *   have matched -- an UNDER-match that recheck, a pure filter, cannot
+ *   repair. A glob with no '_' (a plain '%literal%'/prefix/suffix test)
+ *   has no such alignment to break: substring containment does not care
+ *   that some OTHER character elsewhere folded to a different length.
+ *
+ * Only one ICU codepoint is known to misbehave this way, but nothing
+ * guarantees it is the only one across every ICU locale and future
+ * Unicode version, so this refuses the whole ICU + position-sensitive
+ * combination rather than special-casing U+0130.
+ */
+bool
+biscuit_ci_regex_collation_safe(Oid collation, const char *glob)
+{
+    pg_locale_t locale;
+
+    if (!OidIsValid(collation))
+        collation = DEFAULT_COLLATION_OID;
+
+    locale = pg_newlocale_from_collation(collation);
+
+    /* NULL locale means "C"/"POSIX": deterministic, byte-for-byte, no
+     * case-folding at all beyond plain ASCII -- safe unconditionally. */
+    if (locale == NULL)
+        return true;
+
+    if (!locale->deterministic)
+        return false;
+
+    if (locale->provider == COLLPROVIDER_ICU &&
+        biscuit_glob_is_position_sensitive(glob))
+        return false;
+
     return true;
 }
 

@@ -20,6 +20,9 @@
 #include "biscuit_pendlog.h" /* shared index-wide pending log, used by the
                               * write path in place of per-structure chains */
 #include "access/xact.h"    /* RegisterXactCallback, XACT_EVENT_* */
+#include "access/xloginsert.h" /* log_newpage() -- biscuit_buildempty() */
+#include "storage/smgr.h"      /* smgrwrite/smgrimmedsync, RelationGetSmgr()
+                                 * -- biscuit_buildempty() */
 
 /*
  * Defined in biscuit_scan.c, registered as biscuit.diag_scan_trace in
@@ -2651,6 +2654,15 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
  * this callback. The log_newpage() is not a contradiction of "unlogged": the
  * INIT FORK itself is always WAL-logged, which is exactly what makes it
  * available to recovery after the main fork is discarded.
+ *
+ * KNOWN LIMITATION: this makes the reset index READABLE, not fully
+ * functional. biscuit_load_index() also requires a persisted HEADER blob
+ * (biscuit_persist_save()'s output), which lives in ordinary pages this
+ * function does not write -- doing so would mean re-deriving the whole
+ * directory/blob layout from nothing at ambuildempty() time, which has no
+ * data to build from. A scan of the reset index therefore fails cleanly with
+ * "no on-disk snapshot found for index" and a REINDEX hint, rather than
+ * crashing on a missing block. See CHANGELOG.md's Known Limitations.
  */
 void
 biscuit_buildempty(Relation index)
@@ -4068,7 +4080,8 @@ biscuit_cost_for_shape(const BiscuitPatternShape *sh,
  * rather than a performance trap.
  */
 static char *
-biscuit_pattern_from_clause(Expr *clause, Oid opfamily, bool *is_lossy)
+biscuit_pattern_from_clause(Expr *clause, Oid opfamily, Oid collation,
+                            bool *is_lossy)
 {
     OpExpr *op;
     Node   *rightop;
@@ -4115,8 +4128,10 @@ biscuit_pattern_from_clause(Expr *clause, Oid opfamily, bool *is_lossy)
          * Mirror biscuit_build_query_plan()'s case-insensitive rules
          * exactly, or the planner would price a path the executor then
          * refuses to use: !~* is never decomposed, and ~* only for ASCII
-         * patterns. Keeping the two in step is why both sides call the
-         * same biscuit_regex_to_glob() and the same ASCII gate.
+         * patterns under a collation biscuit_ci_regex_collation_safe()
+         * accepts. Keeping the two in step is why both sides call the
+         * same biscuit_regex_to_glob(), the same ASCII gate, and the same
+         * collation gate.
          */
         if (ci && biscuit_strategy_is_negated(strategy))
         {
@@ -4124,14 +4139,19 @@ biscuit_pattern_from_clause(Expr *clause, Oid opfamily, bool *is_lossy)
         }
         else if (biscuit_regex_to_glob(raw, &glob, &reason) == BISCUIT_REGEX_EXACT)
         {
-            if (!ci || biscuit_regex_glob_is_ascii(glob))
+            bool is_ascii = biscuit_regex_glob_is_ascii(glob);
+
+            if (!ci || (is_ascii &&
+                        biscuit_ci_regex_collation_safe(collation, glob)))
             {
                 pfree(raw);
                 return glob;
             }
+            reason = is_ascii
+                        ? "case-insensitive regex under an unsafe collation"
+                        : "non-ASCII case-insensitive regex";
             pfree(glob);
             glob   = NULL;
-            reason = "non-ASCII case-insensitive regex";
         }
 
         elog(DEBUG1,
@@ -4430,6 +4450,17 @@ biscuit_costestimate(PlannerInfo *root, IndexPath *path,
                 (iclause->indexcol >= 0 && iclause->indexcol < index->nkeycolumns)
                     ? index->opfamily[iclause->indexcol]
                     : InvalidOid;
+            /*
+             * The collation this index column was built with, needed by
+             * biscuit_ci_regex_collation_safe() to gate case-insensitive
+             * regex decomposition the same way biscuit_build_query_plan()
+             * does at execution time (there via ScanKey->sk_collation,
+             * here via the IndexOptInfo's per-column collation array).
+             */
+            Oid          qual_collation =
+                (iclause->indexcol >= 0 && iclause->indexcol < index->nkeycolumns)
+                    ? index->indexcollations[iclause->indexcol]
+                    : InvalidOid;
 
             foreach(lc2, iclause->indexquals)
             {
@@ -4440,7 +4471,8 @@ biscuit_costestimate(PlannerInfo *root, IndexPath *path,
                 bool                 lossy = false;
 
                 pat = biscuit_pattern_from_clause(rinfo->clause,
-                                                  qual_opfamily, &lossy);
+                                                  qual_opfamily, qual_collation,
+                                                  &lossy);
                 if (lossy)
                 {
                     /*

@@ -172,6 +172,18 @@ extern int biscuit_strategy_for_operator(Oid opno, Oid opfamily);
  */
 extern bool biscuit_regex_glob_is_ascii(const char *glob);
 
+/*
+ * Second half of the case-insensitive decomposition gate: true if `glob`
+ * can be trusted for data compared under `collation`. Refuses
+ * nondeterministic collations outright, and refuses ICU collations
+ * specifically for position-sensitive globs (those with a bare '_'),
+ * where a length-changing case fold (verified for U+0130) can make the
+ * rewrite silently drop a row that ~* would have matched. See the
+ * implementation comment for the full argument and the empirical check
+ * behind it.
+ */
+extern bool biscuit_ci_regex_collation_safe(Oid collation, const char *glob);
+
 /* True for the four regex strategy numbers (5..8). */
 extern bool biscuit_strategy_is_regex(int strategy);
 

@@ -265,7 +265,6 @@ biscuit_reconcile_pending(Relation index, RoaringBitmap *cached,
     return merged;
 }
 
-
 /*
  * biscuit_len_exact_reconciled
  * -----------------------------
@@ -3424,7 +3423,6 @@ biscuit_query_column_pattern_masked(Relation index, BiscuitIndex *idx, int col_i
         if (parsed->part_count == 1) {
             if (!parsed->starts_percent && !parsed->ends_percent) {
                 result = biscuit_match_col_part_at_pos(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
-                /* col->max_length is the array size (valid indices 0..max_length-1); "<=" read one past the end */
                 if (result)
                 {
                     RoaringBitmap *lb = biscuit_len_exact_reconciled(index, col->length_bitmaps,
@@ -3636,7 +3634,6 @@ biscuit_query_column_pattern_ilike_masked(Relation index, BiscuitIndex *idx, int
     for (i = 0; i < plen; i++) { if (pl[i] == '%') pc++; else if (pl[i] == '_') wc++; else { ow = false; break; } }
     if (ow) {
         if (pc > 0) result = biscuit_get_col_length_ge_lower(index, col, col_idx, wc);
-        /* col->max_length_lower is the array size (valid indices 0..max_length_lower-1); "<=" read one past the end */
         else
         {
             RoaringBitmap *lb = biscuit_len_exact_reconciled(index, col->length_bitmaps_lower,
@@ -3663,7 +3660,6 @@ biscuit_query_column_pattern_ilike_masked(Relation index, BiscuitIndex *idx, int
         if (parsed->part_count == 1) {
             if (!parsed->starts_percent && !parsed->ends_percent) {
                 result = biscuit_match_col_part_at_pos_ilike(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
-                /* col->max_length_lower is the array size (valid indices 0..max_length_lower-1); "<=" read one past the end */
                 if (result)
                 {
                     RoaringBitmap *lb = biscuit_len_exact_reconciled(index, col->length_bitmaps_lower,
@@ -4000,19 +3996,25 @@ biscuit_build_query_plan(BiscuitIndex *idx, ScanKey keys, int nkeys)
              * CASE-INSENSITIVE ASYMMETRY
              *
              * ~* is rewritten onto ILIKE, but the two do not implement the
-             * same case-folding relation (see QueryPredicate.needs_recheck
-             * and biscuit_regex_glob_is_ascii()). Two consequences:
+             * same case-folding relation (see QueryPredicate.needs_recheck,
+             * biscuit_regex_glob_is_ascii() and
+             * biscuit_ci_regex_collation_safe()). Three consequences:
              *
-             *   ~*  with an ASCII pattern -- ILIKE over-matches at worst,
-             *       so the glob is a usable superset: evaluate it AND
-             *       recheck.
+             *   ~*  with an ASCII pattern, under a collation
+             *       biscuit_ci_regex_collation_safe() accepts -- ILIKE
+             *       over-matches at worst, so the glob is a usable
+             *       superset: evaluate it AND recheck.
              *   !~* -- the complement of a superset is a SUBSET, which
              *       recheck cannot repair, so it is never decomposed. It
              *       falls through to the lossy branch below.
              *
-             * A non-ASCII ~* pattern is refused for the same reason the
-             * negated form is: 'I' ~* 'ı' is true while the ILIKE form is
-             * false, i.e. the index would drop a qualifying row.
+             * A non-ASCII pattern, or a pattern under a collation
+             * biscuit_ci_regex_collation_safe() rejects, is refused for the
+             * same reason as the negated form: the index would drop a
+             * qualifying row that recheck cannot restore ('I' ~* 'ı' is
+             * true while 'I' ILIKE '%ı%' is false; under ICU collations,
+             * U+0130 folds to two characters where libc folds it to one,
+             * which can misalign a position-sensitive glob the same way).
              */
             if (ci && biscuit_strategy_is_negated(key->sk_strategy))
             {
@@ -4025,7 +4027,9 @@ biscuit_build_query_plan(BiscuitIndex *idx, ScanKey keys, int nkeys)
             }
             else if (biscuit_regex_to_glob(pred->pattern, &glob, &reason) ==
                      BISCUIT_REGEX_EXACT &&
-                     (!ci || biscuit_regex_glob_is_ascii(glob)))
+                     (!ci ||
+                      (biscuit_regex_glob_is_ascii(glob) &&
+                       biscuit_ci_regex_collation_safe(key->sk_collation, glob))))
             {
                 elog(DEBUG1,
                      "biscuit: regex \"%s\" decomposed to glob \"%s\"%s",
