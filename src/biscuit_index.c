@@ -2614,11 +2614,94 @@ biscuit_build(Relation heap, Relation index, IndexInfo *indexInfo)
     PG_END_TRY();
 }
 
+/*
+ * biscuit_buildempty -- write an empty index into the INIT fork.
+ *
+ * WHY THIS IS NOT A NO-OP.
+ *
+ * ambuildempty() is how an access method supports UNLOGGED relations. An
+ * unlogged index is never WAL-logged, so after a crash there is nothing to
+ * replay; instead PostgreSQL resets the relation by copying its INIT fork
+ * over the main fork. Whatever ambuildempty() leaves in the init fork IS the
+ * post-crash index.
+ *
+ * Leaving it empty produced a zero-length main fork after recovery, so the
+ * very first scan of the reset index died on its metapage read:
+ *
+ *     CREATE UNLOGGED TABLE t (id int, v text);
+ *     INSERT INTO t SELECT g, 'v' || g FROM generate_series(1, 5000) g;
+ *     CREATE INDEX ON t USING biscuit (v);
+ *     -- crash (pg_ctl -m immediate stop), restart, then:
+ *     SELECT count(*) FROM t WHERE v LIKE 'v%';
+ *     ERROR:  could not read block 0 in file "base/5/NNNNN": read only 0 of 8192 bytes
+ *
+ * The table is correctly empty at that point -- recovery truncates unlogged
+ * relations by design -- but the index is not merely empty, it is absent, and
+ * the error surfaces on any query rather than on the reset itself. Writing a
+ * valid, empty metapage here makes the reset index a working empty index.
+ *
+ * The page content mirrors the INIT branch of biscuit_write_metadata_to_disk()
+ * with a zero record count. The two must stay in step; the fields that MUST
+ * NOT be left as zeros are called out there and repeated below, because a
+ * zero-filled special area points every block pointer at block 0 -- the
+ * metapage itself -- which self-deadlocks the shared-log append path on the
+ * first insert into the reset index.
+ *
+ * smgrwrite() + log_newpage() + smgrimmedsync() is the standard shape for
+ * this callback. The log_newpage() is not a contradiction of "unlogged": the
+ * INIT FORK itself is always WAL-logged, which is exactly what makes it
+ * available to recovery after the main fork is discarded.
+ */
 void
 biscuit_buildempty(Relation index)
 {
-    /* Nothing to write for an empty index */
-    (void) index;
+    Page                 page;
+    BiscuitMetaPageData *meta;
+    int                  i;
+
+    page = (Page) palloc_aligned(BLCKSZ, PG_IO_ALIGN_SIZE, MCXT_ALLOC_ZERO);
+
+    PageInit(page, BLCKSZ, sizeof(BiscuitMetaPageData));
+
+    meta                      = (BiscuitMetaPageData *) PageGetSpecialPointer(page);
+    meta->magic               = BISCUIT_MAGIC;
+    meta->version             = BISCUIT_VERSION;
+    meta->page_format_version = BISCUIT_PAGE_FORMAT_VERSION;
+    meta->num_records         = 0;
+    meta->gen                 = 0;
+
+    meta->num_dir_columns = 0;
+    for (i = 0; i < BISCUIT_MAX_DIR_COLUMNS; i++)
+        meta->dir_roots[i] = InvalidBlockNumber;
+
+    meta->fsm_root            = InvalidBlockNumber;
+    meta->fsm_page_count      = 0;
+    meta->pending_list_limit  = BISCUIT_DEFAULT_PENDING_LIST_LIMIT;
+    meta->total_pending_bytes = 0;
+    meta->total_drains        = 0;
+
+    /* See biscuit_write_metadata_to_disk(): these MUST NOT be zeros. */
+    meta->pendlog_head        = InvalidBlockNumber;
+    meta->pendlog_tail        = InvalidBlockNumber;
+    meta->pendlog_npages      = 0;
+    meta->pendlog_draining    = InvalidBlockNumber;
+    memset(meta->reserved, 0, sizeof(meta->reserved));
+
+    PageSetChecksumInplace(page, BISCUIT_METAPAGE_BLKNO);
+
+    smgrwrite(RelationGetSmgr(index), INIT_FORKNUM, BISCUIT_METAPAGE_BLKNO,
+              page, true);
+    log_newpage(&RelationGetSmgr(index)->smgr_rlocator.locator, INIT_FORKNUM,
+                BISCUIT_METAPAGE_BLKNO, page, true);
+
+    /*
+     * The init fork is not in the buffer manager, so nothing else will ever
+     * flush it. Sync it here or a crash before the next checkpoint leaves
+     * exactly the empty fork this function exists to avoid.
+     */
+    smgrimmedsync(RelationGetSmgr(index), INIT_FORKNUM);
+
+    pfree(page);
 }
 
 /*

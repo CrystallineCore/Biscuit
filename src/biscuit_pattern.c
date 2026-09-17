@@ -265,6 +265,80 @@ biscuit_reconcile_pending(Relation index, RoaringBitmap *cached,
     return merged;
 }
 
+
+/*
+ * biscuit_len_exact_reconciled
+ * -----------------------------
+ * The exact-length bitmap for `position`, reconciled against the shared
+ * pending log, tolerating BOTH an absent array slot and an out-of-range
+ * position.
+ *
+ * WHY THIS EXISTS -- correctness fix, not a refactor.
+ *
+ * Every exact-length call site used to read
+ *
+ *     if (pos < max_length && arr[pos])
+ *         lb = biscuit_reconcile_pending(index, arr[pos], ...);
+ *     else
+ *         (no rows have this length -- result is empty)
+ *
+ * which treats "no BASE bitmap at this length" as "no ROW has this length".
+ * Those are not the same statement. A row's LEN membership lives in the
+ * shared pending log until a drain folds it into the base structures, and
+ * biscuit_reconcile_pending() is the function that reads it -- but the
+ * guard above decides not to call it precisely when the base is missing,
+ * which is exactly when the pending log is the only place the row exists.
+ *
+ * In steady state the base is non-NULL because the write path's fan-out
+ * calls inmem_grow_lengths(), which allocates a bitmap for every new
+ * length as the row is indexed. The hole only opens after the in-memory
+ * index is rebuilt from disk, because biscuit_persist_load() reconstructs
+ * the length arrays from the last persisted directory and nothing else.
+ * Any length first seen after that snapshot comes back NULL.
+ *
+ * Crash recovery is the reliable way to reach that state:
+ *
+ *     -- every value is exactly 5 characters
+ *     INSERT INTO t SELECT g, 'row' || lpad((g%50)::text, 2, '0')
+ *       FROM generate_series(1, 2000) g;
+ *     CREATE INDEX ON t USING biscuit (v);
+ *     CHECKPOINT;
+ *     INSERT INTO t VALUES (1, 'zzzzz');    -- new value, length 5 (known)
+ *     INSERT INTO t VALUES (2, 'zzzzzz');   -- new value, length 6 (NEW)
+ *     -- crash (pg_ctl -m immediate stop), restart, then:
+ *     SELECT count(*) FROM t WHERE v LIKE 'zzzzz';   -- 1, correct
+ *     SELECT count(*) FROM t WHERE v LIKE 'zzzzzz';  -- 0, WRONG
+ *     SELECT count(*) FROM t WHERE v LIKE 'zzzzzz%'; -- 1, correct
+ *
+ * The prefix form is unaffected because it never consults an exact-length
+ * bitmap, which is what makes the symptom look like "anchored queries
+ * broke" rather than "a length is missing". Nothing errors: rows quietly
+ * stop being returned.
+ *
+ * Passing the possibly-NULL base straight through is safe and is already
+ * the contract -- biscuit_reconcile_pending() does
+ * `merged = cached ? copy(cached) : create()` -- so a NULL base with
+ * pending entries yields just the pending rows, and a NULL base with
+ * nothing pending still yields NULL, i.e. genuinely empty. The bounds
+ * check stays, but it now only guards the ARRAY ACCESS; it no longer
+ * suppresses the pending-log lookup, which is valid at any position.
+ *
+ * Returns a BORROWED bitmap (or NULL) under biscuit_reconcile_pending()'s
+ * usual ownership rules: copy it if you need to keep or mutate it.
+ */
+static RoaringBitmap *
+biscuit_len_exact_reconciled(Relation index, RoaringBitmap **arr,
+                              int max_length, int32 col, bool is_lower,
+                              int position)
+{
+    RoaringBitmap *base = (arr && position >= 0 && position < max_length)
+                            ? arr[position]
+                            : NULL;
+
+    return biscuit_reconcile_pending(index, base, col, is_lower,
+                                      BISCUIT_DIR_KIND_LEN, -1, position);
+}
+
 /* ================================================================
  * SECTION 1 – CharIndex bitmap accessor helpers
  * ================================================================
@@ -2791,13 +2865,12 @@ biscuit_query_pattern_masked(Relation index, BiscuitIndex *idx, const char *patt
 
     if (only_wildcards) {
         if (percent_count > 0) return biscuit_get_length_ge(index, idx, wildcard_count);
-        if (wildcard_count < idx->max_length_legacy && idx->length_bitmaps_legacy[wildcard_count])
         {
-            RoaringBitmap *lb = biscuit_reconcile_pending(index, idx->length_bitmaps_legacy[wildcard_count],
-                                                            -1, false, BISCUIT_DIR_KIND_LEN, -1, wildcard_count);
+            RoaringBitmap *lb = biscuit_len_exact_reconciled(index, idx->length_bitmaps_legacy,
+                                                              idx->max_length_legacy, -1, false,
+                                                              wildcard_count);
             return lb ? biscuit_roaring_copy(lb) : biscuit_roaring_create();
         }
-        return biscuit_roaring_create();
     }
 
     PG_TRY();
@@ -2827,11 +2900,18 @@ biscuit_query_pattern_masked(Relation index, BiscuitIndex *idx, const char *patt
         if (parsed->part_count == 1) {
             if (!parsed->starts_percent && !parsed->ends_percent) {
                 result = biscuit_match_part_at_pos(index, idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
-                if (result && min_len < idx->max_length_legacy && idx->length_bitmaps_legacy[min_len])
+                if (result)
                 {
-                    RoaringBitmap *lb = biscuit_reconcile_pending(index, idx->length_bitmaps_legacy[min_len],
-                                                                    -1, false, BISCUIT_DIR_KIND_LEN, -1, min_len);
-                    biscuit_roaring_and_inplace(result, lb);
+                    RoaringBitmap *lb = biscuit_len_exact_reconciled(index, idx->length_bitmaps_legacy,
+                                                                      idx->max_length_legacy, -1, false,
+                                                                      min_len);
+                    if (lb)
+                        biscuit_roaring_and_inplace(result, lb);
+                    else
+                    {
+                        biscuit_roaring_free(result);
+                        result = biscuit_roaring_create();
+                    }
                 }
                 /*
                  * No exact-length bitmap for min_len means NO ROW has that
@@ -3091,13 +3171,13 @@ biscuit_query_pattern_ilike_masked(Relation index, BiscuitIndex *idx, const char
 
     if (only_wildcards) {
         if (percent_count > 0) result = biscuit_get_length_ge_lower(index, idx, wildcard_count);
-        else if (wildcard_count < idx->max_length_lower && idx->length_bitmaps_lower && idx->length_bitmaps_lower[wildcard_count])
+        else
         {
-            RoaringBitmap *lb = biscuit_reconcile_pending(index, idx->length_bitmaps_lower[wildcard_count],
-                                                            -1, true, BISCUIT_DIR_KIND_LEN, -1, wildcard_count);
+            RoaringBitmap *lb = biscuit_len_exact_reconciled(index, idx->length_bitmaps_lower,
+                                                              idx->max_length_lower, -1, true,
+                                                              wildcard_count);
             result = lb ? biscuit_roaring_copy(lb) : biscuit_roaring_create();
         }
-        else result = biscuit_roaring_create();
         pfree(pl); return result;
     }
 
@@ -3123,11 +3203,18 @@ biscuit_query_pattern_ilike_masked(Relation index, BiscuitIndex *idx, const char
         if (parsed->part_count == 1) {
             if (!parsed->starts_percent && !parsed->ends_percent) {
                 result = biscuit_match_part_at_pos_ilike(index, idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
-                if (result && min_len < idx->max_length_lower && idx->length_bitmaps_lower && idx->length_bitmaps_lower[min_len])
+                if (result)
                 {
-                    RoaringBitmap *lb = biscuit_reconcile_pending(index, idx->length_bitmaps_lower[min_len],
-                                                                    -1, true, BISCUIT_DIR_KIND_LEN, -1, min_len);
-                    biscuit_roaring_and_inplace(result, lb);
+                    RoaringBitmap *lb = biscuit_len_exact_reconciled(index, idx->length_bitmaps_lower,
+                                                                      idx->max_length_lower, -1, true,
+                                                                      min_len);
+                    if (lb)
+                        biscuit_roaring_and_inplace(result, lb);
+                    else
+                    {
+                        biscuit_roaring_free(result);
+                        result = biscuit_roaring_create();
+                    }
                 }
                 /* Same missing-length-bitmap fix as the LIKE path above. */
                 else if (result) { biscuit_roaring_free(result); result = biscuit_roaring_create(); }
@@ -3312,11 +3399,11 @@ biscuit_query_column_pattern_masked(Relation index, BiscuitIndex *idx, int col_i
                                                              -1, wildcard_count);
             return lgb ? biscuit_roaring_copy(lgb) : biscuit_roaring_create();
         }
-        if (!percent_count && wildcard_count < col->max_length && col->length_bitmaps[wildcard_count])
+        if (!percent_count)
         {
-            RoaringBitmap *lb = biscuit_reconcile_pending(index, col->length_bitmaps[wildcard_count],
-                                                            col_idx, false, BISCUIT_DIR_KIND_LEN,
-                                                            -1, wildcard_count);
+            RoaringBitmap *lb = biscuit_len_exact_reconciled(index, col->length_bitmaps,
+                                                              col->max_length, col_idx, false,
+                                                              wildcard_count);
             return lb ? biscuit_roaring_copy(lb) : biscuit_roaring_create();
         }
         return biscuit_roaring_create();
@@ -3338,12 +3425,18 @@ biscuit_query_column_pattern_masked(Relation index, BiscuitIndex *idx, int col_i
             if (!parsed->starts_percent && !parsed->ends_percent) {
                 result = biscuit_match_col_part_at_pos(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
                 /* col->max_length is the array size (valid indices 0..max_length-1); "<=" read one past the end */
-                if (result && min_len < col->max_length && col->length_bitmaps[min_len])
+                if (result)
                 {
-                    RoaringBitmap *lb = biscuit_reconcile_pending(index, col->length_bitmaps[min_len],
-                                                                    col_idx, false, BISCUIT_DIR_KIND_LEN,
-                                                                    -1, min_len);
-                    biscuit_roaring_and_inplace(result, lb);
+                    RoaringBitmap *lb = biscuit_len_exact_reconciled(index, col->length_bitmaps,
+                                                                      col->max_length, col_idx, false,
+                                                                      min_len);
+                    if (lb)
+                        biscuit_roaring_and_inplace(result, lb);
+                    else
+                    {
+                        biscuit_roaring_free(result);
+                        result = biscuit_roaring_create();
+                    }
                 }
                 else if (result) { biscuit_roaring_free(result); result = biscuit_roaring_create(); }
                 else result = biscuit_roaring_create();
@@ -3544,13 +3637,12 @@ biscuit_query_column_pattern_ilike_masked(Relation index, BiscuitIndex *idx, int
     if (ow) {
         if (pc > 0) result = biscuit_get_col_length_ge_lower(index, col, col_idx, wc);
         /* col->max_length_lower is the array size (valid indices 0..max_length_lower-1); "<=" read one past the end */
-        else if (wc < col->max_length_lower && col->length_bitmaps_lower && col->length_bitmaps_lower[wc])
+        else
         {
-            RoaringBitmap *lb = biscuit_reconcile_pending(index, col->length_bitmaps_lower[wc], col_idx, true,
-                                                            BISCUIT_DIR_KIND_LEN, -1, wc);
+            RoaringBitmap *lb = biscuit_len_exact_reconciled(index, col->length_bitmaps_lower,
+                                                              col->max_length_lower, col_idx, true, wc);
             result = lb ? biscuit_roaring_copy(lb) : biscuit_roaring_create();
         }
-        else result = biscuit_roaring_create();
         pfree(pl); return result;
     }
 
@@ -3572,11 +3664,18 @@ biscuit_query_column_pattern_ilike_masked(Relation index, BiscuitIndex *idx, int
             if (!parsed->starts_percent && !parsed->ends_percent) {
                 result = biscuit_match_col_part_at_pos_ilike(index, col, col_idx, parsed->parts[0], parsed->part_byte_lens[0], 0);
                 /* col->max_length_lower is the array size (valid indices 0..max_length_lower-1); "<=" read one past the end */
-                if (result && min_len < col->max_length_lower && col->length_bitmaps_lower && col->length_bitmaps_lower[min_len])
+                if (result)
                 {
-                    RoaringBitmap *lb = biscuit_reconcile_pending(index, col->length_bitmaps_lower[min_len], col_idx,
-                                                                    true, BISCUIT_DIR_KIND_LEN, -1, min_len);
-                    biscuit_roaring_and_inplace(result, lb);
+                    RoaringBitmap *lb = biscuit_len_exact_reconciled(index, col->length_bitmaps_lower,
+                                                                      col->max_length_lower, col_idx, true,
+                                                                      min_len);
+                    if (lb)
+                        biscuit_roaring_and_inplace(result, lb);
+                    else
+                    {
+                        biscuit_roaring_free(result);
+                        result = biscuit_roaring_create();
+                    }
                 }
                 else if (result) { biscuit_roaring_free(result); result = biscuit_roaring_create(); }
                 else result = biscuit_roaring_create();
