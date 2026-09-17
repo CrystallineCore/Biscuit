@@ -3,8 +3,9 @@
 ## Version 3.1.0
 
 Adds regular-expression support for the subset of patterns that can be
-rewritten exactly as a `LIKE` glob, and fixes a correctness bug in anchored
-matching that predates this release.
+rewritten exactly as a `LIKE` glob, fixes several correctness bugs that
+predate this release, and replaces the previous test scripts with a
+differential test suite.
 
 **No `REINDEX` is required.** There is no on-disk format change: the rewrite
 happens entirely at plan time and the existing structures answer the resulting
@@ -38,11 +39,11 @@ extension is updated.
 
 * **Safe handling of regexes outside the subset.** Alternation, bracket
   expressions, groups, unbounded or optional repetition of a literal, bounded
-  `{n,m}` ranges, `\d`/`\w`/`\b` class shorthands, backreferences and
+  `{n,m}` ranges, `\d`/`\w`/`\y` class shorthands, backreferences and
   embedded-option directives are not decomposable. Such quals remain correct:
   the key is skipped, the scan reports `xs_recheck` so the executor
-  re-evaluates the original regex, and `biscuit_costestimate()` prices the path
-  out so the planner chooses a sequential scan instead. An unsupported regex
+  re-evaluates the original regex, and `biscuit_costestimate()` disables the
+  path so the planner chooses a sequential scan instead. An unsupported regex
   therefore costs nothing but the missed optimisation.
 
 * **Operator-class gating for regex, matching `LIKE`/`ILIKE`.** `~` and `!~`
@@ -53,6 +54,66 @@ extension is updated.
   by the planner for the operators it cannot answer.
 
 ### Bug Fixes
+
+* **Index builds no longer scan the heap directly.** `biscuit_build()` used its
+  own `table_beginscan(heap, SnapshotAny, ...)` loop; it now goes through
+  `table_index_build_scan()` as every other access method does. The hand-rolled
+  scan skipped four things core performs on an access method's behalf:
+
+  * **HOT-root mapping.** Each tuple version was indexed under its own TID
+    rather than its HOT chain's root. A scan for a superseded value therefore
+    returned a TID whose chain resolves to the *live* tuple, so the index
+    reported rows that do not match the predicate. It needed only an `UPDATE`
+    performed while the column was not yet indexed — that is, any `CREATE
+    INDEX` on an existing, updated table — and `REINDEX` did not repair it,
+    because it re-ran the same scan.
+  * **Tuple eligibility.** Dead, recently-dead and aborted tuples were indexed
+    indiscriminately, and `ii_BrokenHotChain` — hence `pg_index.indcheckxmin`
+    — was never set.
+  * **`ii_Predicate`.** Partial indexes were built over every row, so they
+    returned rows failing their own `WHERE` clause. Nothing filtered them out,
+    as the planner had already dropped that qual as implied by the predicate.
+  * **`pg_class.reltuples`.** The build reported its own slot count, which
+    undercounts on a nullable column because the single-column path allocates
+    no slot for a row whose key is NULL. This skewed every subsequent plan on
+    the table.
+
+* **Fixed a use-after-free and double free in the pending-list snapshot.**
+  `pendlog_expand_touched()` grew the snapshot's bitmap in whatever memory
+  context the caller happened to be in. On the read path that is the executor's
+  per-query context, which `ExecutorEnd()` deletes — while the snapshot itself
+  lives on under `CacheMemoryContext` in the process-wide slot cache. The next
+  query read the dangling pointer, and the eventual snapshot free released it a
+  second time, typically surfacing as a glibc "double free or corruption" abort
+  during `VACUUM`.
+
+* **Fixed anchored patterns losing rows written since the last checkpoint,
+  after crash recovery.** An exact-length lookup consulted the base length
+  bitmap but skipped the pending log whenever that bitmap was absent, treating
+  "no base bitmap at this length" as "no row has this length". Those are not
+  the same statement: a row's length membership lives in the pending log until
+  a drain folds it in. The base bitmap is only ever absent after the in-memory
+  index is rebuilt from disk, since the length arrays are reconstructed from
+  the last persisted directory and nothing else — so any length first seen
+  after that snapshot came back missing.
+
+  ```sql
+  -- every value is exactly 5 characters
+  INSERT INTO t SELECT g, 'row' || lpad((g%50)::text, 2, '0')
+    FROM generate_series(1, 2000) g;
+  CREATE INDEX ON t USING biscuit (v);
+  CHECKPOINT;
+  INSERT INTO t VALUES (1, 'zzzzzz');   -- new value, new length
+  -- crash (pg_ctl -m immediate stop), restart, then:
+  SELECT count(*) FROM t WHERE v LIKE 'zzzzzz';   -- returned 0, correct answer is 1
+  SELECT count(*) FROM t WHERE v LIKE 'zzzzzz%';  -- returned 1, correct
+  ```
+
+  Prefix and infix patterns were unaffected, because they never consult an
+  exact-length bitmap — which is why the symptom looked like anchored matching
+  breaking rather than a length being missing. Nothing errored; rows quietly
+  stopped being returned. Fixed at all eight exact-length call sites:
+  single-column and multi-column, `LIKE` and `ILIKE`.
 
 * **Fixed anchored `LIKE`/`ILIKE` silently dropping its length constraint.**
   A fully-anchored pattern (one with no `%`) is evaluated as a positional match
@@ -77,15 +138,36 @@ extension is updated.
   which is why it survived earlier testing. The two multi-column code paths
   already handled the absent case correctly and were unaffected.
 
+* **Fixed disabled index paths still being chosen on PostgreSQL 18.** Biscuit
+  refuses a qual it cannot serve — a scan with no usable keys, an unusable glob
+  shape, and now a non-decomposable regex — by assigning the path an
+  astronomical cost. Through PG 17 that was sufficient, because a GUC-disabled
+  path simply had `disable_cost` folded into its own cost and path choice
+  remained a pure cost comparison. PG 18 (commit `e2225346`) replaced that with
+  a `disabled_nodes` counter compared *before* cost, so under
+  `enable_seqscan = off` the disabled sequential path lost to the index path no
+  matter how the costs compared. Such paths now increment `disabled_nodes` as
+  well as setting the cost, which composes with the GUC rather than overwriting
+  it. PG 16 and 17 are unaffected and continue to rely on the cost alone.
+
+* **Fixed `ambuildempty()` being a no-op, which left unlogged indexes
+  unreadable after a crash.** Recovery resets an unlogged relation by copying
+  its `INIT` fork over the main fork, so an empty init fork produced a
+  zero-length index and the first scan afterwards failed with *"could not read
+  block 0 … read only 0 of 8192 bytes"*. A valid empty metapage is now written
+  there. See [Known Limitations](#known-limitations) for what this does not yet
+  cover.
+
 * **Fixed `-DHAVE_ROARING` being silently dropped from the build.** `PG_CPPFLAGS`
   was appended to after `include $(PGXS)`, but PGXS folds it into `CPPFLAGS`
   with immediate expansion at include time, so the definition never reached the
-  compiler. `SHLIB_LINK` is expanded lazily and was still honoured, so
-  `make WITH_ROARING=1` produced an extension that linked against CRoaring
-  while being compiled with the fallback bitmap — it built and ran correctly,
-  but silently without the performance CRoaring was meant to provide. The flags
-  are now set before the include, and the build fails loudly if the two ever
-  disagree again.
+  compiler. `SHLIB_LINK` is expanded lazily and was still honoured, so the
+  build produced an extension that linked against CRoaring while being compiled
+  with the fallback bitmap — it built and ran correctly, but silently without
+  the performance CRoaring was meant to provide. The flags are now set before
+  the include, and the build fails loudly if the two ever disagree again.
+  CRoaring is no longer auto-detected: link it explicitly with
+  `make WITH_ROARING=1`.
 
 ### Internal Changes
 
@@ -104,6 +186,48 @@ extension is updated.
   column's opfamily via `get_op_opfamily_strategy()`, rather than by comparing
   against `OID_TEXT_*` macros. The catalog is the same data the SQL script
   populates, so there is no second operator list to drift out of step.
+* `amstrategies` raised from 4 to 8 for the new operators.
+* A scan whose keys are *all* non-decomposable regexes seeds its candidate set
+  from the reconciled live non-NULL row set rather than a raw
+  `[0, num_records)` range, which would include never-populated free slots.
+
+### Testing
+
+The previous `check-sql` / `check-stress` scripts are replaced by a
+differential suite under `tests/`, run with `make test`. Every case is
+evaluated twice against the same rows: once with index paths disabled —
+PostgreSQL's own matching over a sequential scan, used as the oracle — and once
+with sequential scans disabled. The two must agree on the row count *and* on a
+fingerprint of which rows came back, since two scans can agree on `COUNT(*)`
+and still return different rows.
+
+Each case also declares whether the access method must serve it, must not, or
+either, so both failure directions are caught: refusing a supported pattern is
+a silent performance regression, accepting an unsupported one is a silent wrong
+answer.
+
+| Category | Covers |
+|---|---|
+| `01_like`, `02_ilike` | Anchoring, `_` placement, escapes, wildcards as data, NULLs, case folding |
+| `03_regex` | The decomposable subset, the rejected constructs, and the rewrite identities |
+| `04_composition` | `AND`/`OR`/`NOT` over globs and regexes, mixed operator families, set algebra |
+| `05_multicolumn` | Multi-column indexes cross-checked against three single-column ones |
+| `06_opclass` | Operator-class gating in both directions, plus catalogue and storage checks |
+| `07_dml_mvcc` | Insert/update/delete after build, savepoints, rollback, `VACUUM`, TOAST |
+| `08_unicode` | Character-versus-byte positions, 1–4 byte characters, combining sequences |
+| `09_wal` | Crash recovery: `pg_ctl -m immediate stop`, WAL replay, unlogged relations |
+| `10_stress` | Generated patterns from a fixed seed, straddling the decomposable boundary |
+
+The suite is not wired up as a `pg_regress` target. Each file asserts
+internally and raises on failure, so exit status is the result and there is no
+expected-output file to regenerate when a fixture changes. None of the `.sql`
+files contain psql-specific syntax, so they also run through pgAdmin, DBeaver,
+JDBC or a migration runner; the only step needing a shell is the crash in the
+middle of `09_wal`.
+
+`make check-wal` runs that category alone. **It stops and restarts the server**
+with no clean shutdown, so do not point it at anything you care about.
+`make test` excludes it.
 
 ### Known Limitations
 
@@ -117,16 +241,40 @@ extension is updated.
   case folding and `ILIKE`'s `lower()`-based folding are not the same relation,
   and they disagree in both directions on characters such as `İ`, `ß` and the
   `ǅ`/`ǈ`/`ǋ` titlecase family. `~*` is therefore decomposed only for
-  pure-ASCII patterns, which confines the disagreement to the direction where
-  `ILIKE` over-matches, and those scans set `xs_recheck` so the executor
-  removes the surplus. `!~*` is never decomposed, because the complement of an
+  pure-ASCII patterns under a collation Biscuit judges safe (see below), which
+  confines the remaining disagreement to the direction where `ILIKE`
+  over-matches, and those scans set `xs_recheck` so the executor removes the
+  surplus. `!~*` is never decomposed, because the complement of an
   over-matching set omits rows and no recheck can restore them. `~` and `!~`
   are unaffected and remain exact.
+
+* **`~*`/`!~*` decomposition is refused under collations it cannot prove
+  safe.** Nondeterministic collations are refused outright — PostgreSQL's
+  regex engine itself does not support them, so this only guards against a
+  future core change. More narrowly, an ICU collation refuses decomposition
+  of any pattern shape that depends on character *position* (one containing
+  regex `.`, emitted as `_`): ICU's `lower()` maps `İ` (U+0130) to two
+  characters where the database's default/libc `lower()` maps it to one, and
+  that length change can shift a `_`-aligned match out from under a row that
+  `~*` would otherwise have matched — an under-match that `xs_recheck`, being
+  a pure filter, cannot repair. Unanchored, non-positional patterns
+  (`LIKE '%literal%'` shapes with no `.`) remain decomposable under ICU, since
+  substring containment does not depend on any other character's folded
+  length. Deterministic non-ICU collations (the default/libc case covered
+  above) are unaffected.
 
 * **Unanchored regexes inherit the unanchored `LIKE` cost model.** `~ 'abc'`
   decomposes to `LIKE '%abc%'` and is priced as an infix pattern, which the
   planner will often decline in favour of a sequential scan. This is existing
   cost-model behaviour rather than anything specific to regex.
+
+* **An unlogged index must be `REINDEX`ed after crash recovery.**
+  `ambuildempty()` now writes a valid metapage into the `INIT` fork, so the
+  reset index is readable rather than a zero-length file, but loading it also
+  requires a persisted header blob, and a blob lives in pages the init fork
+  does not contain. A scan therefore fails cleanly with *"no on-disk snapshot
+  found for index"* and a hint to reindex, rather than failing in the storage
+  layer. `REINDEX INDEX` fully restores it. Logged indexes are unaffected.
 
 ### Upgrade Notes
 
@@ -142,7 +290,14 @@ operators to the existing operator families with `ALTER OPERATOR FAMILY`, so
 indexes built under 3.0.0 pick up regex support immediately and without being
 rebuilt.
 
-Upgrading from 2.x still requires a `REINDEX`; see the 3.0.0 notes below.
+This release ships only the 3.1.0 install script and the 3.0.0 → 3.1.0 upgrade
+script. Upgrading from 2.x therefore goes through a 3.0.0 installation first,
+and still requires a `REINDEX`; see the 3.0.0 notes below.
+
+Rebuilding existing 3.0.0 indexes is not required, but is worth considering on
+tables that were updated before the index was created: the HOT-root fix above
+corrects how rows are indexed at build time, and an index built under an
+earlier version carries whatever that scan recorded until it is rebuilt.
 
 ---
 

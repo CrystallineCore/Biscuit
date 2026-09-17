@@ -71,9 +71,10 @@ is the better choice; the two are complementary.
 
 ## What's new in 3.1.0
 
-Regular-expression support, and a correctness fix for anchored matching. **No
-`REINDEX` is required** — there is no on-disk format change, so existing 3.0.0
-indexes gain regex support as soon as the extension is updated:
+Regular-expression support, a set of correctness fixes that predate this
+release, and a new differential test suite. **No `REINDEX` is required** —
+there is no on-disk format change, so existing 3.0.0 indexes gain regex support
+as soon as the extension is updated:
 
 ```sql
 ALTER EXTENSION biscuit UPDATE TO '3.1.0';
@@ -88,49 +89,46 @@ ALTER EXTENSION biscuit UPDATE TO '3.1.0';
   [Regular expressions](#regular-expressions).
 * **Regexes outside the subset stay correct.** They are not accelerated: the
   key is skipped, the executor rechecks the original regex, and the cost model
-  prices the path out so the planner picks a sequential scan. An unsupported
+  disables the path so the planner picks a sequential scan. An unsupported
   regex costs nothing but the missed optimisation.
+
+### Correctness fixes
+
+All of these predate 3.1.0 and affect `LIKE`/`ILIKE` as much as regex. The
+[changelog](CHANGELOG.md#version-310) has reproductions.
+
+* **Index builds now go through `table_index_build_scan()`** instead of a
+  hand-rolled `SnapshotAny` heap scan. The old scan missed HOT-root mapping,
+  so an index built on a table that had been updated could return rows that do
+  not match the predicate — and `REINDEX` did not repair it. It also ignored
+  partial-index predicates, indexed dead tuples, and reported a row count that
+  skewed planning on nullable columns.
+* **Fixed anchored patterns losing rows after crash recovery.** Rows written
+  since the last checkpoint went missing from whole-string matches, while
+  prefix matches found them normally.
 * **Fixed anchored `LIKE`/`ILIKE` dropping its length constraint** when the
   table contained no value of the pattern's exact length, which caused an
-  anchored pattern to behave as a bare prefix match and return non-matching
-  rows. This predates regex support and affects `LIKE` directly. See the
-  [changelog](CHANGELOG.md#version-310) for the reproduction.
+  anchored pattern to behave as a bare prefix match.
+* **Fixed a use-after-free and double free in the pending-list snapshot**,
+  which typically surfaced as a "double free or corruption" abort during
+  `VACUUM`.
+* **Fixed disabled index paths still being chosen on PostgreSQL 18**, where
+  the planner now compares a disabled-node count ahead of cost, so pricing a
+  path out no longer disabled it.
+* **Fixed unlogged indexes being unreadable after a crash** — `ambuildempty()`
+  wrote nothing, leaving a zero-length index. It now writes a valid empty
+  metapage; see the changelog for the remaining `REINDEX` caveat.
 * **Fixed `-DHAVE_ROARING` being silently dropped from the build**, which
   produced an extension linked against CRoaring but compiled with the fallback
-  bitmap.
+  bitmap. CRoaring is no longer auto-detected — link it with
+  `make WITH_ROARING=1`.
 
----
+### Testing
 
-## What's new in 3.0.0
-
-This is the first release intended for production use, within the workload
-profile described above. It is a **breaking on-disk format change**: indexes
-built under 2.x must be `REINDEX`ed. See
-[Upgrade Notes](CHANGELOG.md#upgrade-notes).
-
-* **WAL-logged, crash-safe on-disk storage.** All index state now lives in the
-  index relation's own pages and is WAL-logged, replacing the external-file
-  snapshot mechanism used in 2.5.0. Exercised against crash recovery,
-  point-in-time recovery to a target timestamp, and physical streaming
-  replication, including index scans served from a hot standby. In the recovery
-  tests the index was created after the base backup, so its state was
-  reconstructed from archived WAL alone.
-* **Cross-backend cache coherency.** Cached index copies are validated against
-  the metapage generation and reloaded when stale, so every backend sees
-  other backends' committed inserts.
-* **Candidate-mask threading across scan keys.** Conjunctive queries evaluate
-  the most selective key first and restrict subsequent keys to the surviving
-  rows, rather than evaluating each key independently. This is a substantial
-  improvement for queries combining an anchored predicate with an unanchored
-  one.
-* **Rewritten cost model.** Costs are derived from pattern shape, column
-  statistics and relation size, so the planner can weigh Biscuit against
-  `pg_trgm` and a sequential scan.
-* **Length-predicate support.** Patterns consisting only of `_` wildcards are
-  recognised as length predicates and answered directly from the length
-  bitmaps.
-* **`biscuit_like_ops` / `biscuit_ilike_ops` operator classes**, to avoid
-  building the case-mode structures a column will never use.
+The previous test scripts are replaced by a differential suite under `tests/`,
+run with `make test`. Every predicate is evaluated both through the index and
+through a sequential scan, and the two must agree on the rows returned, not
+merely on how many. See [Development](#development).
 
 ---
 
@@ -371,18 +369,34 @@ groups, unbounded or optional repetition of a specific character (`a*`, `a+`,
 `{n,m}`, the `\d`/`\w`/`\b` shorthands, backreferences, and embedded-option
 directives. These are answered by a sequential scan.
 
-Two asymmetries are worth knowing:
+Three asymmetries are worth knowing:
 
 * **`~*` sets a recheck, and `!~*` is not accelerated.** `~*` is rewritten onto
   `ILIKE`, but PostgreSQL's regex case folding and `ILIKE`'s `lower()`-based
   folding are different relations. They disagree in both directions on
   characters such as `İ`, `ß` and the `ǅ`/`ǈ`/`ǋ` titlecase family — `ILIKE`
   matching where the regex does not, and vice versa. `~*` is therefore
-  decomposed only for pure-ASCII patterns, which confines the disagreement to
-  the direction where `ILIKE` over-matches, and the executor rechecks to remove
+  decomposed only for pure-ASCII patterns under a collation Biscuit judges
+  safe (next point), which confines the remaining disagreement to the
+  direction where `ILIKE` over-matches, and the executor rechecks to remove
   the surplus. `!~*` is never decomposed: the complement of an over-matching
   set is missing rows, and no recheck can add rows back. `~` and `!~` are
   unaffected and remain exact.
+
+* **`~*`/`!~*` decomposition is refused under a collation it cannot prove
+  safe for the pattern shape.** Nondeterministic collations are refused
+  outright (PostgreSQL's own regex engine does not support them either, so
+  this only guards a future core change). Under an ICU collation, decomposition
+  is additionally refused for any pattern that depends on character
+  *position* — one containing regex `.`, which becomes LIKE's `_` — because
+  ICU's `lower()` maps `İ` (U+0130) to two characters where the database's
+  default/libc `lower()` maps it to one, and that length change can shift a
+  `_`-aligned match out from under a row `~*` would otherwise match. That is
+  an under-match, which a recheck (a pure filter) cannot repair, so the safer
+  choice is to not decompose rather than risk it. A plain `%literal%` shape
+  has no position to shift and stays decomposable under ICU. Deterministic
+  non-ICU collations (the default/libc case above) are unaffected by this
+  point.
 
 * **Unanchored regexes inherit the unanchored `LIKE` cost.** `~ 'abc'` becomes
   `LIKE '%abc%'` and is priced as an infix pattern, which the planner will
@@ -575,48 +589,55 @@ git clone https://github.com/Crystallinecore/biscuit.git
 cd biscuit
 make clean
 CFLAGS="-g -O0 -DDEBUG" make
-make installcheck
 sudo make install
+make test
 ```
 
 ### Testing
 
-```sql
-CREATE EXTENSION biscuit;
-CREATE TABLE test (id SERIAL, name TEXT);
-INSERT INTO test (name) VALUES ('hello'), ('world'), ('test');
-CREATE INDEX idx_test ON test USING biscuit(name);
-EXPLAIN ANALYZE SELECT * FROM test WHERE name LIKE '%ell%';
-```
-
-Changes to the scan or cache paths should be accompanied by a **two-session**
-test: one session queries the index, a second session commits a change, and the
-first session must then observe it. Single-session tests do not exercise cache
-invalidation.
-
-The test suites are:
+The test suite lives in `tests/`, one file per category:
 
 ```bash
-make check-regex    # regex decomposer, no server needed
-make check-sql      # end-to-end regex behaviour against a live server
-make check-stress   # randomised patterns, scan reuse, plan caching, regressions
-make check-all      # all three
+make test                                    # everything except crash recovery
+make test-all                                # including it
+make check-suite CATEGORIES="03_regex 08_unicode"   # selected categories
+make check-wal                               # crash recovery only
 ```
 
-`check-regex` compiles the decomposer against stubs and differentially checks
-every glob it emits against a real regex engine over a few thousand strings, so
-it runs before the extension is buildable. `check-sql` and `check-stress` are
-plain SQL and PL/pgSQL with no psql-specific syntax, so they can also be run
-through any client; each compares index results against sequential-scan results
-for the same predicate and raises an exception on any divergence, so no
-expected-output file has to be maintained.
+Every case is differential. The same predicate is evaluated twice against the
+same rows — once with index paths disabled, so PostgreSQL's own matching over a
+sequential scan acts as the oracle, and once with sequential scans disabled —
+and the two must agree on the row count *and* on a fingerprint of which rows
+came back. Two scans can agree on `COUNT(*)` and still return different rows.
 
-Two further checks are worth running when touching these paths. Compare the
-index and sequential-scan results for the same predicate *within a single
-snapshot* while another session writes concurrently, so that any divergence is
-attributable to the index rather than to timing. And inspect the server log as
-well as client output — a backend can emit diagnostics that never reach the
-client session driving the test.
+Each case also declares whether the index must serve it, must not, or either,
+so a supported pattern that stops being accelerated and an unsupported one that
+starts being served both fail the suite.
+
+The categories are `01_like`, `02_ilike`, `03_regex`, `04_composition`,
+`05_multicolumn`, `06_opclass`, `07_dml_mvcc`, `08_unicode`, `09_wal` and
+`10_stress`. Each file asserts internally and raises on failure, so exit status
+is the result and there is no expected-output file to maintain. None contain
+psql-specific syntax, so they can be run through any client; the only step
+needing a shell is the crash in the middle of `09_wal`.
+
+`make check-wal` **stops and restarts the server** with no clean shutdown, which
+is the point of the test — do not aim it at a cluster you care about. `make
+test` excludes it, and `SKIP_WAL=1` does the same for a direct
+`tests/run_all.sh` invocation.
+
+Standard libpq variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`) apply.
+`PGDATA` is needed only by the crash category and is discovered from the server
+itself when unset.
+
+Changes to the scan or cache paths should also be accompanied by a
+**two-session** test: one session queries the index, a second commits a change,
+and the first must then observe it. Single-session tests do not exercise cache
+invalidation. It is worth comparing index and sequential-scan results for the
+same predicate *within a single snapshot* while another session writes
+concurrently, so that any divergence is attributable to the index rather than
+to timing — and inspecting the server log as well as client output, since a
+backend can emit diagnostics that never reach the client driving the test.
 
 ---
 

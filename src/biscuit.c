@@ -65,7 +65,7 @@
 /*
  * OID of the "biscuit" access method, resolved and cached on first use.
  * Looked up lazily (rather than at _PG_init time) because pg_am may not
- * yet contain our row the moment the library is loaded -- CREATE
+ * yet contain the row the moment the library is loaded -- CREATE
  * EXTENSION populates it via the SQL script, and _PG_init can run
  * before or after that depending on how the library was loaded.
  */
