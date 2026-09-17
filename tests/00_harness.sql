@@ -48,6 +48,11 @@
 
 CREATE EXTENSION IF NOT EXISTS biscuit;
 
+DO $$
+BEGIN
+    RAISE NOTICE 'Biscuit version: %', biscuit_version();
+END $$;
+
 -- The planner's handling of the enable_* GUCs changed in PostgreSQL 18, which
 -- changes what the forced arm of every test means. Reported up front so a run
 -- is self-describing rather than needing the version inferred from its
