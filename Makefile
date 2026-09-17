@@ -150,7 +150,7 @@ check-wal:
 # the suite passes and the run still ends with PGXS's refusal message. Same
 # applies to `installcheck`. Use names pgxs.mk does not own.
 .PHONY: test
-test: check-suite-nowal
+test: check-suite
 
 .PHONY: test-all check-all
 test-all check-all: check-suite
