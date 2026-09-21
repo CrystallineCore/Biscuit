@@ -21,4 +21,6 @@ extern int64 biscuit_getbitmap(IndexScanDesc scan, TIDBitmap *tbm);
 
 extern void  biscuit_endscan(IndexScanDesc scan);
 
+extern bool biscuit_diag_scan_trace;
+
 #endif /* BISCUIT_SCAN_H */
