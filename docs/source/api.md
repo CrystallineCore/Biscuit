@@ -1,1054 +1,358 @@
 # API Reference
 
-Complete reference for Biscuit index SQL API, functions, and operators.
+Reference for the SQL objects, operators and settings provided by Biscuit
+3.1.0.
 
 ---
 
+## Extension
 
-## Extension Management
-
-### CREATE EXTENSION
-
-Creates the Biscuit extension in the current database.
-
-**Syntax**:
 ```sql
-CREATE EXTENSION biscuit [ WITH ] [ SCHEMA schema_name ] [ VERSION version ];
+CREATE EXTENSION biscuit [ WITH ] [ SCHEMA schema_name ] [ VERSION '3.1.0' ];
+ALTER EXTENSION biscuit UPDATE TO '3.1.0';
+DROP EXTENSION biscuit [ CASCADE ];
 ```
 
-**Parameters**:
-- `schema_name` - Schema to install extension (default: current schema)
-- `version` - Specific version to install (default: latest)
-
-**Example**:
-```sql
--- Install in public schema
-CREATE EXTENSION biscuit;
-
--- Install in specific schema
-CREATE EXTENSION biscuit SCHEMA extensions;
-
--- Install specific version
-CREATE EXTENSION biscuit VERSION '1.0';
-```
-
-**Returns**: Nothing on success
-
-**Errors**:
-- `ERROR: extension "biscuit" already exists` - Extension already installed
-- `ERROR: could not open extension control file` - Installation files missing
+* The extension is not relocatable; choose the schema at creation time.
+* `DROP EXTENSION biscuit CASCADE` drops every Biscuit index.
+* Upgrade paths are described in [Installation](installation.md#upgrading).
 
 ---
 
-### DROP EXTENSION
+## Index Access Method
 
-Removes the Biscuit extension from the database.
-
-**Syntax**:
-```sql
-DROP EXTENSION [ IF EXISTS ] biscuit [ CASCADE | RESTRICT ];
-```
-
-**Parameters**:
-- `IF EXISTS` - Don't error if extension doesn't exist
-- `CASCADE` - Drop dependent objects (including indexes)
-- `RESTRICT` - Refuse if dependent objects exist (default)
-
-**Example**:
-```sql
--- Drop extension (fails if indexes exist)
-DROP EXTENSION biscuit;
-
--- Drop extension and all Biscuit indexes
-DROP EXTENSION biscuit CASCADE;
-
--- Drop only if exists
-DROP EXTENSION IF EXISTS biscuit CASCADE;
-```
-
-**Side Effects**:
-- All Biscuit indexes are dropped (with CASCADE)
-- Index cache is cleared
-- Memory is freed
-
----
-
-## Index Operations
-
-### CREATE INDEX
-
-Creates a Biscuit index on one or more columns.
-
-**Syntax**:
-```sql
-CREATE INDEX [ CONCURRENTLY ] [ IF NOT EXISTS ] index_name
-    ON table_name
-    USING biscuit ( column_name [, ...] )
-    [ WITH ( storage_parameter [= value] [, ... ] ) ]
+```text
+CREATE INDEX [ CONCURRENTLY ] [ IF NOT EXISTS ] name
+    ON table
+    USING biscuit ( { column | ( expression ) } [ opclass ] [, ...] )
     [ WHERE predicate ];
 ```
 
-**Parameters**:
-- `index_name` - Name of the index to create
-- `table_name` - Table to index
-- `column_name` - Column(s) to index (1 or more)
-- `CONCURRENTLY` - Build without blocking writes
-- `IF NOT EXISTS` - Don't error if index exists
-- `UNIQUE` - Not supported (will error)
-- `WHERE predicate` - Create partial index
+| Feature | Supported | Notes |
+|---|---|---|
+| Single- and multi-column indexes | Yes | Any subset of columns can be queried |
+| Expression indexes | Yes | The expression must yield `text` or `varchar` |
+| Partial indexes (`WHERE`) | Yes | Built correctly from 3.1.0; rebuild partial indexes created by earlier versions |
+| `CREATE INDEX CONCURRENTLY`, `REINDEX [CONCURRENTLY]` | Yes | |
+| Unlogged tables | Yes | The index must be rebuilt after crash recovery; see [FAQ](faq.md#unlogged-tables) |
+| Index Scan, Bitmap Index Scan | Yes | |
+| `UNIQUE` | No | |
+| `INCLUDE` columns | No | |
+| Ordered or backward scans | No | `ORDER BY` requires a sort |
+| Index-only scans | No | |
+| Parallel index scan | No | Parallel Bitmap Heap Scan above the index is supported |
+| `CLUSTER` using a Biscuit index | No | |
+| Storage parameters (`WITH (...)`) | None defined | |
 
-**Supported Column Types**:
-- `TEXT`, `VARCHAR`, `CHAR` - Direct indexing
+### Supported column types
 
-**Examples**:
+`text` and `varchar` columns are indexed directly; `varchar` is coerced to
+`text` by the operator classes.
+
+Other types are indexed through an expression that produces `text`, and
+queries must use the same expression:
 
 ```sql
--- Single column index
-CREATE INDEX idx_products_name 
-ON products USING biscuit (name);
+-- char(n): index and query the text cast
+CREATE INDEX idx_code ON items USING biscuit ((code::text));
+SELECT * FROM items WHERE code::text LIKE 'AB%';
 
--- Multi-column index
-CREATE INDEX idx_products_search 
-ON products USING biscuit (name, sku, category);
-
--- Concurrent build (non-blocking)
-CREATE INDEX CONCURRENTLY idx_products_name 
-ON products USING biscuit (name);
-
--- Partial index (filtered)
-CREATE INDEX idx_active_products 
-ON products USING biscuit (name)
-WHERE status = 'active';
+-- non-text types whose text form is immutable, such as integers
+CREATE INDEX idx_order_no ON orders USING biscuit ((order_no::text));
+SELECT * FROM orders WHERE order_no::text LIKE '2024%';
 ```
+
+Index expressions must be immutable. Casts whose text output depends on
+session settings, such as `timestamptz::text` (which depends on `TimeZone` and
+`DateStyle`), cannot be used directly; use an immutable formatting expression
+instead.
+
+Casting `char(n)` to `text` removes trailing padding, so patterns are matched
+against the unpadded value.
+
+Attempting to index an unsupported type directly fails with an error such as
+`data type integer has no default operator class for access method "biscuit"`.
+
+### Operator classes
+
+| Operator class | Default | Structures built | Operators |
+|---|---|---|---|
+| `biscuit_ops` | Yes | Case-sensitive and case-insensitive | All eight |
+| `biscuit_like_ops` | No | Case-sensitive only | `~~`, `!~~`, `~`, `!~` |
+| `biscuit_ilike_ops` | No | Case-insensitive only | `~~*`, `!~~*`, `~*`, `!~*` |
+
+Each operator class has its own operator family, so the planner does not
+consider an index for an operator its class lacks. The single-mode classes
+roughly halve build time and memory for that column compared with
+`biscuit_ops`. The operator class is chosen per column:
+
+```sql
+CREATE INDEX idx ON t USING biscuit (a biscuit_like_ops, b biscuit_ilike_ops, c);
+```
+
+### Operators and strategies
+
+| Strategy | Operator | SQL form | Served by the index | Recheck |
+|---|---|---|---|---|
+| 1 | `~~` | `LIKE` | Yes | No |
+| 2 | `!~~` | `NOT LIKE` | Yes | No |
+| 3 | `~~*` | `ILIKE` | Yes | No |
+| 4 | `!~~*` | `NOT ILIKE` | Yes | No |
+| 5 | `~` | regex match | Rewritable subset only | No |
+| 6 | `!~` | regex non-match | Rewritable subset only | No |
+| 7 | `~*` | case-insensitive regex match | Rewritable, pure-ASCII subset, subject to collation | Yes |
+| 8 | `!~*` | case-insensitive regex non-match | Never (planner uses another path) | — |
+
+All operators take `(text, text)`. The pattern syntax is described in
+[Pattern Syntax](patterns.md) and [Regular Expressions](regex.md).
 
 ---
 
-### DROP INDEX
+## Functions
 
-Removes a Biscuit index.
+### `biscuit_version`
 
-**Syntax**:
-```sql
-DROP INDEX [ CONCURRENTLY ] [ IF EXISTS ] index_name [, ...] [ CASCADE | RESTRICT ];
-```
-
-**Example**:
-```sql
--- Drop index
-DROP INDEX idx_products_name;
-
--- Drop without blocking
-DROP INDEX CONCURRENTLY idx_products_name;
-
--- Drop multiple indexes
-DROP INDEX idx_products_name, idx_products_sku;
-```
-
----
-
-### REINDEX
-
-Rebuilds a Biscuit index.
-
-**Syntax**:
-```text
-REINDEX [ ( option [, ...] ) ] { INDEX | TABLE | SCHEMA | DATABASE | SYSTEM } name;
-```
-
-**Example**:
-```sql
--- Rebuild single index
-REINDEX INDEX idx_products_name;
-
--- Rebuild all indexes on table
-REINDEX TABLE products;
-
--- Rebuild concurrently (PG14+)
-REINDEX INDEX CONCURRENTLY idx_products_name;
-```
-
-**When to Reindex**:
-- After massive data changes (>50% rows)
-- Tombstone count exceeds 5000
-- Performance degradation detected
-- After pg_upgrade
-
----
-
-## Query Operators
-
-### LIKE Operator
-
-Pattern matching operator supported by Biscuit indexes.
-
-**Syntax**:
-```sql
-column_name LIKE pattern [ ESCAPE escape_character ]
-```
-
-**Pattern Syntax**:
-- `%` - Matches zero or more characters
-- `_` - Matches exactly one character
-- Other characters match themselves
-- Case-sensitive matching
-
-**Examples**:
-
-```sql
--- Prefix match
-SELECT * FROM products WHERE name LIKE 'Wireless%';
-
--- Suffix match
-SELECT * FROM products WHERE name LIKE '%Mouse';
-
--- Substring match
-SELECT * FROM products WHERE name LIKE '%gaming%';
-
--- Underscore wildcard
-SELECT * FROM products WHERE sku LIKE 'PROD-____-2024';
-
--- Exact match
-SELECT * FROM products WHERE name LIKE 'Wireless Mouse';
-
--- Complex pattern
-SELECT * FROM products WHERE name LIKE 'Wireless%RGB%Gaming%';
-
--- With ESCAPE character
-SELECT * FROM products WHERE name LIKE 'Price: 100\%' ESCAPE '\';
-```
-
-**Performance**: See [Pattern Syntax Guide](patterns.md) for optimization details
-
----
-
-### NOT LIKE Operator
-
-Negated pattern matching.
-
-**Syntax**:
-```sql
-column_name NOT LIKE pattern
-```
-
-**Example**:
-```sql
--- Find products NOT containing "test"
-SELECT * FROM products WHERE name NOT LIKE '%test%';
-```
-
----
-
-### ILIKE Operator
-
-Case-insensitive pattern matching is supported by the default `biscuit_ops` operator class, and by `biscuit_ilike_ops` for ILIKE-only columns
-
-**Workaround**:
-```sql
--- Create index
-CREATE INDEX idx_products
-ON products USING biscuit (name);
-
--- Query 
-SELECT * FROM products WHERE name ILIKE '%wireless%';
-```
-
----
-
-### NOT ILIKE Operator
-
-Case-insensitive pattern matching is supported by the default `biscuit_ops` operator class, and by `biscuit_ilike_ops` for ILIKE-only columns
-
-**Workaround**:
-```sql
--- Create index
-CREATE INDEX idx_products
-ON products USING biscuit (name);
-
--- Query 
-SELECT * FROM products WHERE name NOT ILIKE '%wireless%';
-```
-
----
-
-### Multi-Column Queries
-
-Query multiple columns with automatic optimization.
-
-**Syntax**:
-```sql
-WHERE column1 LIKE pattern1
-  AND column2 LIKE pattern2
-  AND column3 LIKE pattern3;
-```
-
-**Example**:
-```sql
--- Automatic predicate reordering
-SELECT * FROM products 
-WHERE name LIKE '%laptop%'          -- Priority: 50 (substring)
-  AND brand LIKE 'Dell%'            -- Priority: 20 (prefix)
-  AND category LIKE 'Computer%';    -- Priority: 21 (prefix)
-
--- Execution order: brand → category → name
-```
-
-**Performance**: Biscuit automatically reorders predicates by selectivity for optimal performance.
-
----
-
-## Build Diagnostic Functions
-
-### biscuit_has_roaring()
-
-Checks if the extension was compiled with CRoaring bitmap support.
-
-**Syntax**:
-```sql
-biscuit_has_roaring() RETURNS boolean
-```
-
-**Parameters**: None
-
-**Returns**: `true` if compiled with Roaring support, `false` otherwise
-
-**Example**:
-```sql
--- Check Roaring support
-SELECT biscuit_has_roaring();
-
--- Conditional query
-SELECT 
-    CASE 
-        WHEN biscuit_has_roaring() THEN 'Optimal performance'
-        ELSE 'Using fallback implementation'
-    END as performance_status;
-```
-
-**Performance Impact**:
-- `true`: High-performance CRoaring bitmaps 
-- `false`: Fallback implementation with high memory footprint
-
-**When to Rebuild**:
-If this returns `false`, install CRoaring and rebuild:
-```bash
-# Debian/Ubuntu
-sudo apt-get install libroaring-dev
-make clean && make && sudo make install
-
-# macOS
-brew install croaring
-make clean && make && sudo make install
-```
-
----
-
-### biscuit_version()
-
-Returns the Biscuit extension version string.
-
-**Syntax**:
 ```sql
 biscuit_version() RETURNS text
 ```
 
-**Parameters**: None
+Version of the loaded shared library, for example `3.1.0`. Compare with
+`pg_extension.extversion` to detect a library/catalog mismatch after an
+upgrade.
 
-**Returns**: Version string (e.g., `"1.0.0"`)
+### `biscuit_has_roaring`
 
-**Example**:
 ```sql
--- Get version
-SELECT biscuit_version();
-
--- Check minimum version
-SELECT biscuit_version() >= '1.0.0' as meets_requirement;
+biscuit_has_roaring() RETURNS boolean
 ```
 
----
+`true` if the library was compiled with CRoaring (`make WITH_ROARING=1`),
+`false` if it uses the fallback bitmap implementation.
 
-### biscuit_roaring_version()
+### `biscuit_roaring_version`
 
-Returns the CRoaring library version if available.
-
-**Syntax**:
 ```sql
 biscuit_roaring_version() RETURNS text
 ```
 
-**Parameters**: None
+CRoaring version the library was compiled against (for example `2.0.4`), or
+`NULL` without CRoaring.
 
-**Returns**: 
-- Roaring version string (e.g., `"2.0.4"`) if compiled with Roaring
-- `NULL` if not compiled with Roaring support
+### `biscuit_build_info`
 
-**Example**:
 ```sql
--- Get Roaring version
-SELECT biscuit_roaring_version();
-
--- Check if Roaring is available
-SELECT biscuit_roaring_version() IS NOT NULL as has_roaring;
-
--- Full version report
-SELECT 
-    biscuit_version() as extension_version,
-    biscuit_roaring_version() as roaring_version,
-    CASE 
-        WHEN biscuit_roaring_version() IS NOT NULL THEN 'Optimal'
-        ELSE 'Fallback'
-    END as performance_mode;
+biscuit_build_info() RETURNS TABLE (feature text, enabled boolean, description text)
 ```
 
-**Output**:
-```
- extension_version | roaring_version | performance_mode
--------------------+-----------------+------------------
- 2.1.5            | 2.0.4           | Optimal
-```
+Returns two rows: `CRoaring Bitmaps` (whether CRoaring is compiled in) and
+`PostgreSQL` (the server version the library was compiled for).
 
----
-
-### biscuit_build_info()
-
-Returns detailed build-time configuration information.
-
-**Syntax**:
-```sql
-biscuit_build_info() RETURNS TABLE (
-    feature text,
-    enabled boolean,
-    description text
-)
+```text
+     feature      | enabled |                 description
+------------------+---------+---------------------------------------------
+ CRoaring Bitmaps | t       | High-performance bitmap operations enabled
+ PostgreSQL       | t       | Compiled for PostgreSQL 17.6
 ```
 
-**Parameters**: None
+### `biscuit_build_info_json`
 
-**Returns**: Table with build configuration details
-
-**Columns**:
-- `feature` - Feature or library name
-- `enabled` - Whether the feature is enabled
-- `description` - Detailed description
-
-**Example**:
-```sql
--- Get all build information
-SELECT * FROM biscuit_build_info();
-
--- Check specific features
-SELECT feature, enabled 
-FROM biscuit_build_info() 
-WHERE feature = 'CRoaring Bitmaps';
-
--- Filter enabled features only
-SELECT feature, description 
-FROM biscuit_build_info() 
-WHERE enabled = true;
-```
-
-**Output**:
-```
-      feature       | enabled |              description
---------------------+---------+---------------------------------------
- CRoaring Bitmaps   | t       | High-performance bitmap operations...
- PostgreSQL         | t       | Compiled for PostgreSQL 16.1
-```
-
----
-
-### biscuit_build_info_json()
-
-Returns build configuration as a JSON string for automation and scripting.
-
-**Syntax**:
 ```sql
 biscuit_build_info_json() RETURNS text
 ```
 
-**Parameters**: None
+The same information as a JSON string:
 
-**Returns**: JSON-formatted string with build information
-
-**Example**:
-```sql
--- Get JSON build info
-SELECT biscuit_build_info_json();
-
--- Parse as JSON
-SELECT biscuit_build_info_json()::json;
-
--- Extract specific fields
-SELECT 
-    (biscuit_build_info_json()::json)->>'version' as version,
-    (biscuit_build_info_json()::json)->>'roaring_enabled' as roaring,
-    (biscuit_build_info_json()::json)->>'postgres_version' as pg_version;
-```
-
-**Output Format**:
 ```json
-{
-  "version": "1.0.0",
-  "roaring_enabled": true,
-  "roaring_version": "2.0.4",
-  "postgres_version": "16.1",
-  "build_date": "Dec 16 2025 10:30:00"
-}
+{"version": "3.1.0", "roaring_enabled": true, "roaring_version": "2.0.4", "postgres_version": "17.6"}
 ```
 
-**Use Cases**:
-- CI/CD validation scripts
-- Automated deployment checks
-- Monitoring systems
-- Version compatibility verification
+`roaring_version` is omitted when CRoaring is not compiled in.
 
-**Shell Script Example**:
-```bash
-#!/bin/bash
-# Check if Roaring is enabled
-ROARING=$(psql -t -c "SELECT (biscuit_build_info_json()::json)->>'roaring_enabled';")
+### `biscuit_check_config`
 
-if [ "$ROARING" != "true" ]; then
-    echo "Warning: Roaring not enabled. Installing CRoaring..."
-    sudo apt-get install libroaring-dev
-    make clean && make && sudo make install
-fi
-```
-
----
-
-### biscuit_check_config()
-
-Performs a comprehensive configuration health check and provides recommendations.
-
-**Syntax**:
 ```sql
-biscuit_check_config() RETURNS TABLE (
-    check_name text,
-    status text,
-    recommendation text
-)
+biscuit_check_config() RETURNS TABLE (check_name text, status text, recommendation text)
 ```
 
-**Parameters**: None
+Returns three rows: `Roaring Support`, `Extension Version` and
+`Active Indexes` (the number of Biscuit indexes in the current database).
 
-**Returns**: Table with configuration checks and recommendations
+### `biscuit_index_stats`
 
-**Columns**:
-- `check_name` - Name of the configuration check
-- `status` - Current status with visual indicators
-- `recommendation` - Action recommendation
-
-**Example**:
 ```sql
--- Run full configuration check
-SELECT * FROM biscuit_check_config();
-
--- Check for issues
-SELECT * FROM biscuit_check_config() 
-WHERE status NOT LIKE '✓%';
-
--- Save check results
-CREATE TABLE biscuit_health_log AS
-SELECT now() as checked_at, * 
-FROM biscuit_check_config();
+biscuit_index_stats(index_oid oid) RETURNS text
 ```
 
-**Output**:
-```
-   check_name     |      status       |                recommendation
-------------------+-------------------+----------------------------------------------
- Roaring Support  | ✓ Enabled         | Optimal configuration (v2.0.4)
- Extension Ver... | 1.0.0             | Current version
- Active Indexes   | 5                 | Indexes are active
-```
+A text report for one index. A `regclass` can be passed directly:
 
-
-
-### biscuit_index_stats()
-
-Returns detailed statistics about a Biscuit index.
-
-**Syntax**:
 ```sql
-biscuit_index_stats(index_oid regclass) RETURNS text
-```
-
-**Parameters**:
-- `index_oid` - OID or name of the Biscuit index
-
-**Returns**: Multi-line text report with statistics
-
-**Example**:
-```text
--- Get statistics for an index
 SELECT biscuit_index_stats('idx_products_name'::regclass);
-
--- With formatted output
-\x
-SELECT biscuit_index_stats('idx_products_name'::regclass);
-\x
 ```
 
-**Output Format**:
-```
-Biscuit Index Statistics (FULLY OPTIMIZED)
-==========================================
-Index: idx_products_name
-Active records: 50000
-Total slots: 50245
-Free slots: 245
-Tombstones: 0
-Max length: 128
-------------------------
-CRUD Statistics:
-  Inserts: 50245
-  Updates: 1205
-  Deletes: 245
-------------------------
-Active Optimizations:
-  ✓ 1. Skip wildcard intersections
-  ✓ 2. Early termination on empty
-  [... 12 optimizations listed ...]
-```
+Calling it loads the index into the current session if it is not already
+loaded. Report fields:
 
-**Metrics Explained**:
+| Field | Meaning |
+|---|---|
+| Active records | Slots holding a value that is not tombstoned |
+| Total slots | Allocated row slots, including free ones |
+| Free slots | Slots released by `VACUUM` and available for reuse |
+| Tombstones | Slots removed by `VACUUM` whose bitmap entries have not yet been purged; purged in batches of 1,000 |
+| Max length | Longest indexed value, in characters |
+| Inserts | Rows added through index insertion since the index was built (rows present at build time are not counted) |
+| Updates | Insertions that replaced an existing entry for the same heap TID |
+| Deletes | Entries removed by `VACUUM` |
+| Drain threshold (bytes/structure) | Stored metapage value (default 65536). Retained from the 3.0.0 layout; compaction is governed by `biscuit.delta_compaction_slots` |
+| Total pending bytes | Not maintained on the write path in 3.1.0 and normally reads 0; do not use it as a measure of undrained writes |
+| Lifetime drains performed | Number of times the pending log has been compacted or drained |
+| Active Optimizations | A fixed descriptive list; it does not vary between indexes |
 
-| Metric | Description | Ideal Value |
-|--------|-------------|-------------|
-| Active records | Current valid records | = table row count |
-| Total slots | Allocated memory slots | ≥ active records |
-| Free slots | Reusable slots from deletes | < 1000 |
-| Tombstones | Deleted but not cleaned | < 1000 |
-| Inserts | Total insert operations | Monotonic increase |
-| Updates | Total update operations | - |
-| Deletes | Total delete operations | - |
-
-
-
----
-
-### biscuit_index_memory_size()
-
-Returns the in-memory footprint of a Biscuit index in bytes.
-
-**Syntax**:
+### `biscuit_pending_list_stats`
 
 ```sql
-biscuit_index_memory_size(index_oid oid) RETURNS bigint
+biscuit_pending_list_stats(index_oid oid,
+    OUT pending_list_limit  int,
+    OUT total_pending_bytes bigint,
+    OUT total_drains        bigint)
+```
+
+The pending-list fields of `biscuit_index_stats()` as columns. The same
+caveats apply: `total_drains` is maintained; `pending_list_limit` and
+`total_pending_bytes` are retained for compatibility. Does not load the index
+into memory.
+
+```sql
+SELECT * FROM biscuit_pending_list_stats('idx_products_name'::regclass);
+```
+
+### `biscuit_index_memory_size`
+
+```sql
+biscuit_index_memory_size(index_oid oid)  RETURNS bigint
 biscuit_index_memory_size(index_name text) RETURNS bigint
 ```
 
-**Parameters**:
+Size in bytes of the current session's in-memory copy of the index: strings,
+bitmaps and bookkeeping arrays. Loads the index into the session if needed.
+The text form resolves the name with `regclass` rules, so schema-qualify it if
+the index is not on the search path.
 
-* `index_oid` — OID of the Biscuit index
-* `index_name` — Name of the Biscuit index
-
-**Returns**:
-Memory usage in bytes for the specified Biscuit index.
-
-**Example**:
-
-```sql
--- Get memory usage using index OID
-SELECT biscuit_index_memory_size('idx_products_name'::regclass::oid);
-
--- Get memory usage using index name
-SELECT biscuit_index_memory_size('idx_products_name');
-```
-
----
-
-### biscuit_size_pretty()
-
-Returns a human-readable representation of the in-memory footprint of a Biscuit index.
-
-**Syntax**:
+### `biscuit_size_pretty`
 
 ```sql
 biscuit_size_pretty(index_name text) RETURNS text
 ```
 
-**Parameters**:
+`biscuit_index_memory_size()` formatted for display, for example
+`128.00 MB (134217728 bytes)`.
 
-* `index_name` — Name of the Biscuit index
+### Internal functions
 
-**Returns**:
-Formatted memory usage (bytes, KB, MB, or GB).
-
-**Example**:
-
-```sql
-SELECT biscuit_size_pretty('idx_products_name');
-```
-
-**Output Format**:
-
-```
-128 MB (134217728 bytes)
-```
-
+`biscuit_handler(internal)` is the access-method handler and
+`biscuit_like_support(internal)` is registered as operator-class support
+function 1. Neither is intended to be called directly.
 
 ---
 
-## Diagnostic Views
+## Views
 
-### biscuit_status
+### `biscuit_indexes`
 
-Quick overview of extension status and configuration.
+One row per Biscuit index in the current database.
 
-**Definition**:
-```sql
-biscuit_status
-```
+| Column | Description |
+|---|---|
+| `schema_name`, `index_name`, `table_name` | Names |
+| `num_columns` | Number of index columns |
+| `columns` | Column name for a single-column index, `(expression)` for a single expression, or `N columns` |
+| `index_size` | On-disk size (`pg_relation_size`), formatted |
+| `index_oid` | OID of the index |
 
-**Columns**:
-- `version` - Extension version
-- `roaring_enabled` - Whether CRoaring is enabled
-- `bitmap_implementation` - Current bitmap backend
-- `total_indexes` - Number of active Biscuit indexes
-- `total_index_size` - Combined size of all indexes
+### `biscuit_indexes_detailed`
 
-**Example**:
-```sql
--- View current status
-SELECT * FROM biscuit_status;
+As `biscuit_indexes`, with `index_definition` (`pg_get_indexdef()`) in place
+of `columns`. Useful for recording definitions before a rebuild.
 
--- Monitor status changes
-CREATE TABLE biscuit_status_history AS
-SELECT now() as timestamp, * FROM biscuit_status;
-```
+### `biscuit_operators`
 
-**Output**:
-```
- version | roaring_enabled | bitmap_implementation  | total_indexes | total_index_size
----------+-----------------+------------------------+---------------+------------------
- 1.0.0   | t               | Optimal (CRoaring)     | 5             | 245 MB
-```
+Operators registered for Biscuit, one row per operator family and strategy:
+`opfamily`, `strategy`, `operator`, `left_type`, `right_type`, `description`
+and `coverage` (`fully supported` for strategies 1–4, or a note that only the
+rewritable regex subset is accelerated for 5–8).
 
----
+### `biscuit_status`
 
-### biscuit_memory_usage
+A single row: `version`, `roaring_enabled`, `bitmap_implementation`,
+`total_indexes` and `total_index_size` (on-disk, formatted).
 
-Displays memory and disk usage for all Biscuit indexes in the current database.
+### `biscuit_memory_usage`
 
-**Definition**:
+One row per Biscuit index: `schemaname`, `tablename`, `indexname`, `bytes`
+(in-memory size), `human_readable`, `disk_size`, `pending_bytes` and
+`pending_pretty`. Querying it loads every listed index into the current
+session.
 
-```sql
-biscuit_memory_usage
-```
+### `biscuit_pending_list_usage`
 
-**Columns**:
+One row per Biscuit index with the output of `biscuit_pending_list_stats()`:
+`schema_name`, `index_name`, `table_name`, `pending_list_limit`,
+`total_pending_bytes`, `total_pending_pretty`, `total_drains` and `index_oid`.
 
-* `schemaname` — Schema containing the index
-* `tablename` — Table on which the index is defined
-* `indexname` — Name of the Biscuit index
-* `bytes` — In-memory size (bytes)
-* `human_readable` — Formatted memory usage
-* `disk_size` — On-disk size (`pg_relation_size`)
+### `biscuit_version_table`
 
-**Example**:
-
-```sql
--- List all Biscuit indexes with memory usage
-SELECT * FROM biscuit_memory_usage;
-```
-
-**Usage**:
-
-```sql
--- Identify largest Biscuit indexes in memory
-SELECT
-    indexname,
-    human_readable
-FROM biscuit_memory_usage
-ORDER BY bytes DESC
-LIMIT 5;
-```
-
-
-
-### Notes
-
-* `pg_relation_size()` and `pg_size_pretty()` report **only the on-disk footprint** of a Biscuit index.
-* Biscuit maintains its primary data structures in memory for performance; disk size may significantly underrepresent total runtime usage.
-* Reported values reflect the current in-memory state and may change over time.
-
+A table created by the extension recording the version history descriptions
+(`version`, `installed_at`, `description`).
 
 ---
 
-## Configuration Parameters
+## Settings
 
-### Server Parameters
+| Setting | Type | Default | Who can set it | Description |
+|---|---|---|---|---|
+| `biscuit.delta_compaction_slots` | integer (≥ 1) | `20000` | Superuser | Pending-log rows tolerated before a writing backend compacts the log |
+| `biscuit.diag_scan_trace` | boolean | `off` | Any user | Per-scan diagnostic output as `WARNING`/`LOG` messages; for troubleshooting only |
 
-These PostgreSQL parameters affect Biscuit performance:
-
-#### shared_buffers
-
-**Description**: Memory for caching index data
-
-**Syntax**:
-```sql
--- In postgresql.conf
-shared_buffers = '4GB'
-
--- Or per session
-SET shared_buffers = '4GB';  -- Requires restart
-```
-
-**Recommendation**: 25% of system RAM
-
----
-
-#### work_mem
-
-**Description**: Memory for sorting and bitmap operations
-
-**Syntax**:
-```sql
--- In postgresql.conf
-work_mem = '256MB'
-
--- Or per session
-SET work_mem = '256MB';
-```
-
-**Recommendation**: 
-- Small queries: 64MB
-- Medium queries: 256MB
-- Large queries: 512MB-1GB
-
----
-
-#### maintenance_work_mem
-
-**Description**: Memory for index building
-
-**Syntax**:
-```sql
--- In postgresql.conf
-maintenance_work_mem = '1GB'
-
--- Or for current session
-SET maintenance_work_mem = '1GB';
-```
-
-
----
-
-#### effective_cache_size
-
-**Description**: Hint to planner about available cache
-
-**Syntax**:
-```sql
--- In postgresql.conf
-effective_cache_size = '12GB'
-```
-
----
-
-#### enable_seqscan
-
-**Description**: Allow/disallow sequential scans
-
-**Syntax**:
-```sql
--- Disable sequential scans (testing only!)
-SET enable_seqscan = off;
-
--- Re-enable
-SET enable_seqscan = on;
-```
-
-**Use Case**: Force index usage during testing
-
----
-
-#### max_parallel_workers_per_gather
-
-**Description**: Workers for parallel bitmap scans
-
-**Syntax**:
-```sql
--- In postgresql.conf
-max_parallel_workers_per_gather = 4
-
--- Or per session
-SET max_parallel_workers_per_gather = 4;
-```
-
-**Recommendation**: 2-4 for most workloads
-
----
-
-### Session Parameters
-
-Parameters you can set per connection:
-
-```text
--- Increase work memory for this session
-SET work_mem = '512MB';
-
--- Enable query timing
-\timing on
-
--- Show query plans
-SET client_min_messages = INFO;
-
--- Force index usage (testing)
-SET enable_seqscan = off;
-
--- Enable parallel queries
-SET max_parallel_workers_per_gather = 4;
-
--- Reset all to defaults
-RESET ALL;
-```
-
-
----
-
-## System Views
-
-### pg_index
-
-Check if an index is a Biscuit index:
-
-```sql
-SELECT 
-    indexrelid::regclass as index_name,
-    indrelid::regclass as table_name,
-    indnatts as num_columns
-FROM pg_index
-WHERE indexrelid::regclass::text LIKE '%biscuit%';
-```
-
----
-
-### pg_stat_user_indexes
-
-Monitor index usage:
-
-```sql
-SELECT 
-    indexrelname,
-    idx_scan,
-    idx_tup_read,
-    idx_tup_fetch,
-    pg_size_pretty(pg_relation_size(indexrelid)) as size
-FROM pg_stat_user_indexes
-WHERE indexrelname LIKE '%biscuit%';
-```
-
----
-
-### pg_indexes
-
-View index definitions:
-
-```sql
-SELECT 
-    schemaname,
-    tablename,
-    indexname,
-    indexdef
-FROM pg_indexes
-WHERE indexdef LIKE '%biscuit%';
-```
+Other names under the `biscuit.` prefix are reserved. See
+[Performance and Operations](performance.md#settings).
 
 ---
 
 ## Error Messages
 
-Common errors and solutions:
+### `access method "biscuit" does not exist`
 
-### ERROR: access method "biscuit" does not exist
+The extension has not been created in this database. Run
+`CREATE EXTENSION biscuit;`.
 
-**Cause**: Extension not installed
+### `data type ... has no default operator class for access method "biscuit"`
 
-**Solution**:
-```sql
-CREATE EXTENSION biscuit;
-```
+The column type is not `text` or `varchar`. Index an expression that casts to
+`text` (see [Supported column types](#supported-column-types)).
 
----
+### `biscuit: no on-disk snapshot found for index "..."`
 
-### ERROR: data type X is not supported for biscuit index
+The index has no persisted state to load. The expected case is an index on an
+unlogged table after crash recovery. `REINDEX INDEX` restores it. In other
+circumstances the index may be damaged; rebuild it and report the occurrence.
 
-**Cause**: Attempting to index unsupported type
+### `biscuit: index scan could not obtain a stable view of index "..."`
 
-**Solution**: Cast to TEXT or use expression index
-```sql
-CREATE INDEX idx ON table1 USING biscuit (column::TEXT);
-```
+SQLSTATE `40001`. The pending log was compacted by other backends repeatedly
+while this scan was running. Retry the statement. If it recurs, check whether
+`biscuit.delta_compaction_slots` is set very low for the write rate.
 
----
+### `biscuit: could not obtain a stable read of index "..."` / `blob chain ... was concurrently compacted`
 
-### ERROR: could not open relation with OID
+Transient read conflicts with a concurrent compaction. Retry the statement.
 
-**Cause**: A stale reference to a dropped or rebuilt index. Index state itself
-is WAL-logged and recovered by ordinary crash recovery, so this is not expected
-as a consequence of an unclean shutdown.
+### `biscuit: this index was not built with LIKE support` (or `ILIKE support`)
 
-**Solution**:
-```sql
-REINDEX INDEX idx_name;
-```
+The operator class of the index (or column) does not include the requested
+case mode. The planner does not normally route such queries to the index, so
+this error indicates an unexpected plan; please report it with the query and
+index definition.
 
----
+### Messages mentioning corruption, truncation or an unrecognized metapage
 
-### WARNING: Biscuit: Index cache miss
-
-**Cause**: Normal - index loaded on first use
-
-**Solution**: No action needed (informational only)
-
-
----
-
-### ISSUE: biscuit_has_roaring() returns false
-
-**Symptoms**:
-```sql
-SELECT biscuit_has_roaring();
--- Returns: false
-```
-
-**Diagnosis**:
-```sql
-SELECT * FROM biscuit_check_config();
--- Shows: Roaring Support | ✗ Disabled | Install CRoaring...
-```
-
-**Solution**:
-```bash
-# Install CRoaring development library
-# Debian/Ubuntu
-sudo apt-get update
-sudo apt-get install libroaring-dev
-
-# Verify installation
-dpkg -L libroaring-dev | grep roaring.h
-
-# Rebuild extension
-cd /path/to/biscuit
-make clean
-make
-sudo make install
-
-# Restart PostgreSQL
-sudo systemctl restart postgresql
-
-# Verify in PostgreSQL
-psql -c "DROP EXTENSION biscuit CASCADE;"
-psql -c "CREATE EXTENSION biscuit;"
-psql -c "SELECT biscuit_has_roaring();"
--- Should return: true
-```
-
-## Next Steps
-
-- Learn how it works: [Architecture Guide](architecture.md)
--  Master patterns: [Pattern Syntax](patterns.md)
--  Optimize queries: [Performance Tuning](performance.md)
--  Get help: [FAQ](faq.md)
+These carry the hint `consider running REINDEX`. Rebuild the index and report
+the occurrence with the server log.

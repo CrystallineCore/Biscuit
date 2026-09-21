@@ -1,74 +1,78 @@
+# Benchmark Environment
 
-# Benchmark Environment 
-
-This section documents the hardware and system environment used to run all benchmarks in this guide. 
-## System Overview
-
-| Component              | Details                                                                                    |
-| ---------------------- | ------------------------------------------------------------------------------------------ |
-| **CPU**                | AMD Ryzen 7 5700U with Radeon Graphics (8 cores / 16 threads, up to 4.37 GHz, Zen 2)       |
-| **CPU Architecture**   | x86_64 (supports AVX, AVX2, FMA, BMI1/2, SHA-NI, AES-NI)                                   |
-| **Memory (RAM)**       | 16 GB total (14 GiB usable)                     |
-| **Storage**            | WD PC SN560 NVMe SSD — 1 TB (PCIe NVMe, non-rotational)                                    |
-| **Operating System**   | Ubuntu 24.04.2 LTS (Noble Numbat), 64-bit                                              |
-| **Kernel Version**     | Linux 6.14.0-36-generic (PREEMPT_DYNAMIC)                                              |
-| **PostgreSQL Version** | 16.10 (Ubuntu 16.10-0ubuntu0.24.04.1) |
-| **Extensions Used**    | `biscuit` , `pg_trgm`       |
+This page describes the machine used for the historical v2.1.3 benchmarks
+([fallback bitmaps](benchmark.md) and [CRoaring](benchmark_roaring.md)). It
+is a single laptop-class system; results on other hardware will differ in
+absolute terms and may differ in relative terms.
 
 ---
 
-## Benchmark Configuration
+## System
 
-| Setting                  | Value                     | Notes                                                       |
-| ------------------------ | ------------------------- | ----------------------------------------------------------- |
-| **shared_buffers**       | 16384 → **16 MB**         | Very small (default on many distros)                        |
-| **work_mem**             | 4096 → **4 MB per query** | Affects sort/hash operations                                |
-| **maintenance_work_mem** | 65536 → **64 MB**         | Used for CREATE INDEX                                       |
-| **effective_cache_size** | 524288 → **512 MB**       | Planner estimate of OS page cache                           |
-| **synchronous_commit**   | **ON**                    | Safer but slightly slower writes                            |
-| **wal_level**            | **replica**               | Allows logical/physical replication (default for modern PG) |
-
-
----
-
-## Benchmark Methodology
-
-* Queries were executed with `\timing on`.
-* `EXPLAIN ANALYZE` is used for detailed plan inspection.
+| Component | Details |
+|---|---|
+| CPU | AMD Ryzen 7 5700U (8 cores / 16 threads, up to 4.37 GHz, Zen 2) |
+| Memory | 16 GB (14 GiB usable) |
+| Storage | WD PC SN560 NVMe SSD, 1 TB |
+| Operating system | Ubuntu 24.04.2 LTS, 64-bit |
+| Kernel | Linux 6.14.0-36-generic |
+| PostgreSQL | 16.x from the Ubuntu packages (the benchmark reports record 16.11) |
+| Extensions | `biscuit` 2.1.3, `pg_trgm` |
 
 ---
 
-## Reproducibility Instructions
+## Server Configuration
 
-To reproduce identical performance:
+Server-level settings (largely distribution defaults):
 
-1. Restart PostgreSQL before cold-cache benchmarks:
+| Setting | Value |
+|---|---|
+| `shared_buffers` | 16 MB |
+| `work_mem` | 4 MB (raised to 256 MB in the benchmark sessions) |
+| `maintenance_work_mem` | 64 MB |
+| `effective_cache_size` | 512 MB |
+| `synchronous_commit` | on |
+| `wal_level` | replica |
 
-   ```bash
-   sudo systemctl restart postgresql
-   ```
-2. Ensure OS disk cache is cleared (optional, requires sudo):
-
-   ```bash
-   sync; echo 3 | sudo tee /proc/sys/vm/drop_caches
-   ```
-3. Disable power-saving CPU governors:
-
-   ```bash
-   sudo cpupower frequency-set -g performance
-   ```
-4. Run each query **three times**, discard the first warm run, take the median.
+The benchmark sessions additionally set `random_page_cost = 1.1`,
+`enable_seqscan = off` and `enable_bitmapscan = off`. With these settings the
+results describe index performance under forced index use, not the plans
+PostgreSQL would choose by default.
 
 ---
 
-## Notes
+## Procedure
 
-* Hardware differences significantly impact absolute latency numbers.
-* Your Biscuit index speedups will vary depending on:
+* Queries were timed with `\timing on`, and plans were captured with
+  `EXPLAIN (ANALYZE, BUFFERS)`.
+* Before each cold-cache run, PostgreSQL was restarted and the OS page cache
+  was dropped:
 
-  * Disk speed
-  * CPU branch prediction
-  * Text pattern distribution
-  * PostgreSQL configuration
+  ```bash
+  sudo systemctl restart postgresql
+  sync; echo 3 | sudo tee /proc/sys/vm/drop_caches
+  ```
 
+* For repeatable timings, set the CPU frequency governor to `performance`:
 
+  ```bash
+  sudo cpupower frequency-set -g performance
+  ```
+
+---
+
+## Reproducing on 3.x
+
+The 2.1.3 results have not been repeated for 3.x. When measuring 3.x, note
+the differences that affect results:
+
+* Index state is stored in WAL-logged index pages, and each backend loads its
+  own copy on first use, so first-query latency in a new connection and
+  memory per connection should be measured separately from warm-query
+  latency.
+* The cost model was rewritten in 3.0.0. Running with the planner unrestricted
+  (`enable_seqscan` and `enable_bitmapscan` left on) shows which plans are
+  chosen in practice, which is usually the more useful measurement.
+* Write cost (WAL volume and time per row) and concurrent-reader behaviour
+  after writes are relevant to 3.x deployments and were not covered by the
+  2.1.3 benchmark.

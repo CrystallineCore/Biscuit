@@ -1,353 +1,274 @@
+# Quick Start
 
-
-# Quick Start Tutorial
-
-Get started with Biscuit in 5 minutes! This tutorial demonstrates creating your first Biscuit index and running optimized pattern matching queries.
+This walkthrough creates a sample table, builds a Biscuit index, and runs the
+main query shapes it supports. It assumes the extension is installed (see
+[Installation](installation.md)).
 
 ---
 
-## Step 1: Create Sample Data
-
-Let's create a realistic dataset - an e-commerce product catalog:
+## 1. Create the Extension and Sample Data
 
 ```sql
--- Create products table
+CREATE EXTENSION IF NOT EXISTS biscuit;
+
 CREATE TABLE products (
-    id SERIAL PRIMARY KEY,
-    name TEXT NOT NULL,
-    sku TEXT NOT NULL,
-    category TEXT,
-    description TEXT
+    id          bigserial PRIMARY KEY,
+    name        text NOT NULL,
+    sku         text NOT NULL,
+    category    text,
+    description text
 );
 
--- Insert sample data
-INSERT INTO products (name, sku, category, description)
-VALUES
-    ('Wireless Mouse Pro', 'MOUSE-001', 'Electronics', 'Ergonomic wireless mouse'),
-    ('Gaming Keyboard RGB', 'KEY-GAME-002', 'Electronics', 'Mechanical gaming keyboard'),
-    ('USB-C Cable 2m', 'CABLE-USB-003', 'Accessories', 'Fast charging cable'),
+INSERT INTO products (name, sku, category, description) VALUES
+    ('Wireless Mouse Pro',    'MOUSE-001',     'Electronics', 'Ergonomic wireless mouse'),
+    ('Gaming Keyboard RGB',   'KEY-GAME-002',  'Electronics', 'Mechanical gaming keyboard'),
+    ('USB-C Cable 2m',        'CABLE-USB-003', 'Accessories', 'Fast charging cable'),
     ('Laptop Stand Aluminum', 'STAND-LAP-004', 'Accessories', 'Adjustable laptop stand'),
-    ('Webcam HD 1080p', 'CAM-HD-005', 'Electronics', 'High definition webcam'),
-    ('Mousepad Extended', 'PAD-MOUSE-006', 'Accessories', 'Large gaming mousepad'),
-    ('Wireless Headphones', 'HEAD-WIRE-007', 'Electronics', 'Noise-canceling headphones'),
-    ('Phone Charger Fast', 'CHRG-FAST-008', 'Accessories', 'Quick charge adapter'),
-    ('Monitor 27 inch 4K', 'MON-27-4K-009', 'Electronics', 'Ultra HD monitor'),
-    ('Desk Lamp LED', 'LAMP-LED-010', 'Accessories', 'Adjustable LED desk lamp');
+    ('Webcam HD 1080p',       'CAM-HD-005',    'Electronics', 'High definition webcam');
 
--- Add more realistic data
 INSERT INTO products (name, sku, category, description)
-SELECT 
-    'Product ' || i,
-    'SKU-' || LPAD(i::TEXT, 6, '0'),
-    CASE (i % 3)
-        WHEN 0 THEN 'Electronics'
-        WHEN 1 THEN 'Accessories'
-        ELSE 'Office Supplies'
-    END,
-    'Description for product ' || i
-FROM generate_series(11, 10000) i;
+SELECT 'Product ' || i,
+       'SKU-' || lpad(i::text, 6, '0'),
+       (ARRAY['Electronics', 'Accessories', 'Office Supplies'])[1 + i % 3],
+       'Description for product ' || i
+FROM generate_series(6, 200000) AS i;
 ```
+
+Load the data **before** creating the index. Building an index over existing
+rows is considerably faster, and generates far less WAL, than inserting the
+same rows into an already-indexed table.
 
 ---
 
-## Step 2: Measure Baseline Performance
+## 2. Record a Baseline
 
-First, let's see how PostgreSQL handles pattern matching **without** Biscuit:
-
-```text
--- Enable timing
-\timing on
-
--- Test various LIKE patterns
-SELECT COUNT(*) FROM products WHERE name LIKE '%Mouse%';
-SELECT COUNT(*) FROM products WHERE name LIKE 'Wireless%';
-SELECT COUNT(*) FROM products WHERE sku LIKE '%USB%';
-SELECT COUNT(*) FROM products WHERE description LIKE '%gaming%';
-```
-
-
-Check the query plan:
 ```sql
-EXPLAIN ANALYZE
-SELECT * FROM products WHERE name LIKE '%Mouse%';
+EXPLAIN (ANALYZE)
+SELECT count(*) FROM products WHERE name LIKE 'Wireless%';
 ```
 
-Output shows **Sequential Scan**:
-```
-Seq Scan on products  (cost=0.00..180.00 rows=10 width=...)
-  Filter: (name ~~ '%Mouse%'::text)
-  Rows Removed by Filter: 9990
-Planning Time: 0.123 ms
-Execution Time: 45.678 ms
-```
+Without a suitable index, the plan is a sequential scan with a `Filter` on
+the pattern. Note the execution time for comparison.
 
 ---
 
-## Step 3: Create Biscuit Index
-
-Now create a Biscuit index on the `name` column:
+## 3. Create a Biscuit Index
 
 ```sql
--- Create single-column Biscuit index
 CREATE INDEX idx_products_name ON products USING biscuit (name);
+ANALYZE products;
 ```
 
+`ANALYZE` matters: the cost model uses the column's average width from
+`pg_statistic`, so plans for unanchored patterns can change after the first
+`ANALYZE` on a newly loaded table.
 
-Check index size:
+Compare on-disk and in-memory size:
+
 ```sql
-SELECT 
-    pg_size_pretty(pg_relation_size('idx_products_name')) AS index_size;
+SELECT pg_size_pretty(pg_relation_size('idx_products_name')) AS on_disk,
+       biscuit_size_pretty('idx_products_name')              AS in_memory;
 ```
+
+`biscuit_size_pretty()` reports the size of the current session's in-memory
+copy, loading the index into the session first if necessary.
 
 ---
 
-## Step 4: Run Optimized Queries
-
-Re-run the same queries with the index:
+## 4. Run Pattern Queries
 
 ```sql
--- Same queries as before
-SELECT COUNT(*) FROM products WHERE name LIKE '%Mouse%';
-SELECT COUNT(*) FROM products WHERE name LIKE 'Wireless%';
-SELECT COUNT(*) FROM products WHERE name LIKE '%Laptop%Stand%';
+EXPLAIN (ANALYZE)
+SELECT count(*) FROM products WHERE name LIKE 'Wireless%';
 ```
 
+The plan should now use `idx_products_name`, typically as a Bitmap Index Scan
+under a Bitmap Heap Scan.
 
-Check the new query plan:
+The query shapes Biscuit handles most efficiently are the anchored ones:
+
 ```sql
-EXPLAIN ANALYZE
-SELECT * FROM products WHERE name LIKE '%Mouse%';
-```
-
-Output shows **Index Scan using Biscuit**:
-```
-Index Scan using idx_products_name on products
-  (cost=0.00..8.27 rows=2 width=...)
-  Index Cond: (name ~~ '%Mouse%'::text)
-Planning Time: 0.089 ms
-Execution Time: 1.234 ms 
-```
-
----
-
-## Step 5: Try Different Pattern Types
-
-Biscuit optimizes different LIKE patterns differently:
-
-### Prefix Patterns (Fastest)
-```sql
--- Matches strings starting with "Wireless"
+-- Prefix
 SELECT * FROM products WHERE name LIKE 'Wireless%';
-```
 
-### Suffix Patterns
-```sql
--- Matches strings ending with "Cable"
-SELECT * FROM products WHERE name LIKE '%Cable';
-```
+-- Suffix
+SELECT * FROM products WHERE name LIKE '%Cable 2m';
 
-### Substring Patterns
-```sql
--- Matches strings containing "gaming"
-SELECT * FROM products WHERE name LIKE '%gaming%';
-```
+-- Anchored at both ends
+SELECT * FROM products WHERE name LIKE 'Wireless%Pro';
 
-### Complex Patterns
-```sql
--- Multiple wildcards with concrete characters
-SELECT * FROM products WHERE name LIKE '%USB%C%';
-SELECT * FROM products WHERE name LIKE 'Wireless%Mouse%';
-```
-
-### Underscore Wildcards
-```sql
--- _ matches exactly one character
-SELECT * FROM products WHERE sku LIKE 'MOUSE-00_';
+-- Single-character wildcard at a fixed position
+SELECT * FROM products WHERE sku LIKE 'MOUSE-00_';   -- needs an index on sku
 SELECT * FROM products WHERE name LIKE 'W_reless%';
+
+-- Length only: names of exactly 14 characters
+SELECT count(*) FROM products WHERE name LIKE '______________';
+```
+
+Unanchored patterns are supported, but their cost grows with row count and
+string length, and the planner will often prefer a sequential scan or a
+`pg_trgm` index:
+
+```sql
+SELECT * FROM products WHERE name LIKE '%Keyboard%';
+```
+
+Use `EXPLAIN` to see which plan was chosen. See
+[Pattern Syntax](patterns.md) for how each shape is evaluated.
+
+---
+
+## 5. Case-Insensitive Search
+
+The default operator class, `biscuit_ops`, builds case-sensitive and
+case-insensitive structures, so the same index serves `ILIKE`:
+
+```sql
+SELECT * FROM products WHERE name ILIKE 'wireless%';
+SELECT * FROM products WHERE name NOT ILIKE '%cable%';
+```
+
+No `lower()` expression index is needed.
+
+If a column is only ever queried one way, a narrower operator class skips the
+unused structure set and reduces build time and index size:
+
+```sql
+CREATE INDEX idx_sku_like ON products USING biscuit (sku biscuit_like_ops);   -- LIKE, NOT LIKE, ~, !~
+CREATE INDEX idx_cat_ilike ON products USING biscuit (category biscuit_ilike_ops); -- ILIKE, NOT ILIKE, ~*, !~*
 ```
 
 ---
 
-## Step 6: Multi-Column Indexes
+## 6. Regular Expressions
 
-Create an index on multiple columns for even more powerful queries:
+Regular expressions that can be rewritten exactly as a `LIKE` pattern use the
+same index:
 
 ```sql
--- Create multi-column Biscuit index
-CREATE INDEX idx_products_multi ON products 
+SELECT * FROM products WHERE name ~ '^Wireless';      -- rewritten to 'Wireless%'
+SELECT * FROM products WHERE name ~ 'Pro$';           -- rewritten to '%Pro'
+SELECT * FROM products WHERE name ~ '^W.reless';      -- rewritten to 'W_reless%'
+SELECT * FROM products WHERE sku  ~ '^SKU-.{6}$';     -- rewritten to 'SKU-______'
+```
+
+Regular expressions outside that subset still return correct results, but the
+index is not used:
+
+```sql
+EXPLAIN SELECT * FROM products WHERE name ~ '^(Wireless|Gaming)';
+-- Seq Scan on products ...
+```
+
+See [Regular Expressions](regex.md) for the supported subset.
+
+---
+
+## 7. Multi-Column Indexes
+
+```sql
+CREATE INDEX idx_products_multi ON products
 USING biscuit (name, sku, category);
+
+SELECT * FROM products
+WHERE name LIKE 'Product 1%'
+  AND sku LIKE 'SKU-00%'
+  AND category LIKE 'Elec%';
 ```
 
-Query across all indexed columns:
-```sql
--- Biscuit automatically optimizes predicate order
-SELECT * FROM products 
-WHERE name LIKE '%Mouse%'
-  AND sku LIKE 'MOUSE%'
-  AND category LIKE 'Elect%';
-```
-
-**Automatic optimization**: Biscuit reorders predicates by selectivity for best performance!
+The index evaluates the predicates in order of estimated selectivity, and each
+predicate only examines the rows that survived the ones before it. See
+[Multi-Column Indexes](multicolumn.md).
 
 ---
 
-## Step 7: Aggregate Queries (Special Optimization)
-
-Biscuit has special optimizations for `COUNT(*)` and `EXISTS`:
+## 8. Inspect the Index
 
 ```sql
--- COUNT optimization (no tuple fetching, no sorting)
-SELECT COUNT(*) FROM products WHERE name LIKE '%Wireless%';
-
--- EXISTS optimization
-SELECT EXISTS(
-    SELECT 1 FROM products WHERE name LIKE '%Gaming%'
-);
-
--- Aggregate with GROUP BY
-SELECT category, COUNT(*) 
-FROM products 
-WHERE name LIKE '%Pro%'
-GROUP BY category;
-```
-
-
----
-
-## Step 8: Monitor Index Statistics
-
-Check your index health:
-
-```sql
--- View detailed statistics
 SELECT biscuit_index_stats('idx_products_name'::regclass);
 ```
 
-Output:
-```
-Biscuit Index Statistics (FULLY OPTIMIZED)
+The report has this form (values depend on your data):
+
+```text
+Biscuit Index Statistics
 ==========================================
 Index: idx_products_name
-Active records: 10000
-Total slots: 10000
+Active records: 200000
+Total slots: 200000
 Free slots: 0
 Tombstones: 0
-Max length: 45
+Max length: 21
 ------------------------
 CRUD Statistics:
-  Inserts: 10000
+  Inserts: 0
   Updates: 0
   Deletes: 0
 ------------------------
+Pending-List Statistics (unmerged write volume):
+  Drain threshold (bytes/structure): 65536
+  Total pending bytes (approx, as of last VACUUM): 0
+  Lifetime drains performed: 0
+------------------------
 Active Optimizations:
-  ✓ 1. Skip wildcard intersections
-  ✓ 2. Early termination on empty
-  ✓ 3. Avoid redundant copies
-  ✓ 4. Optimized single-part patterns
-  ✓ 5. Skip unnecessary length ops
-  ✓ 6. TID sorting for sequential I/O
-  ✓ 7. Batch TID insertion
-  ✓ 8. Direct bitmap iteration
-  ✓ 9. Parallel bitmap scan support
-  ✓ 10. Batch cleanup on threshold
-  ✓ 11. Skip sorting for bitmap scans
-  ✓ 12. LIMIT-aware TID collection
+  ...
+```
+
+The fields are described in the [API Reference](api.md#biscuit_index_stats).
+
+Other views:
+
+```sql
+SELECT * FROM biscuit_indexes;   -- all Biscuit indexes in the database
+SELECT * FROM biscuit_status;    -- version, CRoaring status, totals
 ```
 
 ---
 
-## Step 9: Test CRUD Operations
+## 9. Writes After the Index Exists
 
-Biscuit supports full CRUD with automatic index updates:
+`INSERT`, `UPDATE` and `DELETE` maintain the index automatically and are
+visible to subsequent queries in all sessions:
 
-### INSERT
 ```sql
-INSERT INTO products (name, sku, category, description)
-VALUES ('New Wireless Mouse', 'MOUSE-999', 'Electronics', 'Latest model');
+INSERT INTO products (name, sku, category)
+VALUES ('New Wireless Mouse', 'MOUSE-999', 'Electronics');
 
--- Index automatically updated
-SELECT * FROM products WHERE name LIKE '%New Wireless%';
-```
+SELECT * FROM products WHERE name LIKE 'New Wireless%';
 
-### UPDATE
-```sql
-UPDATE products 
-SET name = 'Premium Wireless Mouse'
-WHERE sku = 'MOUSE-999';
-
--- Index reflects changes immediately
-SELECT * FROM products WHERE name LIKE '%Premium%';
-```
-
-### DELETE
-```sql
+UPDATE products SET name = 'Premium Wireless Mouse' WHERE sku = 'MOUSE-999';
 DELETE FROM products WHERE sku = 'MOUSE-999';
-
--- Tombstone tracking for efficient cleanup
-SELECT biscuit_index_stats('idx_products_name'::regclass);
 ```
+
+Each write is recorded in a shared pending log and merged into the compacted
+index structures later, either when the log reaches
+`biscuit.delta_compaction_slots` rows or during `VACUUM`. As with other
+PostgreSQL indexes, entries for deleted or superseded rows are removed when
+`VACUUM` processes the table; until then MVCC visibility checks hide them. The
+`Deletes` and `Tombstones` counters in `biscuit_index_stats()` therefore
+change after `VACUUM`, not at the time of the `DELETE`. Writes to a live
+index generate considerably more WAL than the heap writes alone; for large
+loads, drop and recreate the index around the load. See
+[Performance and Operations](performance.md).
 
 ---
 
-## Best Practices
+## Guidelines
 
-### ✅ DO:
-- Use Biscuit for frequent LIKE queries
-- Create multi-column indexes for complex filters
-- Monitor index statistics regularly
-- Use for high-cardinality string columns
-
-### ❌ DON'T:
-- Index very long text (>256 chars truncated)
-- Use for full-text search (use tsvector)
-- Create redundant indexes
-- Insert into an already-indexed table during a bulk load — build the index afterwards
+* Build the index after loading data, then run `ANALYZE`.
+* Prefer anchored patterns; check unanchored ones with `EXPLAIN`.
+* Use `biscuit_like_ops` or `biscuit_ilike_ops` when only one case mode is
+  queried.
+* Keep Biscuit on read-mostly tables. Each connection holds its own copy of
+  the index in memory.
+* Use `tsvector` full-text search for word-based search with stemming and
+  ranking, and B-tree indexes for equality and range queries.
 
 ---
 
 ## Next Steps
 
-🎉 **Congratulations!** You've created your first Biscuit index!
-
-**Continue learning:**
--  [Pattern Syntax Guide](patterns.md) - Master all pattern types
--  [Multi-Column Indexes](multicolumn.md) - Advanced techniques
--  [Performance Tuning](performance.md) - Optimize further
--  [Architecture Deep Dive](architecture.md) - How it works
-
-**Try advanced features:**
-```sql
--- Type conversion support (integers, dates, timestamps)
-CREATE INDEX idx_created ON orders USING biscuit (created_at);
-SELECT * FROM orders WHERE created_at::TEXT LIKE '2024-01%';
-
--- Complex multi-column queries
-CREATE INDEX idx_users_all ON users USING biscuit (email, username, department);
-SELECT * FROM users 
-WHERE email LIKE '%@company.com'
-  AND username LIKE 'admin%'
-  AND department LIKE '%eng%';
-```
-
----
-
-## Common Questions
-
-**Q: Can I use Biscuit for case-insensitive matching?**
-
-A: Yes. The default `biscuit_ops` operator class builds case-insensitive
-structures alongside the case-sensitive ones, so `ILIKE` is served by the same
-index. For anchored patterns it performs comparably to `LIKE`. If a column is
-only ever queried one way, `biscuit_like_ops` or `biscuit_ilike_ops` avoids
-building the unused structure set.
-
-**Q: Does the index survive a restart or a crash?**
-
-A: Yes. Index state is WAL-logged and stored in the index relation's own pages,
-so it is recovered by PostgreSQL's ordinary crash recovery and replicates to
-standbys. Each backend still loads its own copy into session-local memory on
-first use, so the first query in a new connection pays a load cost.
-
----
-
-Need help? Check the [FAQ](faq.md) or open an issue on [GitHub](https://github.com/crystallinecore/biscuit).
+* [Pattern Syntax](patterns.md)
+* [Regular Expressions](regex.md)
+* [Multi-Column Indexes](multicolumn.md)
+* [Performance and Operations](performance.md)

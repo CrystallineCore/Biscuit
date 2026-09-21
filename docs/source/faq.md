@@ -1,873 +1,300 @@
 # Frequently Asked Questions
 
-Common questions and answers about Biscuit index for PostgreSQL.
-
----
-
-## General Questions
+## General
 
 ### What is Biscuit?
 
-Biscuit is a PostgreSQL index access method designed for LIKE and ILIKE pattern matching queries. It uses bitmap-based indexing to accelerate searches with wildcards (`%`, `_`). Performance improvements vary depending on your data characteristics, query patterns, and system configuration.
+A PostgreSQL index access method for `LIKE` and `ILIKE` pattern matching. It
+also serves `~`, `!~` and (with a recheck) `~*` for regular expressions that
+can be rewritten exactly as a `LIKE` pattern. It is most effective for
+anchored patterns, patterns with `_` wildcards, and length predicates.
 
----
+### When is Biscuit a good fit?
 
-### When should I use Biscuit?
+* Read-mostly tables that are loaded, indexed and then queried.
+* Queries with prefix, suffix, both-anchored or positional (`_`) patterns,
+  including case-insensitive ones.
+* Queries that combine pattern predicates on several text columns.
+* `count(*)` over pattern matches, since `LIKE`/`ILIKE` results are not
+  rechecked against the heap.
 
-Consider Biscuit when you:
-- Run frequent LIKE queries with wildcards
-- Need to search across multiple text columns
-- Have high-cardinality string columns
-- Want to optimize queries with pattern matching
--  Need prefix, suffix, or substring matching
+### When are other options better?
 
-**Other options may be better for**:
-- Full-text search with stemming/ranking (use tsvector/GIN)
-- Very long strings (>256 chars are truncated)
-- Columns with very few distinct values
-
-
----
+* **Unanchored substring search** (`%abc%`): `pg_trgm` is usually faster.
+* **General regular expressions, similarity and fuzzy matching:** `pg_trgm`.
+* **Word-based search with stemming and ranking:** full-text search
+  (`tsvector` with a GIN index).
+* **Equality, ranges and sorted access:** B-tree.
+* **Selective prefixes:** a B-tree with `text_pattern_ops` is often smaller and
+  faster.
+* **Tables with continuous writes, or many concurrent connections:** see
+  [Performance and Operations](performance.md).
 
 ### Is Biscuit production-ready?
 
-Biscuit includes:
-- Full CRUD support (INSERT, UPDATE, DELETE)
-- Automatic index maintenance
-- Multi-column indexes
-- Multiple performance optimizations
+Biscuit is under active development and has not yet had the testing and
+operational exposure expected of production software. Evaluate it in
+development and staging with representative data, workloads, upgrade
+procedures, and backup and recovery workflows before relying on it. It is
+currently best suited to evaluation, experimentation and non-critical
+workloads.
 
-However, as with any index type, we recommend:
-1. Test thoroughly in your staging environment
-2. Benchmark with your actual data and queries
-3. Monitor performance metrics
-4. Have a rollback plan
-5. Start with non-critical workloads
+### Is there a limit on string length?
 
-
+No fixed limit. Very long values increase memory use and the cost of
+unanchored patterns, which grows with the square of string length.
 
 ---
 
+## Installation
+
+### How do I enable CRoaring?
+
+Build with `make WITH_ROARING=1`, reinstall, and check
+`SELECT biscuit_has_roaring();`. CRoaring is not detected automatically. See
+[Installation](installation.md#building-with-croaring).
+
+### Which PostgreSQL versions are supported?
+
+PostgreSQL 16 and later.
+
+### How do I upgrade from 3.0.0?
+
+Install the new library, then run `ALTER EXTENSION biscuit UPDATE TO
+'3.1.0';` in each database. No `REINDEX` is required. See
+[Upgrading](installation.md#upgrading).
+
+---
+
+## Indexing
+
+### Which column types can be indexed?
+
+`text` and `varchar` directly. Other types, including `char(n)`, through an
+expression that casts to `text`; queries must use the same expression. See
+[Supported column types](api.md#supported-column-types).
+
+### Which operator class should I use?
+
+* `biscuit_ops` (default) if the column is queried both case-sensitively and
+  case-insensitively.
+* `biscuit_like_ops` if it is only queried with `LIKE`, `NOT LIKE`, `~` or
+  `!~`.
+* `biscuit_ilike_ops` if it is only queried with `ILIKE`, `NOT ILIKE` or
+  `~*`.
+
+The single-mode classes roughly halve build time and memory for that column.
+
+### Can I create partial indexes?
+
+Yes:
+
+```sql
+CREATE INDEX idx_active_users ON users USING biscuit (username)
+WHERE status = 'active';
+```
+
+Partial indexes created by releases before 3.1.0 were built over every row
+and should be rebuilt with `REINDEX`.
+
+### Can I build an index without blocking writes?
+
+Yes, with `CREATE INDEX CONCURRENTLY` or `REINDEX INDEX CONCURRENTLY`.
+
+### How long does an index build take, and how much memory does it need?
+
+Build time and memory grow with row count, string length and the number of
+columns and case modes. Builds take longer than `pg_trgm` GIN builds on the
+same data, and the build holds the whole index in memory without regard to
+`maintenance_work_mem`. Test at your target size.
+
+### How are NULL values handled?
+
+NULL values are not indexed. Following SQL semantics, a NULL never satisfies
+`LIKE` or `NOT LIKE`, so NULLs are never returned by the index. `IS NULL`
+predicates are not served by Biscuit.
+
+### Does Biscuit handle multibyte characters?
+
+Yes. Positions and lengths are counted in characters, so `_` matches exactly
+one character regardless of its UTF-8 byte length.
+
+---
+
+## Queries
+
+### Why is my query not using the index?
+
+Common reasons:
+
+1. The table has not been analyzed since loading.
+2. The pattern is unanchored (`%abc%`) or matches most of the table, and a
+   sequential scan or another index is estimated to be cheaper, which is often
+   correct.
+3. The pattern is `%` (match-all), which the index does not serve.
+4. The operator class does not include the operator (for example, `ILIKE`
+   against a `biscuit_like_ops` index).
+5. The regular expression is outside the rewritable subset, or is `!~*`.
+
+Check with `EXPLAIN`. In a test session, `SET enable_seqscan = off;` shows
+whether the index can be used at all.
+
+### Does Biscuit support regular expressions?
+
+Partially, from 3.1.0. Regular expressions built from anchors, literals, `.`,
+`.*`, `.+` and fixed or open-ended repetition counts are rewritten to `LIKE`
+patterns and served by the index. Alternation, bracket expressions, groups,
+class shorthands and similar constructs are answered correctly by a
+sequential scan. `!~*` is never served by the index. See
+[Regular Expressions](regex.md).
+
+### Does Biscuit support case-insensitive search?
+
+Yes. `ILIKE` and `NOT ILIKE` are served by indexes using `biscuit_ops` or
+`biscuit_ilike_ops`, without a `lower()` expression index.
+
+### Can I use `OR`?
+
+Yes. PostgreSQL combines separate index scans with a `BitmapOr`:
+
+```sql
+SELECT * FROM products WHERE name LIKE 'laptop%' OR name LIKE 'desktop%';
+```
+
+### Does `LIMIT` make the index scan faster?
+
+It reduces the number of heap rows fetched, but the index computes the full
+set of matches before returning the first one.
+
+### Does Biscuit return results in sorted order?
+
+No. Biscuit does not support ordered scans, so `ORDER BY` requires a sort.
+
+### Why does `EXPLAIN` show `Recheck Cond`?
+
+A Bitmap Heap Scan always prints `Recheck Cond`. For `LIKE`, `ILIKE`, `~` and
+`!~`, Biscuit does not request a recheck; `~*` and non-rewritable regular
+expressions do.
+
+### Are parallel queries supported?
+
+Biscuit index scans run in a single process. A Parallel Bitmap Heap Scan above
+a Biscuit bitmap scan is supported, so heap access and aggregation can be
+parallelised.
+
+---
+
+## Maintenance and Operations
+
+### Do I need to maintain the index manually?
+
+Inserts, updates and deletes maintain the index automatically. Regular
+`VACUUM` (or autovacuum) removes entries for dead rows and drains the pending
+log. `VACUUM` does not shrink the index; use `REINDEX` to reclaim space.
+
+### What are tombstones?
+
+Row slots whose entries `VACUUM` has removed but whose bitmap entries have not
+yet been purged. They are excluded from results and purged in batches of
+1,000. The count appears in `biscuit_index_stats()`.
+
 ### How much memory does Biscuit use?
 
-Memory usage depends on:
-- Number of records
-- Average string length
-- Number of indexed columns
-- Character distribution in your data
+Each backend that uses an index holds its own copy of it for the life of the
+connection. Check the current session's copy with:
 
-The index is stored in memory for performance. For large tables, ensure you have adequate RAM. Test with your actual data to determine memory requirements.
-
-**Monitor with**:
 ```sql
 SELECT biscuit_size_pretty('idx_name');
 ```
 
----
+Multiply by the number of connections that use the index to estimate the
+total. The in-memory size can differ substantially from the on-disk size
+reported by `pg_relation_size()`, so measure both.
 
-## Installation & Setup
+### Why did read latency rise after a write?
 
-### How do I install Biscuit?
+A committed write causes other backends to reload their cached copy of the
+index on their next scan. Incremental refresh is not yet implemented. See
+[Cache Reload After Writes](performance.md#cache-reload-after-writes).
 
-See the [Installation Guide](installation.md) for detailed instructions.
+### A query failed with "could not obtain a stable view of index"
 
-Quick steps:
-```bash
-# Ubuntu/Debian
-sudo apt-get install postgresql-server-dev-16 build-essential
-git clone https://github.com/crystallinecore/biscuit.git
-cd biscuit
-make
-sudo make install
-```
+The pending log was compacted repeatedly by other backends while the scan was
+running. The error has SQLSTATE `40001`; retry the statement. If it recurs,
+check `biscuit.delta_compaction_slots`.
 
-Then in PostgreSQL:
-```sql
-CREATE EXTENSION biscuit;
-```
+### Is the index crash-safe?
 
----
+Yes, for ordinary (logged) tables. Index state is WAL-logged and is recovered
+by PostgreSQL's crash recovery along with the table. No manual rebuild is
+expected; if an index appears inconsistent after recovery, please report it.
 
-### Installation fails with "could not load library"
+### Unlogged tables
 
-**Problem**: PostgreSQL can't find `biscuit.so`
+Unlogged tables and their indexes are reset by crash recovery, as with any
+PostgreSQL index. After a crash, a Biscuit index on an unlogged table is
+readable but has no stored state, and scans fail with `no on-disk snapshot
+found for index`. Run `REINDEX INDEX` to restore it. Logged tables are not
+affected.
 
-**Solution**:
-```bash
-# Find PostgreSQL library directory
-pg_config --pkglibdir
+### Does Biscuit work with replication and point-in-time recovery?
 
-# Verify file exists
-ls $(pg_config --pkglibdir)/biscuit.so
+* **Physical streaming replication and hot standby:** yes. The index reaches
+  standbys through WAL, and standbys serve index scans from it.
+* **Point-in-time recovery:** yes. Index state is restored to the recovery
+  target along with the table.
+* **Logical replication:** indexes are not replicated logically; create the
+  index on the subscriber if it is needed there.
 
-# If missing, reinstall
-cd biscuit
-sudo make install
-```
+### Can I use Biscuit on partitioned tables?
 
----
+Yes. Create the index on the partitioned table (which creates it on each
+partition) or on individual partitions.
 
-### Extension creation fails: "extension does not exist"
+### Can Biscuit and B-tree or pg_trgm indexes coexist on the same column?
 
-**Problem**: Extension control files not in correct location
-
-**Solution**:
-```bash
-# Check extension directory
-pg_config --sharedir
-
-# Verify files
-ls $(pg_config --sharedir)/extension/biscuit*
-
-# Should see:
-# biscuit.control
-# biscuit--1.0.sql
-
-# If missing, reinstall
-sudo make install
-```
-
----
-
-### Should I install with CRoaring support?
-
-**Yes, recommended** for production use.
-
-CRoaring provides:
-- Better memory compression
-- More efficient set operations
-
-Install:
-```bash
-# Ubuntu/Debian
-sudo apt-get install libroaring-dev
-
-# Then build Biscuit
-make HAVE_ROARING=1
-sudo make install
-```
-
-Without CRoaring, Biscuit uses a fallback implementation that's slower but still functional.
-
----
-
-## Index Creation
-
-### How do I create a Biscuit index?
-
-**Single column**:
-```sql
-CREATE INDEX idx_name ON table_name 
-USING biscuit (column_name);
-```
-
-**Multiple columns**:
-```sql
-CREATE INDEX idx_multi ON table_name 
-USING biscuit (col1, col2, col3);
-```
-
-See [Quick Start Tutorial](quickstart.md) for examples.
-
----
-
-### How long does index creation take?
-
-Build time varies significantly based on:
-- Table size
-- Number of columns
-- Average string length
-- Available memory
-- System load
-
-**Benchmark with your data** to determine actual build times.
-
-**For large tables**, use CONCURRENTLY:
-```sql
-CREATE INDEX CONCURRENTLY idx_name ON table_name 
-USING biscuit (column_name);
-```
-
----
-
-### Can I create partial Biscuit indexes?
-
-**Yes!** Use a WHERE clause:
-
-```sql
--- Index only active users
-CREATE INDEX idx_active_users ON users 
-USING biscuit (username, email)
-WHERE status = 'active';
-
--- Index only recent orders
-CREATE INDEX idx_recent_orders ON orders 
-USING biscuit (customer_name)
-WHERE created_at > '2024-01-01';
-```
-
-**Benefits**:
-- Smaller index size
-- Faster queries on filtered data
-- Reduced maintenance overhead
-
----
-
-### How many columns can I index?
-
-While there's no hard limit enforced, indexing many columns increases:
-- Index size
-- Build time
-- Memory usage
-- Maintenance overhead
-
-**Recommendation**: Index only columns you frequently query with LIKE patterns.
-
-**Test performance** with your specific column combinations.
-
----
-
-## Query Performance
-
-### Why is my query not using the index?
-
-**Check with EXPLAIN**:
-```sql
-EXPLAIN ANALYZE
-SELECT * FROM products WHERE name LIKE '%laptop%';
-```
-
-**Common causes**:
-
-1. **Statistics out of date**
-   ```sql
-   ANALYZE products;
-   ```
-
-2. **Pattern matches too many rows**
-   ```sql
-   -- Check selectivity
-   SELECT COUNT(*) FROM table WHERE col LIKE '%pattern%';
-   ```
-
-3. **Wrong column indexed**
-   ```text
-   -- Check which columns are indexed
-   \d products
-   ```
-
-4. **Planner estimates sequential scan is faster**
-   ```sql
-   -- Test with index forced (testing only!)
-   SET enable_seqscan = off;
-   ```
-
-Always verify index usage with EXPLAIN ANALYZE before and after creating indexes.
-
----
-
-### How can I measure query performance?
-
-**Use EXPLAIN ANALYZE**:
-```sql
-EXPLAIN ANALYZE
-SELECT * FROM products WHERE name LIKE '%pattern%';
-```
-
-Look for:
-- Execution time
-- Index scan vs sequential scan
-- Rows processed
-- Planning time
-
-**Compare before and after** creating the index to measure improvement.
-
-Performance varies based on:
-- Data characteristics
-- Pattern selectivity
-- System resources
-- Concurrent load
-
-Always benchmark with your actual workload.
-
----
-
-### Does Biscuit support case-insensitive search?
-
-**Yes**, from versions >= 2.1.0:
-
-```sql
--- Create index 
-CREATE INDEX idx_name ON products USING biscuit (name);
-
--- Query
-SELECT * FROM products WHERE name ILIKE '%wireless%';
-```
-
----
-
-### Can I use OR conditions with Biscuit?
-
-**Yes**, but be aware of performance:
-
-```sql
--- Uses Biscuit (efficient)
-SELECT * FROM products 
-WHERE name LIKE '%laptop%'
-   OR name LIKE '%desktop%';
-
--- Better: Combine patterns when possible
-SELECT * FROM products 
-WHERE name LIKE '%laptop%' 
-   OR name LIKE '%desktop%'
-   OR name LIKE '%tablet%';
-```
-
-PostgreSQL will use bitmap OR to combine results.
-
----
-
-### Does Biscuit support regular expressions?
-
-**No.** Biscuit only supports SQL LIKE/ILIKE patterns (`%`, `_`).
-
-For regex, use:
-- PostgreSQL's `~` operator with GIN trigram index
-- Full-text search with tsvector
-
-**Example**:
-```sql
--- Regex (not Biscuit)
-SELECT * FROM products WHERE name ~ 'laptop|desktop';
-
--- LIKE (uses Biscuit)
-SELECT * FROM products WHERE name LIKE '%laptop%';
-```
-
----
-
-### Does Biscuit optimize COUNT(*) queries?
-
-Biscuit includes optimizations for aggregate queries like COUNT(*):
-
-```sql
--- May benefit from aggregate optimizations
-SELECT COUNT(*) FROM products WHERE name LIKE '%laptop%';
-```
-
-The index can process bitmap operations without fetching tuples, which can improve performance for certain query patterns.
-
-**Test with your queries** to measure the actual benefit.
-
----
-
-### Can I use LIMIT with Biscuit?
-
-**Yes**. Biscuit works with LIMIT clauses:
-
-```sql
-SELECT * FROM products 
-WHERE name LIKE '%gaming%'
-LIMIT 10;
-```
-
-The index includes optimizations for queries with LIMIT, though the actual performance benefit depends on your data and query patterns.
-
----
-
-## Index Maintenance
-
-### Do I need to manually maintain the index?
-
-**No.** Biscuit automatically maintains itself:
-- INSERT: Adds new records
-- UPDATE: Removes old, adds new
-- DELETE: Marks as tombstone
-
-PostgreSQL's VACUUM handles cleanup.
-
----
-
-### What are tombstones?
-
-**Tombstones** are deleted records tracked in memory until cleanup.
-
-Check tombstone count:
-```sql
-SELECT biscuit_index_stats('idx_name'::regclass);
-```
-
-Output:
-```
-Tombstones: 245
-```
-
-**Automatic cleanup** triggers at 1000 tombstones.
-
-**Manual cleanup**:
-```sql
-VACUUM table_name;
--- or
-REINDEX INDEX idx_name;
-```
-
----
-
-### When should I rebuild the index?
-
-Consider rebuilding when:
-- ✅ Significant data changes have occurred
-- ✅ Index statistics show high tombstone counts
-- ✅ Query performance has degraded
-- ✅ After major PostgreSQL version upgrades
-
-**How to rebuild**:
-```sql
--- Non-blocking rebuild
-CREATE INDEX CONCURRENTLY idx_new ON table_name 
-USING biscuit (column_name);
-
-DROP INDEX idx_old;
-ALTER INDEX idx_new RENAME TO idx_old;
-```
-
-Monitor index health regularly to determine when rebuilding is beneficial.
-
----
-
-### How do I monitor index health?
-
-**Use the diagnostic function**:
-```sql
-SELECT biscuit_index_stats('idx_name'::regclass);
-```
-
-**Key metrics provided**:
-- **Active records**: Current valid records
-- **Total slots**: Allocated memory slots
-- **Free slots**: Reusable slots from deletes
-- **Tombstones**: Deleted but not cleaned records
-- **Max length**: Longest indexed string
-- **CRUD statistics**: Insert/update/delete counts
-
-**Create monitoring view**:
-```sql
-CREATE VIEW biscuit_health AS
-SELECT 
-    indexrelid::regclass as index_name,
-    biscuit_index_stats(indexrelid) as stats
-FROM pg_index
-WHERE indexrelid::regclass::text LIKE '%biscuit%';
-```
-
-Monitor these metrics over time to understand index behavior and maintenance needs.
-
----
-
-### Does Biscuit support parallel operations?
-
-Biscuit includes support for parallel bitmap scans during query execution. Parallel index building is not currently implemented.
-
-Whether parallel queries are used depends on PostgreSQL's query planner and your configuration settings.
+Yes. The planner chooses among them per query. Running Biscuit alongside a
+`pg_trgm` GIN index is a practical arrangement for mixed anchored and
+unanchored workloads.
 
 ---
 
 ## Troubleshooting
 
-### Queries are slower than expected
+### Results differ from a sequential scan
 
-**Debug checklist**:
-
-1. **Verify index is being used**
-   ```sql
-   EXPLAIN ANALYZE SELECT * FROM table WHERE col LIKE '%pattern%';
-   -- Should show: Index Scan using idx_name
-   ```
-
-2. **Check pattern selectivity**
-   ```sql
-   -- How many rows match?
-   SELECT COUNT(*) FROM table WHERE col LIKE '%pattern%';
-   -- High match percentage may make index less beneficial
-   ```
-
-3. **Update statistics**
-   ```sql
-   ANALYZE table_name;
-   ```
-
-4. **Check index health**
-   ```sql
-   SELECT biscuit_index_stats('idx_name'::regclass);
-   ```
-
-5. **Review memory settings**
-   ```sql
-   SHOW work_mem;
-   SHOW shared_buffers;
-   -- See [Performance Tuning](performance.md)
-   ```
-
-6. **Compare with baseline**
-   - Measure query time without the index
-   - Document before/after performance
-   - Consider data characteristics
-
----
-
-### Index build fails with out of memory
-
-**Problem**: Not enough RAM for index construction
-
-**Solutions**:
-
-1. **Increase maintenance_work_mem**
-   ```sql
-   SET maintenance_work_mem = '2GB';
-   CREATE INDEX ...
-   ```
-
-2. **Build during low-traffic period**
-
-3. **Consider partial index**
-   ```sql
-   -- Index subset of data
-   CREATE INDEX idx_recent ON table 
-   USING biscuit (col)
-   WHERE created_at > '2024-01-01';
-   ```
-
-4. **Add more RAM to server**
-
----
-
-### Crashes or unexpected restarts
-
-Index state is WAL-logged, so after an abrupt shutdown PostgreSQL replays WAL
-on startup and the index is recovered along with the heap. Committed changes
-are present, uncommitted ones are not, and **no manual rebuild is expected**.
-
-If an index does appear inconsistent after a restart, that is worth reporting.
-
-**Possible causes**:
-
-1. **Memory corruption**: Ensure CRoaring is properly installed
-2. **PostgreSQL crash**: Check PostgreSQL logs
-3. **Extension bug**: Report at GitHub Issues
-
-**If a rebuild is needed anyway**:
-```sql
--- Drop and rebuild index
-DROP INDEX idx_name;
-CREATE INDEX idx_name ON table USING biscuit (col);
-
--- Or reindex
-REINDEX INDEX idx_name;
-```
-
----
-
-### "Index is not valid" error
-
-**Cause**: Index build failed or was interrupted
-
-**Solution**:
-```sql
--- Drop invalid index
-DROP INDEX idx_name;
-
--- Rebuild
-CREATE INDEX CONCURRENTLY idx_name ON table 
-USING biscuit (col);
-```
-
----
-
-### Pattern not matching expected rows
-
-**Check pattern syntax**:
-```sql
--- Case-sensitive!
-SELECT * FROM products WHERE name LIKE '%Mouse%';  -- Matches "Mouse"
-SELECT * FROM products WHERE name LIKE '%mouse%';  -- Matches "mouse"
-
--- Underscore is single-character wildcard
-SELECT * FROM products WHERE sku LIKE 'PROD-___';  -- Exactly 3 chars
-```
-
-**Test without index**:
-```sql
-SET enable_indexscan = off;
-SELECT * FROM products WHERE name LIKE '%pattern%';
--- Compare results
-```
-
----
-
-## Advanced Topics
-
-### Can I use Biscuit with partitioned tables?
-
-**Yes!** Create indexes on each partition:
+This should not happen. To compare, run the query with and without the index
+in the same transaction:
 
 ```sql
--- Create partitioned table
-CREATE TABLE orders (
-    id SERIAL,
-    customer_name TEXT,
-    created_at DATE
-) PARTITION BY RANGE (created_at);
-
--- Create partitions
-CREATE TABLE orders_2024_q1 PARTITION OF orders
-    FOR VALUES FROM ('2024-01-01') TO ('2024-04-01');
-
--- Create Biscuit index on partition
-CREATE INDEX idx_orders_2024_q1 ON orders_2024_q1
-USING biscuit (customer_name);
+BEGIN;
+SET LOCAL enable_indexscan = off;
+SET LOCAL enable_bitmapscan = off;
+SELECT count(*) FROM t WHERE col LIKE 'pattern%';
+ROLLBACK;
 ```
 
-**Note**: Each partition needs its own index.
-
----
-
-### Does Biscuit work with replication?
-
-**Yes.** Biscuit indexes work with:
-- ✅ Streaming replication
-- ✅ Logical replication
-- ✅ Hot standby
-
-**Caveat**: Indexes are built independently on each server.
-
----
-
-### Can I use Biscuit in read replicas?
-
-**Yes.** Create the index on the primary; it reaches physical standbys through
-the ordinary WAL stream, with no Biscuit-specific step required.
-
-```sql
--- On primary
-CREATE INDEX idx_name ON table USING biscuit (col);
-
--- On a physical standby, once replay catches up, the index is present
--- and available to index scans. No REINDEX is required.
-```
-
-Hot standbys serve index scans from the replicated index. Point-in-time
-recovery restores index state to the recovery target in the same way.
-
----
-
-### How does Biscuit handle NULL values?
-
-**NULL values are not indexed.**
-
-```sql
--- Create index
-CREATE INDEX idx_name ON users USING biscuit (middle_name);
-
--- This uses index
-SELECT * FROM users WHERE middle_name LIKE '%Smith%';
-
--- This does NOT use index (NULL check)
-SELECT * FROM users WHERE middle_name IS NULL;
-```
-
-**For NULL queries**, add separate condition:
-```sql
-WHERE middle_name IS NULL
-   OR middle_name LIKE '%pattern%'
-```
-
-
----
-
-### Does Biscuit support multi-byte characters (Unicode)?
-
-**Yes**, Biscuit supports UTF-8 encoding:
-
-```sql
--- Japanese, Chinese, Arabic, emoji, etc.
-CREATE INDEX idx_name ON products USING biscuit (name);
-
--- Query with multi-byte characters
-SELECT * FROM products WHERE name LIKE '%日本%';
-```
-
----
-
-## Migration & Compatibility
-
-### How do I migrate from GIN trigram?
-
-**Evaluate first**:
-
-```sql
--- 1. Create Biscuit index alongside GIN
-CREATE INDEX idx_biscuit ON table USING biscuit (col);
-
--- 2. Test queries with both
-EXPLAIN ANALYZE SELECT * FROM table WHERE col LIKE '%pattern%';
-
--- 3. Compare performance with your actual queries
--- Document query times, index sizes, and maintenance costs
-
--- 4. If Biscuit meets your needs better, consider transition
-DROP INDEX idx_gin_trigram;
-
--- 5. Keep Biscuit
-```
-
-Different index types have different strengths. Choose based on your specific workload requirements.
-
----
-
-### Can I have both B-tree and Biscuit on same column?
-
-**Yes**, and it's often beneficial:
-
-```sql
--- B-tree for exact matches and ORDER BY
-CREATE INDEX idx_name_btree ON products (name);
-
--- Biscuit for LIKE patterns
-CREATE INDEX idx_name_biscuit ON products USING biscuit (name);
-```
-
-PostgreSQL will choose the appropriate index automatically.
-
----
-
-### How do I uninstall Biscuit?
-
-```sql
--- 1. Drop all Biscuit indexes
-DROP INDEX idx1, idx2, idx3;
-
--- 2. Drop extension (drops any remaining indexes)
-DROP EXTENSION biscuit CASCADE;
-```
-
-```bash
-# 3. Remove files
-sudo rm $(pg_config --pkglibdir)/biscuit.so
-sudo rm $(pg_config --sharedir)/extension/biscuit*
-```
-
----
-
-## Getting Help
-
-### Where can I get support?
-
--  **Documentation**: [ReadTheDocs](https://biscuit.readthedocs.io)
--  **Discussions**: [GitHub Discussions](https://github.com/crystallinecore/biscuit/discussions)
--  **Bug Reports**: [GitHub Issues](https://github.com/crystallinecore/biscuit/issues)
--  **Email**: sivaprasad.off@gmail.com
-
----
+If the counts differ, please report it with the details listed below. If the
+index was built before 3.1.0 on a table that had been updated, rebuild it
+first; see [Upgrading](installation.md#upgrading).
 
 ### How do I report a bug?
 
-**Include in your report**:
-1. PostgreSQL version: `SELECT version();`
-2. Biscuit version: `SELECT * FROM pg_extension WHERE extname = 'biscuit';`
-3. Table schema: `\d table_name`
-4. Index definition: `\d+ index_name`
-5. Query that fails: `EXPLAIN ANALYZE ...`
-6. Error messages from PostgreSQL logs
+Include:
 
-**Submit at**: [GitHub Issues](https://github.com/crystallinecore/biscuit/issues)
+1. `SELECT version();` and `SELECT biscuit_version();`
+2. `SELECT biscuit_has_roaring();`
+3. The table and index definitions
+4. The query and its `EXPLAIN (ANALYZE)` output
+5. Relevant server log entries
+6. Whether the index was built before or after any upgrade
 
----
+Report issues at
+[GitHub Issues](https://github.com/crystallinecore/biscuit/issues).
 
 ### How can I contribute?
 
-We welcome contributions!
-
-- **Code**: Submit pull requests
--  **Documentation**: Improve docs
--  **Testing**: Test with your data
--  **Ideas**: Suggest features
--  **Bugs**: Report issues
-
----
-
-### Is there a Slack/Discord community?
-
-**Not yet!** 
-
----
-
-## Roadmap
-
-### What features are being considered?
-
-Future development may include:
-- Enhanced parallel index builds
-- Additional compression options
-- Extended monitoring capabilities
-
-**Long-term possibilities**:
-- Incremental cache refresh in place of full reload on invalidation
-- Reduced write amplification
-- Approximate matching capabilities
-- Additional pattern matching features
-- Enhanced cloud optimizations
-
-Development priorities are based on community feedback and usage patterns. Features listed here are under consideration but not guaranteed for any specific timeline.
-
----
-
-## Performance Comparisons
-
-### How does Biscuit compare to other indexes?
-
-Performance characteristics vary significantly based on:
-- Data distribution
-- Query patterns
-- Hardware specifications
-- PostgreSQL configuration
-- Concurrent workload
-
-**General considerations**:
-
-**B-tree**:
-- Excellent for exact matches and range queries
-- Good for prefix patterns with concrete characters
-- Not suitable for suffix or substring patterns
-
-**GIN (trigram)**:
-- Designed for full-text and trigram matching
-- Larger index size
-- Different optimization characteristics
-
-**Biscuit**:
-- Optimized for LIKE/ILIKE pattern matching
-- Bitmap-based approach
-- In-memory index structures
-- Multi-column query optimization
-
-**Always benchmark with your specific workload** to make informed decisions. Test with:
-- Your actual data
-- Representative queries
-- Expected query volume
-- Production-like hardware
-
----
-
-## Still Have Questions?
-
-Can't find your answer? 
-
-- Check the [Installation Guide](installation.md)
-- Read the [Quick Start](quickstart.md)
-- Browse [Performance Tuning](performance.md)
-- Contact us: sivaprasad.off@gmail.com
-
----
-
-**Happy pattern matching! 🚀**
-
+Pull requests, bug reports, test results on other data sets and platforms,
+and documentation fixes are welcome. See
+[Development and Testing](development.md) for building and running the test
+suite.

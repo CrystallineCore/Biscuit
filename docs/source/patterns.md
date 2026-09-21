@@ -1,460 +1,244 @@
-# Pattern Syntax Guide
+# Pattern Syntax
 
-**Complete guide to LIKE pattern matching with Biscuit indexes, including optimization strategies for each pattern type.**
-
-ILIKE patterns follow the same execution and optimization paths as LIKE
-queries in Biscuit, evaluated against a parallel set of case-insensitive
-structures rather than by rewriting the query. For anchored patterns — prefixes,
-suffixes and both-anchored forms — ILIKE performs comparably to the equivalent
-LIKE, so case-insensitive anchored search needs no `lower()` expression index.
-
-For unanchored (`%substring%`) patterns the case-insensitive path carries
-additional per-statement overhead, and ILIKE can be noticeably slower than the
-equivalent LIKE. Where an unanchored case-insensitive search is central to a
-workload, benchmark it against `pg_trgm` before committing to Biscuit.
+This page describes how Biscuit evaluates `LIKE`, `NOT LIKE`, `ILIKE` and
+`NOT ILIKE` patterns, and how the shape of a pattern affects its cost.
+Regular expressions are covered separately in
+[Regular Expressions](regex.md); they are rewritten into the same pattern
+forms described here.
 
 ---
 
-## Wildcard Characters
+## Wildcards and Escapes
 
-Biscuit supports standard SQL LIKE wildcards:
+Biscuit implements standard SQL `LIKE` semantics.
 
-| Wildcard | Meaning | Example | Matches |
-|----------|---------|---------|---------|
-| `%` | Zero or more characters | `'%test%'` | "test", "mytest", "testing" |
-| `_` | Exactly one character | `'test_'` | "test1", "testA", not "test" |
+| Syntax | Meaning | Example | Matches |
+|---|---|---|---|
+| `%` | Any sequence of zero or more characters | `'%test%'` | `test`, `mytest`, `testing` |
+| `_` | Exactly one character | `'test_'` | `test1`, `testA`; not `test` |
+| `\%`, `\_`, `\\` | A literal `%`, `_` or `\` | `'100\%'` | `100%` |
+
+* Matching is by **character**, not by byte. `_` matches one character
+  regardless of how many bytes it occupies in UTF-8, and string lengths are
+  counted in characters.
+* The default escape character is backslash. A `LIKE ... ESCAPE 'c'` clause
+  with a constant escape character is converted by PostgreSQL into the
+  backslash form before planning and is served by the index. A non-constant
+  escape expression cannot be folded this way; do not rely on the index for
+  such queries.
+* The pattern must be available to the planner as a text constant for the
+  cost model to classify it. A pattern supplied as a parameter in a generic
+  prepared-statement plan is priced conservatively, at 90% of the
+  sequential-scan cost.
 
 ---
 
-## Pattern Types
+## How a Pattern Is Evaluated
 
-Biscuit classifies patterns into categories for optimization:
+A pattern is split on unescaped `%` into literal *parts*. Each part is matched
+against per-position bitmaps:
 
-### 1. Exact Match (Fastest)
+* the part before the first `%` is matched at positions counted from the
+  **start** of the string (0, 1, 2, …);
+* the part after the last `%` is matched at positions counted from the
+  **end** of the string (−1, −2, …);
+* parts in between have no fixed position and must be searched for.
 
-**Pattern**: No wildcards at all
+`_` inside a part skips one position without adding an intersection. Length
+bitmaps (`length = n` and `length ≥ n`) enforce the minimum or exact length the
+pattern implies.
 
-```sql
--- Exact string match
-SELECT * FROM products WHERE name LIKE 'Wireless Mouse';
+Example, `LIKE 'abc%def'`:
+
+```text
+1. Parse:            parts ["abc", "def"], anchored at both ends
+2. Prefix:           C = pos[a@0] ∩ pos[b@1] ∩ pos[c@2]
+3. Suffix:           C = C ∩ neg[f@-1] ∩ neg[e@-2] ∩ neg[d@-3]
+4. Length:           C = C ∩ length_ge[6]
+Result:              exact matches; no heap recheck
 ```
 
-**Performance**: 
-- **How it works**: Direct bitmap lookup + length filter
-- **Use case**: When you know the exact string
-
-**Note**: For exact matches, regular `=` with B-tree may be equally fast. Use Biscuit when mixing exact and wildcard queries.
-
 ---
 
-### 2. Prefix Match (Very Fast)
+## Pattern Shapes
 
-**Pattern**: `'string%'` - Starts with concrete characters, ends with `%`
+The cost of a pattern depends almost entirely on whether it is anchored, not
+on how many rows it matches.
+
+### Exact match: `'abc'`
+
+No wildcards. Evaluated as prefix positions intersected with the exact-length
+bitmap. For pure equality, a B-tree index is usually smaller and at least as
+fast; Biscuit is useful here when the same column also serves wildcard
+queries.
+
+### Prefix: `'abc%'`
+
+Matched against start-relative positions. A fixed number of intersections,
+independent of string length.
 
 ```sql
--- Find products starting with "Wireless"
-SELECT * FROM products WHERE name LIKE 'Wireless%';
-
--- Email domain filtering
-SELECT * FROM users WHERE email LIKE 'admin%';
-
--- SKU prefix search
 SELECT * FROM inventory WHERE sku LIKE 'PROD-2024%';
 ```
 
-**Performance**:
-- **How it works**: Position-based bitmap intersection from start
-- **Optimization**: Strong anchor at position 0
+For highly selective prefixes, a B-tree with `text_pattern_ops` is often
+faster and smaller; Biscuit tends to compare better on broader prefixes.
 
-**Best Practices**:
-```sql
--- ✅ GOOD: Specific prefix
-WHERE name LIKE 'Wireless%'
+### Suffix: `'%abc'`
 
--- ❌ AVOID: Very short prefix (low selectivity)
-WHERE name LIKE 'W%'
-
--- ✅ BETTER: Longer prefix
-WHERE name LIKE 'Wireless Mouse%'
-```
-
----
-
-### 3. Suffix Match (Very Fast)
-
-**Pattern**: `'%string'` - Ends with concrete characters, starts with `%`
+Matched against end-relative positions, at the same cost as a prefix. A
+B-tree can only serve suffixes through a `reverse()` expression index.
 
 ```sql
--- Find files with specific extension
+SELECT * FROM users WHERE email LIKE '%@example.com';
 SELECT * FROM files WHERE filename LIKE '%.pdf';
-
--- Domain matching
-SELECT * FROM users WHERE email LIKE '%@company.com';
-
--- Product category suffix
-SELECT * FROM products WHERE name LIKE '%Mouse';
 ```
 
-**Performance**:
-- **How it works**: Negative-position bitmap indexing from end
-- **Optimization**: Uses suffix bitmaps for direct matching
+### Anchored at both ends: `'abc%xyz'`
 
-**Examples**:
-```sql
--- Email domain filtering (very efficient)
-SELECT COUNT(*) FROM users WHERE email LIKE '%@gmail.com';
-
--- File extension queries
-SELECT * FROM documents WHERE filename LIKE '%.docx';
-```
-
----
-
-### 4. Substring Match (Moderate Speed)
-
-**Pattern**: `'%string%'` - Contains substring anywhere
+Prefix and suffix intersections combined with a minimum-length constraint.
 
 ```sql
--- Find products containing "wireless"
-SELECT * FROM products WHERE name LIKE '%wireless%';
-
--- Description search
-SELECT * FROM articles WHERE content LIKE '%important%';
-
--- Tag searching
-SELECT * FROM posts WHERE tags LIKE '%python%';
-```
-
-**Performance**:
-- **How it works**: Tries all positions from 0 to max_length
-- **Optimization**: Early termination when no matches found
-
-**Optimization Tips**:
-```sql
--- ✅ GOOD: Specific substring
-WHERE description LIKE '%wireless mouse%'
-
--- ⚠️ SLOWER: Very common substring
-WHERE description LIKE '%the%'
-
--- ✅ COMBINE with other filters
-WHERE description LIKE '%wireless%' 
-  AND category = 'Electronics'
-```
-
----
-
-### 5. Infix Match (Fast)
-
-**Pattern**: `'prefix%suffix'` - Anchored at both ends
-
-```sql
--- URL path matching
 SELECT * FROM urls WHERE path LIKE '/api/%/users';
-
--- Log filtering
-SELECT * FROM logs WHERE message LIKE 'ERROR%timeout';
-
--- Pattern with both anchors
-SELECT * FROM products WHERE name LIKE 'Wireless%Mouse';
 ```
 
-**Performance**:
-- **How it works**: Intersects prefix and suffix bitmaps
-- **Optimization**: Both anchors provide strong filtering
+### Positional wildcards: `'a_c'`, `'PROD-___-2024'`
 
-**Why it's fast**:
-```sql
--- Matches must:
--- 1. Start with "Wireless" (position 0)
--- 2. End with "Mouse" (using negative positions)
--- 3. Have length >= len("Wireless") + len("Mouse")
-WHERE name LIKE 'Wireless%Mouse'
-```
-
----
-
-### 6. Complex Multi-Part Patterns
-
-**Pattern**: Multiple `%` separators with concrete parts
+`_` fixes the position of the characters around it, and a pattern with no `%`
+also fixes the length. These patterns are evaluated as anchored patterns.
 
 ```sql
--- Multiple substrings
-SELECT * FROM products 
-WHERE name LIKE '%Wireless%RGB%Gaming%';
-
--- Log pattern matching
-SELECT * FROM logs 
-WHERE message LIKE 'ERROR%connection%timeout%retry';
-
--- Multiple conditions
-SELECT * FROM users 
-WHERE email LIKE '%admin%@%company%';
-```
-
-**Performance**:
-- **How it works**: Recursive windowed matching algorithm
-- **Optimization**: Each part must appear in sequence
-
-**Execution Strategy**:
-```
-Pattern: '%word1%word2%word3%'
-
-Steps:
-1. Find all positions where "word1" appears
-2. For each match, find "word2" after it
-3. For each of those, find "word3" after it
-4. Return only complete matches
-```
-
----
-
-### 7. Underscore Patterns (Position-Specific)
-
-**Pattern**: Using `_` for single-character wildcards
-
-```sql
--- Exactly 4 characters starting with "test"
-SELECT * FROM codes WHERE code LIKE 'test____';
-
--- Pattern with specific positions
 SELECT * FROM products WHERE sku LIKE 'PROD-___-2024';
-
--- First character wildcard
-SELECT * FROM words WHERE word LIKE '_ouse';
-
--- Mixed wildcards
-SELECT * FROM data WHERE value LIKE 'A_C%';
+SELECT * FROM words    WHERE word LIKE '_ouse';
 ```
 
-**Performance**:
-- **How it works**: Each `_` constrains exact length and positions
-- **Key insight**: `_` is NOT skipped - it's a position constraint!
+### Length predicates: `'_____'`, `'_____%'`
 
-**Important Distinction**:
+A pattern made only of `_` (optionally followed by `%`) is a length predicate
+and is answered from the length bitmaps in a single lookup.
+
 ```sql
--- These are DIFFERENT queries:
-
--- Match any 8-character string
-WHERE code LIKE '________'  -- Exact length filter
-
--- Match any string with length >= 0
-WHERE code LIKE '%%'  -- All non-null strings
-
--- Match 5+ character strings starting with "test"
-WHERE code LIKE 'test_%'  -- Length >= 5, prefix "test"
+SELECT * FROM codes WHERE code LIKE '________';    -- exactly 8 characters
+SELECT * FROM codes WHERE code LIKE '________%';   -- at least 8 characters
 ```
 
-**Optimization Examples**:
+Very unselective length predicates (for example, one that matches most of the
+table) are normally left to a sequential scan by the planner.
+
+### Unanchored infix: `'%abc%'`
+
+The part has no fixed position, so every candidate position must be
+considered. Cost grows with row count and roughly with the square of string
+length, and is largely independent of how many rows match. A more selective
+literal does not make the scan much cheaper.
+
 ```sql
--- ✅ FAST: Exact length known
-WHERE code LIKE '____'  -- Exactly 4 characters
-
--- ✅ FAST: Position constraints
-WHERE sku LIKE 'A___-___'  -- Specific format
-
--- ⚠️ SLOWER: Many underscores without anchors
-WHERE value LIKE '%_ab%c_%'  -- 5+ chars substring
+SELECT * FROM articles WHERE title LIKE '%postgres%';
 ```
+
+The planner prices these accordingly and will often choose a sequential scan
+or a `pg_trgm` GIN index instead. Check with `EXPLAIN`.
+
+### Multiple infix parts: `'%abc%def%'`
+
+Each additional part is a further constraint that prunes the search. Two
+infix parts are typically cheaper than one; three or more are costed higher
+than a single part.
+
+A pattern that also has a prefix or suffix, such as `'ERROR%timeout%'`, is
+priced on its anchor and is usually inexpensive regardless of the infix
+parts.
+
+### Match-all: `'%'`
+
+A pattern with no literal characters and no `_` matches every non-NULL value.
+The index offers no path for it, and the planner uses a sequential scan.
+
+### Empty pattern: `''`
+
+Matches only empty strings, answered from the length-0 bitmap.
 
 ---
 
-## Pure Wildcard Patterns (Fastest Special Cases)
+## Negation: `NOT LIKE` and `NOT ILIKE`
 
-Biscuit has special optimizations for patterns containing only wildcards:
+Negated patterns are evaluated as the complement of the positive match over
+the live, non-NULL rows. Following SQL semantics, `NULL NOT LIKE 'x'` is not
+true, so NULL values are never returned by either form.
 
-### Empty Pattern
 ```sql
-SELECT * FROM products WHERE name LIKE '';
--- Optimized to: length_bitmaps[0]
--- Returns: Only empty strings
+SELECT * FROM products WHERE name NOT LIKE '%test%';
 ```
 
-### Single Percent
-```sql
-SELECT * FROM products WHERE name LIKE '%';
--- Optimized to: All non-tombstoned records
--- Returns: Everything (except NULLs)
-```
-
-### Pure Underscores
-```sql
-SELECT * FROM codes WHERE code LIKE '____';
--- Optimized to: length_bitmaps[4]
--- Returns: Exactly 4-character strings
-```
-
-### Mixed Pure Wildcards
-```sql
--- Pattern: '%%%___%%'
--- Has: 5× '%' and 3× '_'
--- Optimized to: length_ge_bitmaps[3]
--- Returns: Strings with length >= 3
-
-SELECT * FROM data WHERE value LIKE '%_%_%_%';
--- Equivalent to: WHERE LENGTH(value) >= 3
-```
-
+A negated pattern usually matches most of the table. The planner will
+normally prefer a sequential scan unless the negation is combined with a
+selective positive predicate.
 
 ---
 
-## Pattern Optimization Strategies
+## Case-Insensitive Matching: `ILIKE`
 
-### Strategy 1: Maximize Concrete Characters
+`ILIKE` is evaluated against a separate set of case-folded structures, built
+by the default `biscuit_ops` and by `biscuit_ilike_ops`. The query is not
+rewritten, and no `lower()` expression index is required. For anchored
+patterns `ILIKE` performs comparably to the equivalent `LIKE`.
 
-```sql
--- ❌ SLOW: Too generic
-WHERE name LIKE '%a%'
+Notes:
 
--- ✅ FAST: More specific
-WHERE name LIKE '%wireless%'
-
--- ✅✅ FASTER: Very specific
-WHERE name LIKE '%wireless mouse pro%'
-```
-
-**Rule**: More concrete characters = better selectivity = faster query
-
----
-
-### Strategy 2: Use Strong Anchors
-
-```sql
--- ❌ SLOWER: No anchors
-WHERE name LIKE '%mouse%'
-
--- ✅ FASTER: Prefix anchor
-WHERE name LIKE 'Wireless%'
-
--- ✅✅ FASTEST: Both anchors
-WHERE name LIKE 'Wireless%Mouse'
-```
-
-**Anchor Strength**:
-1. Both prefix + suffix: ⭐⭐⭐⭐⭐
-2. Prefix only: ⭐⭐⭐⭐
-3. Suffix only: ⭐⭐⭐⭐
-4. No anchors: ⭐⭐
+* Case folding uses PostgreSQL's `lower()` under the database default
+  collation. The folded strings are stored in the index when rows are written,
+  so all backends and standbys evaluate the same folded values.
+* For unanchored `ILIKE` patterns, the case-insensitive path has additional
+  per-statement overhead and can be noticeably slower than the equivalent
+  `LIKE`. Where unanchored case-insensitive search is central to a workload,
+  compare against `pg_trgm`.
+* An index built with `biscuit_like_ops` is not considered for `ILIKE`, and
+  one built with `biscuit_ilike_ops` is not considered for `LIKE`.
 
 ---
 
-### Strategy 3: Minimize Partitions
+## Combining Predicates
+
+Several pattern predicates on the same index are evaluated together: the key
+estimated to be most selective runs first, and each later key only examines
+rows that are still candidates.
 
 ```sql
--- ❌ COMPLEX: 4 partitions
-WHERE message LIKE '%ERROR%failed%retry%timeout%'
-
--- ✅ SIMPLER: 2 partitions
-WHERE message LIKE '%ERROR%failed%'
-
--- ✅✅ SIMPLEST: 1 partition
-WHERE message LIKE '%ERROR failed%'
+SELECT * FROM logs
+WHERE message LIKE 'ERROR%'
+  AND message LIKE '%timeout%';
 ```
 
-**Rule**: Fewer `%` separators = faster matching
+Pairing an anchored predicate with an unanchored one therefore costs close to
+the anchored predicate alone, rather than the sum of both.
+
+`OR` across Biscuit-indexable predicates is handled by PostgreSQL with a
+`BitmapOr` of separate index scans. Biscuit predicates can also be combined
+with predicates served by other indexes (for example, a B-tree on a date
+column) through `BitmapAnd`.
 
 ---
 
-### Strategy 4: Combine with Other Indexes
+## Summary by Shape
 
-```sql
--- Use Biscuit with other filters
-SELECT * FROM products 
-WHERE category = 'Electronics'  -- B-tree index
-  AND name LIKE '%Mouse%';      -- Biscuit index
-
--- PostgreSQL combines both indexes efficiently
-```
-
----
-
-## Pattern Examples by Use Case
-
-### Email Filtering
-```sql
--- Domain-specific emails
-WHERE email LIKE '%@company.com'      -- Suffix (fast)
-
--- Admin emails
-WHERE email LIKE 'admin%'             -- Prefix (fast)
-
--- Specific pattern
-WHERE email LIKE 'admin%@company.com' -- Infix (very fast)
-```
-
-### SKU/Product Code Matching
-```sql
--- Year-based SKUs
-WHERE sku LIKE 'PROD-2024%'           -- Prefix (fast)
-
--- Category codes
-WHERE sku LIKE '%ELEC%'               -- Substring (moderate)
-
--- Format matching
-WHERE sku LIKE '____-____-____'       -- Underscores (fast)
-```
-
-### Log Searching
-```sql
--- Error messages
-WHERE message LIKE 'ERROR:%'          -- Prefix (fast)
-
--- Specific errors
-WHERE message LIKE '%timeout%'        -- Substring (moderate)
-
--- Complex patterns
-WHERE message LIKE 'ERROR%connection%timeout%'  -- Multi-part
-```
-
-### URL/Path Matching
-```sql
--- API routes
-WHERE path LIKE '/api/%'              -- Prefix (fast)
-
--- Specific endpoints
-WHERE path LIKE '/api/%/users'        -- Infix (fast)
-
--- File extensions
-WHERE path LIKE '%.jpg'               -- Suffix (fast)
-```
-
----
-
-## Case Sensitivity
-
-LIKE is case-sensitive by default. For case-insensitive matching use ILIKE:
-
-```sql
--- Create index
-CREATE INDEX idx_name ON products 
-USING biscuit (name);
-
--- Query with ILIKE (supported by versions >= 2.1.0)
-SELECT * FROM products 
-WHERE name ILIKE '%wireless%';
-```
-
-
----
-
-## Pattern Performance Hierarchy
-
-From fastest to slowest:
-
-1. ⚡⚡⚡⚡⚡ Pure wildcards (length-based)
-2. ⚡⚡⚡⚡⚡ Exact match
-3. ⚡⚡⚡⚡ Prefix patterns
-4. ⚡⚡⚡⚡ Suffix patterns
-5. ⚡⚡⚡⚡ Infix patterns (both anchors)
-6. ⚡⚡⚡⚡ Underscore patterns
-7. ⚡⚡⚡ Substring patterns
-8. ⚡⚡ Complex multi-part patterns
+| Shape | Example | Relative cost | Notes |
+|---|---|---|---|
+| Length only | `'________'` | Lowest | Single length-bitmap lookup |
+| Exact | `'abc'` | Low | Prefix positions plus exact length |
+| Prefix | `'abc%'` | Low | Fixed number of intersections |
+| Suffix | `'%abc'` | Low | Same cost as prefix |
+| Both anchored | `'abc%xyz'` | Low | Prefix, suffix and minimum length |
+| Positional `_` | `'a_c%'` | Low | Treated as anchored |
+| Anchored with infix parts | `'a%b%c'` | Low | Priced on the anchor |
+| Two infix parts | `'%ab%cd%'` | Moderate | Cheaper than a single infix part |
+| Single infix part | `'%abc%'` | High | Grows with rows × length² |
+| Three or more infix parts | `'%a%b%c%'` | Highest | Priced above a single part |
+| Match-all | `'%'` | — | Not served by the index |
 
 ---
 
 ## Next Steps
 
-- Learn about [Multi-Column Indexes](multicolumn.md)
--  Explore [Performance Tuning](performance.md)
--  Understand the [Architecture](architecture.md)
--  Check the [FAQ](faq.md)
+* [Regular Expressions](regex.md)
+* [Multi-Column Indexes](multicolumn.md)
+* [Performance and Operations](performance.md)
