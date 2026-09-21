@@ -2,3 +2,4 @@
 *.bc
 *.o
 *.zip
+docs/build/
