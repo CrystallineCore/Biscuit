@@ -95,7 +95,7 @@ pygments_style = "sphinx"
 # Canonical URL
 # =============================================================================
 
-html_baseurl = "https://biscuit.readthedocs.io/"
+html_baseurl = "https://biscuit.readthedocs.io/en/latest/"
 
 # =============================================================================
 # SEO Metadata
