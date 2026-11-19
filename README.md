@@ -69,66 +69,16 @@ is the better choice; the two are complementary.
 
 ---
 
-## What's new in 3.1.0
+## What's new in 3.1.1
 
-Regular-expression support, a set of correctness fixes that predate this
-release, and a new differential test suite. **No `REINDEX` is required** —
-there is no on-disk format change, so existing 3.0.0 indexes gain regex support
-as soon as the extension is updated:
+**PostgreSQL 19 support.** Biscuit now builds and runs against PostgreSQL 19,
+in addition to 16, 17 and 18. There is no on-disk format or SQL-level change
+and no `REINDEX` is needed. Install the new library and reconnect. Behaviour is
+identical to 3.1.0 on every supported version. See the
+[changelog](CHANGELOG.md#version-311) for the two PG 19 API changes involved.
 
-```sql
-ALTER EXTENSION biscuit UPDATE TO '3.1.0';
-```
-
-* **Regular-expression operators `~`, `!~`, `~*`, `!~*`.** Biscuit gains no
-  regex engine. A regex is rewritten at plan time into an equivalent `LIKE`
-  glob and evaluated by the existing positional bitmaps, so anchored regexes
-  inherit the same performance profile as the anchored `LIKE` patterns Biscuit
-  is already strongest at. The rewrite must be exact; anything that cannot be
-  proven exact is refused rather than approximated. See
-  [Regular expressions](#regular-expressions).
-* **Regexes outside the subset stay correct.** They are not accelerated: the
-  key is skipped, the executor rechecks the original regex, and the cost model
-  disables the path so the planner picks a sequential scan. An unsupported
-  regex costs nothing but the missed optimisation.
-
-### Correctness fixes
-
-All of these predate 3.1.0 and affect `LIKE`/`ILIKE` as much as regex. The
-[changelog](CHANGELOG.md#version-310) has reproductions.
-
-* **Index builds now go through `table_index_build_scan()`** instead of a
-  hand-rolled `SnapshotAny` heap scan. The old scan missed HOT-root mapping,
-  so an index built on a table that had been updated could return rows that do
-  not match the predicate — and `REINDEX` did not repair it. It also ignored
-  partial-index predicates, indexed dead tuples, and reported a row count that
-  skewed planning on nullable columns.
-* **Fixed anchored patterns losing rows after crash recovery.** Rows written
-  since the last checkpoint went missing from whole-string matches, while
-  prefix matches found them normally.
-* **Fixed anchored `LIKE`/`ILIKE` dropping its length constraint** when the
-  table contained no value of the pattern's exact length, which caused an
-  anchored pattern to behave as a bare prefix match.
-* **Fixed a use-after-free and double free in the pending-list snapshot**,
-  which typically surfaced as a "double free or corruption" abort during
-  `VACUUM`.
-* **Fixed disabled index paths still being chosen on PostgreSQL 18**, where
-  the planner now compares a disabled-node count ahead of cost, so pricing a
-  path out no longer disabled it.
-* **Fixed unlogged indexes being unreadable after a crash** — `ambuildempty()`
-  wrote nothing, leaving a zero-length index. It now writes a valid empty
-  metapage; see the changelog for the remaining `REINDEX` caveat.
-* **Fixed `-DHAVE_ROARING` being silently dropped from the build**, which
-  produced an extension linked against CRoaring but compiled with the fallback
-  bitmap. CRoaring is no longer auto-detected — link it with
-  `make WITH_ROARING=1`.
-
-### Testing
-
-The previous test scripts are replaced by a differential suite under `tests/`,
-run with `make test`. Every predicate is evaluated both through the index and
-through a sequential scan, and the two must agree on the rows returned, not
-merely on how many. See [Development](#development).
+`tests/run_all.sh` now looks for the server socket in `/var/run/postgresql` by
+default. For a source-built server listening in `/tmp`, set `PGHOST=/tmp`.
 
 ---
 
@@ -137,7 +87,7 @@ merely on how many. See [Development](#development).
 ### Requirements
 
 - Build tools: `gcc`, `make`, `pg_config`
-- PostgreSQL 16 or later
+- PostgreSQL 16, 17, 18 or 19
 - Recommended: the CRoaring library, for faster bitmap operations
 
 ### From source
@@ -524,6 +474,7 @@ Where practical, consider limiting or bucketing indexed length.
 
 | Capability | Supported | Notes |
 |---|---|---|
+| PostgreSQL versions | 16, 17, 18, 19 | Version differences are resolved at compile time |
 | WAL logging and crash recovery | Yes | |
 | Point-in-time recovery | Yes | Index state reconstructed from archived WAL |
 | Physical streaming replication | Yes | Standby serves index scans |
@@ -627,7 +578,10 @@ test` excludes it, and `SKIP_WAL=1` does the same for a direct
 `tests/run_all.sh` invocation.
 
 Standard libpq variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`) apply.
-`PGDATA` is needed only by the crash category and is discovered from the server
+Their defaults are `/var/run/postgresql`, `5432`, `postgres` and `postgres`.
+The `PGHOST` default is the socket directory used by Debian/Ubuntu and PGDG
+packages. A server built from source normally listens in `/tmp`, so set
+`PGHOST=/tmp` in that case. `PGDATA` is needed only by the crash category and is discovered from the server
 itself when unset.
 
 Changes to the scan or cache paths should also be accompanied by a

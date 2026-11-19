@@ -1,5 +1,46 @@
 # Biscuit Index Extension – Changelog
 
+## Version 3.1.1
+
+Adds support for building against PostgreSQL 19. PostgreSQL 16, 17 and 18
+continue to be supported and compile through the same code paths as in 3.1.0.
+
+**No `REINDEX` is required**, and there is no on-disk format or SQL-level
+change. Behaviour on every supported version is identical to 3.1.0.
+
+### Compatibility
+
+* **PostgreSQL 19 support.** Two internal APIs that Biscuit used were removed
+  in PG 19. Both are handled at compile time with `#if PG_VERSION_NUM` guards,
+  so builds against PG 16–18 are unchanged.
+
+  * **Collation provider for `~*`.** PG 19 removed
+    `pg_locale_struct.provider`, which the ICU check in
+    `biscuit_ci_regex_collation_safe()` relied on. On PG 19 the provider is
+    read from `pg_collation.collprovider`, or from `pg_database.datlocprovider`
+    for the default collation. The decision itself is unchanged.
+
+  * **Init-fork checksum.** PG 19 dropped `PageSetChecksumInplace()`, so
+    `biscuit_buildempty()` uses `PageSetChecksum()` there instead.
+
+### Testing
+
+* **`tests/run_all.sh` now defaults `PGHOST` to `/var/run/postgresql`**
+  instead of `/tmp`. The new default matches the socket directory that
+  Debian/Ubuntu packages and the PGDG packages use. A server built from source
+  usually listens in `/tmp`, so run the suite with `PGHOST=/tmp make test`
+  there. An explicitly set `PGHOST` always takes precedence.
+
+### Upgrade Notes
+
+From 3.1.0, install the new shared library. No `ALTER EXTENSION` or `REINDEX`
+is needed. A backend keeps the library it already loaded, so restart the server
+or recycle connections to pick up the new build everywhere.
+`SELECT biscuit_version();` reports `3.1.1` once a backend is running the new
+library.
+
+---
+
 ## Version 3.1.0
 
 Adds regular-expression support for the subset of patterns that can be
