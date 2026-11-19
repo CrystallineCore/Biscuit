@@ -2699,7 +2699,11 @@ biscuit_buildempty(Relation index)
     meta->pendlog_draining    = InvalidBlockNumber;
     memset(meta->reserved, 0, sizeof(meta->reserved));
 
+#if PG_VERSION_NUM >= 190000
+    PageSetChecksum(page, BISCUIT_METAPAGE_BLKNO);
+#else
     PageSetChecksumInplace(page, BISCUIT_METAPAGE_BLKNO);
+#endif
 
     smgrwrite(RelationGetSmgr(index), INIT_FORKNUM, BISCUIT_METAPAGE_BLKNO,
               page, true);

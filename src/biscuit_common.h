@@ -25,6 +25,8 @@
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "catalog/pg_type.h"
+#include "catalog/pg_collation.h"
+#include "catalog/pg_database.h"
 #include "utils/lsyscache.h"
 #include "utils/timestamp.h"
 #include "utils/date.h"

@@ -625,26 +625,62 @@ biscuit_glob_is_position_sensitive(const char *glob)
  * Unicode version, so this refuses the whole ICU + position-sensitive
  * combination rather than special-casing U+0130.
  */
+#if PG_VERSION_NUM >= 190000
+/*
+ * PG19 removed pg_locale_struct.provider; read the provider from the
+ * catalogs instead.
+ */
+static bool
+biscuit_collation_is_icu(Oid collid)
+{
+    HeapTuple   tp;
+    char        prov;
+
+    if (collid == DEFAULT_COLLATION_OID)
+    {
+        /* the "default" pg_collation row doesn't carry the real provider */
+        tp = SearchSysCache1(DATABASEOID, ObjectIdGetDatum(MyDatabaseId));
+        if (!HeapTupleIsValid(tp))
+            return false;
+        prov = ((Form_pg_database) GETSTRUCT(tp))->datlocprovider;
+    }
+    else
+    {
+        tp = SearchSysCache1(COLLOID, ObjectIdGetDatum(collid));
+        if (!HeapTupleIsValid(tp))
+            return false;
+        prov = ((Form_pg_collation) GETSTRUCT(tp))->collprovider;
+    }
+    ReleaseSysCache(tp);
+    return prov == COLLPROVIDER_ICU;
+}
+#endif
+
 bool
 biscuit_ci_regex_collation_safe(Oid collation, const char *glob)
 {
     pg_locale_t locale;
+    bool        is_icu;
 
     if (!OidIsValid(collation))
         collation = DEFAULT_COLLATION_OID;
 
     locale = pg_newlocale_from_collation(collation);
 
-    /* NULL locale means "C"/"POSIX": deterministic, byte-for-byte, no
-     * case-folding at all beyond plain ASCII -- safe unconditionally. */
+    /* NULL locale means "C"/"POSIX": safe unconditionally. */
     if (locale == NULL)
         return true;
 
     if (!locale->deterministic)
         return false;
 
-    if (locale->provider == COLLPROVIDER_ICU &&
-        biscuit_glob_is_position_sensitive(glob))
+#if PG_VERSION_NUM >= 190000
+    is_icu = biscuit_collation_is_icu(collation);
+#else
+    is_icu = (locale->provider == COLLPROVIDER_ICU);
+#endif
+
+    if (is_icu && biscuit_glob_is_position_sensitive(glob))
         return false;
 
     return true;
