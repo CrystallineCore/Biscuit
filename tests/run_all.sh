@@ -44,7 +44,7 @@ PGBIN="${PGBIN:-}"
 PSQL="${PGBIN:+$PGBIN/}psql"
 PG_CTL="${PGBIN:+$PGBIN/}pg_ctl"
 
-export PGHOST="${PGHOST:-/tmp}"
+export PGHOST="${PGHOST:-/var/run/postgresql}"
 export PGPORT="${PGPORT:-5432}"
 export PGUSER="${PGUSER:-postgres}"
 export PGDATABASE="${PGDATABASE:-postgres}"
