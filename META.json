@@ -1,7 +1,7 @@
 {
   "name": "biscuit",
   "abstract": "A bitmap-based index for wildcard pattern matching",
-  "description": "Biscuit is a bitmap-based index access method for accelerating LIKE and ILIKE pattern matching in PostgreSQL. The project is actively developed and seeking broader testing across diverse workloads.",
+  "description": "Biscuit is a bitmap-based index access method that accelerates LIKE and ILIKE pattern matching in PostgreSQL, plus regular expressions that reduce exactly to a LIKE pattern. It is strongest on anchored patterns, '_' wildcards and length predicates, and supports multi-column indexes.",
   "version": "3.1.1",
   "maintainer": [
     "Sivaprasad Murali <sivaprasad.off@gmail.com>"
@@ -14,25 +14,13 @@
       "version": "3.1.1"
     }
   },
-  "tags": [
-    "bitmap",
-    "bitmap-index",
-    "indexing",
-    "search",
-    "access method",
-    "index",
-    "like",
-    "ilike",
-    "pattern-matching",
-    "wildcard",
-    "text-search",
-    "multi-column",
-    "deterministic",
-    "postgresql extension",
-    "access-method",
-    "iam",
-    "index-access-method"
-  ],
+  "prereqs": {
+    "runtime": {
+      "requires": {
+        "PostgreSQL": "16.0.0"
+      }
+    }
+  },
   "release_status": "stable",
   "resources": {
     "homepage": "https://github.com/crystallinecore/biscuit",
@@ -40,10 +28,27 @@
       "url": "https://github.com/crystallinecore/biscuit",
       "web": "https://github.com/crystallinecore/biscuit",
       "type": "git"
+    },
+    "bugtracker": {
+      "web": "https://github.com/crystallinecore/biscuit/issues"
     }
   },
-  "x_requires": {
-    "PostgreSQL": ">=16.0"
+  "tags": [
+    "index",
+    "access method",
+    "bitmap",
+    "like",
+    "ilike",
+    "regex",
+    "pattern matching",
+    "wildcard",
+    "text search",
+    "multi-column"
+  ],
+  "no_index": {
+    "directory": [
+      "tests"
+    ]
   },
   "meta-spec": {
     "version": "1.0.0",
