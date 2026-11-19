@@ -1,5 +1,5 @@
 # biscuit extension control file
 comment = 'bitmap-based index for wildcard pattern matching'
-default_version = '3.1.0'
+default_version = '3.1.1'
 module_pathname = '$libdir/biscuit'
 relocatable = false
