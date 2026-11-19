@@ -5,19 +5,18 @@
 # the numbered category files).
 
 EXTENSION   = biscuit
-EXTVERSION  = 3.1.0
+EXTVERSION  = 3.1.1
 
 MODULE_big  = biscuit
 
 # Built from every .c under src/ so a newly added module is picked up
-# automatically. biscuit_regex.c (the regex -> glob decomposer) is the
-# addition for this version; if you prefer an explicit OBJS list instead,
-# biscuit_regex.o must appear in it.
+# automatically.
 OBJS = $(patsubst %.c,%.o,$(wildcard src/*.c))
 
 # Fresh install plus the no-REINDEX upgrade path from 3.0.0.
 DATA = sql/biscuit--$(EXTVERSION).sql \
-       sql/biscuit--3.0.0--3.1.0.sql
+       sql/biscuit--3.0.0--3.1.0.sql \
+       sql/biscuit--3.1.0--3.1.1.sql
 
 # -----------------------------------------------------------------------
 # Compiler / linker flags
@@ -150,7 +149,7 @@ check-wal:
 # the suite passes and the run still ends with PGXS's refusal message. Same
 # applies to `installcheck`. Use names pgxs.mk does not own.
 .PHONY: test
-test: check-suite
+test: check-suite-nowal
 
 .PHONY: test-all check-all
 test-all check-all: check-suite
